@@ -1,0 +1,85 @@
+name: Package Framecycler
+
+on:
+  # Allows manual triggers from the Actions tab on GitHub
+  workflow_dispatch:
+
+  # Optional: Also build when a release version tag is pushed
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build & Package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            sep: ";"
+            ext: "pyd"
+          - os: macos-latest
+            sep: ":"
+            ext: "so"
+          - os: ubuntu-latest
+            sep: ":"
+            ext: "so"
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install System Dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Compile Native C++ Core
+        run: python build.py
+
+      - name: Freeze Application with PyInstaller
+        run: |
+          pyinstaller --noconfirm --windowed --name=Framecycler \
+            --add-data "src/framecycler/color/studio_config${{ matrix.sep }}framecycler/color/studio_config" \
+            --add-binary "src/framecycler/framecycler_engine*.${{ matrix.ext }}${{ matrix.sep }}framecycler" \
+            src/framecycler/__main__.py
+
+      # Windows zip packaging
+      - name: Package Windows Artifacts
+        if: matrix.os == 'windows-latest'
+        run: |
+          Compress-Archive -Path dist/Framecycler -DestinationPath dist/Framecycler-Windows.zip
+
+      # macOS zip packaging
+      - name: Package macOS Artifacts
+        if: matrix.os == 'macos-latest'
+        run: |
+          zip -r dist/Framecycler-macOS.zip dist/Framecycler.app
+
+      # Linux zip packaging
+      - name: Package Linux Artifacts
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          tar -czvf dist/Framecycler-Linux.tar.gz -C dist/ Framecycler
+
+      # Upload Build Artifacts
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Framecycler-Build-${{ matrix.os }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
