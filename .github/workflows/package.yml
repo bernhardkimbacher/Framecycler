@@ -57,11 +57,11 @@ jobs:
       - name: Freeze Application with PyInstaller
         run: ${{ matrix.python }} -m PyInstaller --noconfirm --windowed --name=Framecycler --add-data "src/framecycler/color/studio_config${{ matrix.sep }}framecycler/color/studio_config" --add-binary "src/framecycler/framecycler_engine*.${{ matrix.ext }}${{ matrix.sep }}framecycler" src/framecycler/__main__.py
 
-      # Windows zip packaging
-      - name: Package Windows Artifacts
+      # Windows Installer Packaging
+      - name: Package Windows Installer
         if: matrix.os == 'windows-latest'
         run: |
-          Compress-Archive -Path dist/Framecycler -DestinationPath dist/Framecycler-Windows.zip
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 
       # macOS zip packaging
       - name: Package macOS Artifacts
@@ -83,3 +83,4 @@ jobs:
           path: |
             dist/*.zip
             dist/*.tar.gz
+            dist/*Installer.exe
