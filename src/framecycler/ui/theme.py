@@ -65,6 +65,12 @@ def get_viewfinder_stylesheet() -> str:
         color: #00ff00;
     }
     
+    QPushButton:checked {
+        background-color: #1e3f1e;
+        color: #00ff00;
+        border-color: #00ff00;
+    }
+    
     QSlider::groove:horizontal {
         height: 4px;
         background: #333333;
@@ -95,6 +101,14 @@ def get_viewfinder_stylesheet() -> str:
     
     QComboBox::drop-down {
         border: none;
+    }
+    
+    QComboBox QAbstractItemView {
+        background-color: #1a1a1a;
+        color: #ffffff;
+        selection-background-color: #333333;
+        selection-color: #00ff00;
+        border: 1px solid #2d2d2d;
     }
     
     QStatusBar {
