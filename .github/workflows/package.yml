@@ -21,12 +21,15 @@ jobs:
           - os: windows-latest
             sep: ";"
             ext: "pyd"
+            python: "python"
           - os: macos-latest
             sep: ":"
             ext: "so"
+            python: "python3"
           - os: ubuntu-latest
             sep: ":"
             ext: "so"
+            python: "python3"
 
     steps:
       - name: Checkout Code
@@ -45,15 +48,15 @@ jobs:
 
       - name: Install Python Dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller
+          ${{ matrix.python }} -m pip install --upgrade pip
+          ${{ matrix.python }} -m pip install -r requirements.txt pyinstaller
 
       - name: Compile Native C++ Core
-        run: python build.py
+        run: ${{ matrix.python }} build.py
 
       - name: Freeze Application with PyInstaller
         run: |
-          pyinstaller --noconfirm --windowed --name=Framecycler \
+          ${{ matrix.python }} -m PyInstaller --noconfirm --windowed --name=Framecycler \
             --add-data "src/framecycler/color/studio_config${{ matrix.sep }}framecycler/color/studio_config" \
             --add-binary "src/framecycler/framecycler_engine*.${{ matrix.ext }}${{ matrix.sep }}framecycler" \
             src/framecycler/__main__.py
