@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+
+# C++ Build outputs
+build/
+bin/
+lib/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+
+# Editor settings
+.vscode/
+.idea/
+
+# Testing
+tests_config_temp/

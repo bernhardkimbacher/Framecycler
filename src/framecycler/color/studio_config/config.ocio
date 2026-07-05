@@ -1,0 +1,156 @@
+ocio_profile_version: 2.2
+
+environment:
+  {}
+
+search_path: luts
+
+roles:
+  color_picking: sRGB - Texture
+  color_timing: ACEScg
+  compositing_log: ACEScg
+  data: Raw
+  default: ACEScg
+  matte_paint: sRGB - Texture
+  rendering: ACEScg
+  scene_linear: ACEScg
+  texture_paint: sRGB - Texture
+
+displays:
+  sRGB:
+    - !<View> {name: sRGB View, colorspace: sRGB - Texture}
+    - !<View> {name: ACEScg Linear, colorspace: ACEScg}
+    - !<View> {name: Raw, colorspace: Raw}
+  Rec.709:
+    - !<View> {name: Rec.709 View, colorspace: Rec.709 - Texture}
+    - !<View> {name: Raw, colorspace: Raw}
+
+active_displays: [sRGB, Rec.709]
+active_views: [sRGB View, Rec.709 View, ACEScg Linear, Raw]
+
+colorspaces:
+  - !<ColorSpace>
+    name: Raw
+    family: Raw
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      Raw data pass-through
+    isdata: true
+    allocation: uniform
+
+  - !<ColorSpace>
+    name: ACEScg
+    family: ACES
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      ACEScg scene-linear space
+    isdata: false
+    allocation: uniform
+
+  - !<ColorSpace>
+    name: sRGB - Texture
+    family: Display
+    equalitygroup: ""
+    bitdepth: 8ui
+    description: |
+      Standard sRGB texture / monitor space
+    isdata: false
+    allocation: uniform
+    to_scene_reference: !<MatrixTransform> {matrix: [0.4124, 0.3576, 0.1805, 0, 0.2126, 0.7152, 0.0722, 0, 0.0193, 0.1192, 0.9505, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Rec.709 - Texture
+    family: Display
+    equalitygroup: ""
+    bitdepth: 8ui
+    description: |
+      Rec.709 HDTV display space
+    isdata: false
+    allocation: uniform
+    to_scene_reference: !<MatrixTransform> {matrix: [0.4124, 0.3576, 0.1805, 0, 0.2126, 0.7152, 0.0722, 0, 0.0193, 0.1192, 0.9505, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: ARRI Alexa LogC3
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      ARRI Alexa LogC3 (EI800) Wide Gamut
+    isdata: false
+    allocation: uniform
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<BuiltinTransform> {style: "ARRI_ALEXA-LOGC-EI800-AWG_to_ACES2065-1"}
+        - !<BuiltinTransform> {style: "ACEScg_to_ACES2065-1", direction: inverse}
+
+  - !<ColorSpace>
+    name: ARRI LogC4
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      ARRI LogC4
+    isdata: false
+    allocation: uniform
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<BuiltinTransform> {style: "ARRI_LOGC4_to_ACES2065-1"}
+        - !<BuiltinTransform> {style: "ACEScg_to_ACES2065-1", direction: inverse}
+
+  - !<ColorSpace>
+    name: Cineon (ADX10)
+    family: Film
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      Cineon Film Printing Density (ADX10)
+    isdata: false
+    allocation: uniform
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<BuiltinTransform> {style: "ADX10_to_ACES2065-1"}
+        - !<BuiltinTransform> {style: "ACEScg_to_ACES2065-1", direction: inverse}
+
+  - !<ColorSpace>
+    name: Sony S-Log3
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      Sony S-Log3 S-Gamut3
+    isdata: false
+    allocation: uniform
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<BuiltinTransform> {style: "SONY_SLOG3-SGAMUT3_to_ACES2065-1"}
+        - !<BuiltinTransform> {style: "ACEScg_to_ACES2065-1", direction: inverse}
+
+  - !<ColorSpace>
+    name: Panasonic V-Log
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      Panasonic V-Log V-Gamut
+    isdata: false
+    allocation: uniform
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<BuiltinTransform> {style: "PANASONIC_VLOG-VGAMUT_to_ACES2065-1"}
+        - !<BuiltinTransform> {style: "ACEScg_to_ACES2065-1", direction: inverse}
+
+  - !<ColorSpace>
+    name: RED Log3G10
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      RED Log3G10 REDWideGamutRGB
+    isdata: false
+    allocation: uniform
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<BuiltinTransform> {style: "RED_LOG3G10-RWG_to_ACES2065-1"}
+        - !<BuiltinTransform> {style: "ACEScg_to_ACES2065-1", direction: inverse}
