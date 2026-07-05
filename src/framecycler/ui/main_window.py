@@ -23,7 +23,7 @@ from .settings_dialog import SettingsDialog
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Framecycler // VFX Review")
+        self.setWindowTitle("Framecycler")
         self.resize(1200, 800)
         
         # Load stylesheet
