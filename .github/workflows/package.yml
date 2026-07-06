@@ -112,8 +112,7 @@ jobs:
           vpk pack \
             -u com.bernhardkimbacher.framecycler-reboot \
             -v ${{ steps.version.outputs.version }} \
-            -p dist/Framecycler.app/Contents \
-            -e Framecycler \
+            -p dist/Framecycler.app \
             -c osx \
             --bundleId com.bernhardkimbacher.framecycler-reboot \
             --icon assets/icons/app_icon.icns
