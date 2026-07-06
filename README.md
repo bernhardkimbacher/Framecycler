@@ -23,7 +23,7 @@ graph TD
 ```
 
 ### Key Subsystem Division
-* **Python Layer**: Handles UI layouts, transport timer loops, metadata caching logic, background thread pre-fetching files loading (OpenCV for EXR/DPX, PyAV for QuickTime), and custom extension modules.
+* **Python Layer**: Handles UI layouts, transport timer loops, metadata caching logic, background thread pre-fetching files loading (OpenImageIO for EXR/DPX, PyAV for QuickTime), and custom extension modules.
 * **C++ Core Module (`framecycler_engine`)**: Written in C++20. Manages the contiguous raw frame memory cache blocks, LRU-based buffer recycling, and low-level GPU texture uploads / OpenGL shader rendering.
 
 ---
@@ -77,7 +77,7 @@ This enables the PySide6 UI and OpenGL paint loop to reference the raw C++ buffe
 
 Located in `src/framecycler/decoders/`.
 
-Supported formats: **EXR** (`exr_decoder.py`, OpenCV), **DPX** (`dpx_decoder.py`, OpenCV), and **QuickTime/MPEG-4** (`qt_decoder.py`, PyAV/FFmpeg).
+Supported formats: **EXR** (`exr_decoder.py`, OpenImageIO), **DPX** (`dpx_decoder.py`, OpenImageIO), and **QuickTime/MPEG-4** (`qt_decoder.py`, PyAV/FFmpeg).
 
 ### A. Sequence Detection & Drop-in Handlers
 When a single file is opened or dropped onto the application, `_find_sequence_from_single_file` inside `base.py` automatically parses its index pattern (e.g., `MOC_CAS_0010.0993.exr` $\rightarrow$ `MOC_CAS_0010.####.exr`), locates the directory, filters files matching that sequence name, and loads the sequence as a contiguous timeline starting at its absolute frame index.
@@ -91,17 +91,87 @@ When a single file is opened or dropped onto the application, `_find_sequence_fr
 
 ## 5. OCIO Color Pipeline
 
-Located in `src/framecycler/color/`.
+Located in `src/framecycler/color/` (`ocio_manager.py`) with the default studio configuration in `src/framecycler/color/studio_config/config.ocio`.
 
-* **Version Profile**: The default configuration was upgraded to **OCIO profile version 2.2** to support modern BuiltinTransform styles.
-* **API Version Compatibility**: Uses a dual-path pipeline check. If the modern PyOpenColorIO iterator API is present (`get3DTextures` / `getTextures`), it loops over `Texture3D` objects directly using properties like `edgeLen` and `getValues()`. If run in legacy environments, it falls back to index-based queries (`getNum3DTextures`).
-* **Camera Log Color Spaces**: Built-in support was added for standard camera configurations mapped directly to the linear reference space `ACEScg` via ACES built-in transformations:
-  * **ARRI Alexa LogC3**
-  * **ARRI LogC4**
-  * **Cineon (ADX10)**
-  * **Sony S-Log3**
-  * **Panasonic V-Log**
-  * **RED Log3G10**
+### A. Configuration Loading Priority
+
+On startup (and when **File → Settings…** is accepted), `OCIOManager` resolves the active OCIO config in this order:
+
+| Priority | Source | Notes |
+| :--- | :--- | :--- |
+| **1** | `OCIO` environment variable | Standard OpenColorIO env var. Must point to an existing `.ocio` file. |
+| **2** | Settings file path | Optional path saved in **File → Settings… → Custom OCIO Configuration File**. |
+| **3** | Bundled studio config | Shipped default at `color/studio_config/config.ocio`. |
+
+If a higher-priority source is set but fails to load (missing file, parse error), the manager falls through to the next source. If all sources fail, the app runs in passthrough mode (`Raw` only).
+
+**Examples:**
+
+```bash
+# macOS / Linux — studio config from the shell (highest priority)
+export OCIO=/show/configs/project.ocio
+python -m src.framecycler
+```
+
+```powershell
+# Windows PowerShell
+$env:OCIO = "D:\show\configs\project.ocio"
+python -m src.framecycler
+```
+
+To persist a config path without setting the env var each session, enter it in **File → Settings…** and click **OK**. The path is saved to `~/.framecycler/settings.json` under `ocio_config_path`.
+
+### B. Bundled Studio Configuration
+
+The default config uses **OCIO profile version 2.2** and defines:
+
+* **Reference / working space**: `ACEScg` (via the `rendering` and `scene_linear` roles)
+* **Display views**: `sRGB View`, `Rec.709 View`, `ACEScg Linear`, and `Raw`
+* **Looks**: e.g. `ARRI LogC3 to Rec709`, `ARRI LogC4 to Rec709`
+* **LUT search path**: `luts/` relative to the config file
+
+Supported camera log color spaces mapped to the linear reference space include:
+
+* **ARRI Alexa LogC3**
+* **ARRI LogC4**
+* **Cineon (ADX10)**
+* **Sony S-Log3**
+* **Panasonic V-Log**
+* **RED Log3G10**
+
+### C. Runtime Pipeline Controls
+
+The **OCIO** menu exposes the active config at runtime:
+
+* **Input Color Space** — source interpretation for loaded media (default `ACEScg` when present in the config)
+* **Look** — optional creative transform, or **None (Bypass)**
+* **Display Output** — `Raw`, `sRGB`, or `Rec709`
+* **Load Custom LUT…** — inject a `.cube` file as a file transform in the GPU pipeline
+
+The viewport header shows the current pipeline state, e.g. `IN: ARRI Alexa LogC3 | OUT: sRGB (sRGB View)`.
+
+### D. Automatic Input Color Space Detection
+
+When media is loaded into Slot A, the app attempts to set the input color space automatically from:
+
+1. **Metadata** — EXR/QuickTime color tags, DPX transfer characteristic, etc.
+2. **Filename hints** — e.g. `plate_logc3.####.exr`, `comp_acescg.exr`
+3. **File extension fallbacks** — e.g. `.exr` → `ACEScg`, `.dpx` → `Cineon (ADX10)`, `.mov` → `Rec.709 - Texture`
+
+Detected spaces are validated against the active OCIO config; unknown values fall back to `Raw` or the config’s default role.
+
+### E. GPU Shader Compilation
+
+Color transforms are compiled to GLSL by PyOpenColorIO and injected into the C++ `GLRenderer` fragment shader (`ocio_color_transform`). The pipeline includes:
+
+* Input color space → working space conversion
+* Interactive grading (CDL exposure / gamma / offset from the **Tools → Grading** menu)
+* Optional look or custom LUT
+* Display output encoding (`sRGB`, Rec.709 gamma, or passthrough `Raw`)
+
+**API compatibility**: Uses a dual-path LUT upload. If the modern PyOpenColorIO iterator API is present (`get3DTextures` / `getTextures`), it reads `Texture3D` objects via `edgeLen` and `getValues()`. Legacy builds fall back to index-based queries (`getNum3DTextures`).
+
+LUT grids are uploaded to GPU 3D textures and sampled in the fragment shader during each viewport draw.
 
 ---
 

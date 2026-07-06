@@ -17,31 +17,42 @@ class OCIOManager:
         
         self.load_config(custom_config_path)
 
+    @staticmethod
+    def _bundled_config_path() -> str:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(current_dir, "studio_config", "config.ocio")
+
+    def _try_load_config_from_file(self, path: str, source_label: str) -> bool:
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            self.config = OCIO.Config.CreateFromFile(path)
+            self.config_path = path
+            print(f"Loaded OCIO Config from {source_label}: {self.config_path}")
+            return True
+        except Exception as e:
+            print(f"Failed to load OCIO config from {source_label} '{path}': {e}")
+            return False
+
     def load_config(self, custom_config_path=""):
         config_loaded = False
-        
-        # 1. Try custom config path first
-        if custom_config_path and os.path.exists(custom_config_path):
-            try:
-                self.config = OCIO.Config.CreateFromFile(custom_config_path)
-                self.config_path = custom_config_path
-                config_loaded = True
-                print(f"Loaded OCIO Config from: {self.config_path}")
-            except Exception as e:
-                print(f"Failed to load custom OCIO config '{custom_config_path}': {e}. Falling back to bundled config...")
-                
-        # 2. Try bundled config if custom failed or wasn't specified
+
+        # 1. OCIO environment variable
+        env_path = os.environ.get("OCIO", "").strip()
+        if env_path:
+            config_loaded = self._try_load_config_from_file(env_path, "OCIO environment variable")
+
+        # 2. Settings path
         if not config_loaded:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            bundled_path = os.path.join(current_dir, "studio_config", "config.ocio")
+            settings_path = (custom_config_path or "").strip()
+            if settings_path:
+                config_loaded = self._try_load_config_from_file(settings_path, "settings")
+
+        # 3. Bundled config
+        if not config_loaded:
+            bundled_path = self._bundled_config_path()
             if os.path.exists(bundled_path):
-                try:
-                    self.config = OCIO.Config.CreateFromFile(bundled_path)
-                    self.config_path = bundled_path
-                    config_loaded = True
-                    print(f"Loaded bundled OCIO Config from: {self.config_path}")
-                except Exception as e:
-                    print(f"Failed to load bundled OCIO config: {e}")
+                config_loaded = self._try_load_config_from_file(bundled_path, "bundled default")
             else:
                 print(f"Bundled OCIO config not found at: {bundled_path}")
                 

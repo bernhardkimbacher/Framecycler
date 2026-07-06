@@ -1,18 +1,58 @@
 import unittest
 import os
+import shutil
 import tempfile
+from unittest.mock import patch
+
 from src.framecycler.color.ocio_manager import OCIOManager
 
 class TestOCIOManager(unittest.TestCase):
     def setUp(self):
+        self._env_patch = patch.dict(os.environ, {}, clear=False)
+        self._env_patch.start()
+        os.environ.pop("OCIO", None)
         # We initialize the manager with default bundled config
         self.ocio_mgr = OCIOManager()
+
+    def tearDown(self):
+        self._env_patch.stop()
 
     def test_initial_state(self):
         self.assertIsNotNone(self.ocio_mgr.config)
         self.assertEqual(self.ocio_mgr.input_colorspace, "ACEScg")
         self.assertIsNone(self.ocio_mgr.look)
         self.assertEqual(self.ocio_mgr.display_output, "sRGB")
+
+    def test_load_config_prefers_ocio_env_over_settings(self):
+        bundled_path = OCIOManager._bundled_config_path()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_config = os.path.join(tmp_dir, "env_config.ocio")
+            settings_config = os.path.join(tmp_dir, "settings_config.ocio")
+            shutil.copy(bundled_path, env_config)
+            shutil.copy(bundled_path, settings_config)
+
+            with patch.dict(os.environ, {"OCIO": env_config}, clear=False):
+                mgr = OCIOManager(settings_config)
+
+            self.assertEqual(os.path.abspath(mgr.config_path), os.path.abspath(env_config))
+
+    def test_load_config_uses_settings_when_env_unset(self):
+        bundled_path = OCIOManager._bundled_config_path()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings_config = os.path.join(tmp_dir, "settings_config.ocio")
+            shutil.copy(bundled_path, settings_config)
+
+            os.environ.pop("OCIO", None)
+            mgr = OCIOManager(settings_config)
+
+            self.assertEqual(os.path.abspath(mgr.config_path), os.path.abspath(settings_config))
+
+    def test_load_config_uses_bundled_when_env_and_settings_unset(self):
+        os.environ.pop("OCIO", None)
+        mgr = OCIOManager("")
+        bundled_path = OCIOManager._bundled_config_path()
+
+        self.assertEqual(os.path.abspath(mgr.config_path), os.path.abspath(bundled_path))
 
     def test_get_colorspaces(self):
         colorspaces = self.ocio_mgr.get_colorspaces()
