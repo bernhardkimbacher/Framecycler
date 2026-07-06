@@ -1,0 +1,42 @@
+name: OIIO Spike
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "scripts/oiio_spike.py"
+      - ".github/workflows/oiio-spike.yml"
+      - "requirements-oiio-spike.txt"
+
+jobs:
+  spike:
+    name: OIIO spike (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            python: python
+          - os: macos-latest
+            python: python3
+          - os: ubuntu-latest
+            python: python3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install spike dependencies
+        run: |
+          ${{ matrix.python }} -m pip install --upgrade pip
+          ${{ matrix.python }} -m pip install -r requirements-oiio-spike.txt
+
+      - name: Run OIIO spike
+        run: ${{ matrix.python }} scripts/oiio_spike.py
