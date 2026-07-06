@@ -8,6 +8,15 @@ from .core.logging_config import setup_logging
 from .core.version import get_application_version
 
 def main():
+    # Create Qt first so the dock/taskbar icon is set before heavier startup work.
+    app = QApplication(sys.argv)
+    app.setApplicationName("Framecycler Reboot")
+    app.setApplicationVersion(get_application_version())
+
+    app_icon = load_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
+
     # Initialize global logging tool (writing to standard OS paths and console)
     setup_logging()
 
@@ -21,14 +30,6 @@ def main():
     fmt.setDepthBufferSize(24)
     fmt.setColorSpace(QSurfaceFormat.DefaultColorSpace)
     QSurfaceFormat.setDefaultFormat(fmt)
-    
-    app = QApplication(sys.argv)
-    app.setApplicationName("Framecycler Reboot")
-    app.setApplicationVersion(get_application_version())
-
-    app_icon = load_app_icon()
-    if not app_icon.isNull():
-        app.setWindowIcon(app_icon)
 
     # Custom dark styling and dropdown color correction
     app.setStyleSheet("""

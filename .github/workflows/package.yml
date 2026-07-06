@@ -49,7 +49,7 @@ jobs:
       - name: Install Python Dependencies
         run: |
           ${{ matrix.python }} -m pip install --upgrade pip
-          ${{ matrix.python }} -m pip install -r requirements.txt pyinstaller pybind11
+          ${{ matrix.python }} -m pip install -r requirements.txt pyinstaller pybind11 pillow
 
       - name: Compile Native C++ Core
         run: ${{ matrix.python }} build.py
@@ -57,8 +57,31 @@ jobs:
       - name: Generate Build Version Metadata
         run: ${{ matrix.python }} scripts/generate_version.py
 
+      - name: Generate Platform Bundle Icons
+        run: ${{ matrix.python }} scripts/generate_platform_icons.py
+
       - name: Freeze Application with PyInstaller
-        run: ${{ matrix.python }} -m PyInstaller --noconfirm --windowed --name=Framecycler --add-data "src/framecycler/color/studio_config${{ matrix.sep }}framecycler/color/studio_config" --add-data "assets/icons${{ matrix.sep }}assets/icons" --add-binary "src/framecycler/framecycler_engine*.${{ matrix.ext }}${{ matrix.sep }}framecycler" src/framecycler/__main__.py
+        shell: bash
+        run: |
+          ICON="assets/icons/app_icon_512.png"
+          if [[ "${{ matrix.os }}" == "macos-latest" && -f assets/icons/app_icon.icns ]]; then
+            ICON="assets/icons/app_icon.icns"
+          elif [[ "${{ matrix.os }}" == "windows-latest" && -f assets/icons/app_icon.ico ]]; then
+            ICON="assets/icons/app_icon.ico"
+          fi
+          ${{ matrix.python }} -m PyInstaller --clean --noconfirm --windowed --name=Framecycler \
+            --icon "$ICON" \
+            --add-data "src/framecycler/color/studio_config${{ matrix.sep }}framecycler/color/studio_config" \
+            --add-data "assets/icons${{ matrix.sep }}assets/icons" \
+            --add-binary "src/framecycler/framecycler_engine*.${{ matrix.ext }}${{ matrix.sep }}framecycler" \
+            src/framecycler/__main__.py
+
+      - name: Set macOS Bundle Display Name
+        if: matrix.os == 'macos-latest'
+        run: |
+          PLIST="dist/Framecycler.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'Framecycler Reboot'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName 'Framecycler Reboot'" "$PLIST"
 
       # Windows Installer Packaging
       - name: Package Windows Installer

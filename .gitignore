@@ -5,6 +5,9 @@ __pycache__/
 *.pyd
 .venv/
 src/framecycler/_version.py
+assets/icons/app_icon.ico
+assets/icons/app_icon.icns
+assets/icons/app_icon.iconset/
 
 # C++ Build outputs
 build/

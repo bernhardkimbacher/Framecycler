@@ -1,4 +1,5 @@
 import os
+import sys
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QFileDialog, QMenuBar, QMenu, QPushButton, 
                              QComboBox, QLabel, QDockWidget, QSlider)
@@ -277,9 +278,14 @@ class MainWindow(QMainWindow):
         
         # Help menu
         help_menu = menubar.addMenu("&Help")
-        act_about = QAction("About", self)
+        act_about = QAction("About Framecycler Reboot", self)
+        act_about.setMenuRole(QAction.MenuRole.NoRole)
         act_about.triggered.connect(self._show_about_dialog)
         help_menu.addAction(act_about)
+        if sys.platform == "darwin":
+            act_about_native = QAction("About Framecycler Reboot", self)
+            act_about_native.setMenuRole(QAction.MenuRole.AboutRole)
+            act_about_native.triggered.connect(self._show_about_dialog)
         act_view_logs = QAction("View Logs", self)
         act_view_logs.triggered.connect(self._show_log_viewer)
         help_menu.addAction(act_view_logs)
