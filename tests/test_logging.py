@@ -32,4 +32,5 @@ class TestLogging(unittest.TestCase):
         
         with open(log_file, "r", encoding="utf-8") as f:
             content = f.read()
+            self.assertIn("NEW SESSION", content)
             self.assertIn("Stdout interception test message", content)

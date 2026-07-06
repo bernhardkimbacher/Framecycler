@@ -1,6 +1,9 @@
 import os
 import sys
 import logging
+from datetime import datetime
+
+from .version import get_application_version
 
 def get_log_file_path():
     app_name = "Framecycler"
@@ -51,6 +54,23 @@ def log_uncaught_exception(exctype, value, tb):
     logging.critical(f"Uncaught Exception:\n{err_msg}")
     sys.__excepthook__(exctype, value, tb)
 
+_SESSION_SEPARATOR_WIDTH = 80
+
+def _write_session_separator(log_file: str) -> None:
+    """Append a highly visible divider before each app launch."""
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    version = get_application_version()
+    banner = (
+        f"  NEW SESSION  {started_at}  |  {version}  |  PID {os.getpid()}"
+    )
+    rule = "=" * _SESSION_SEPARATOR_WIDTH
+    block = f"\n{rule}\n{banner}\n{rule}\n\n"
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(block)
+    except OSError as e:
+        print(f"Failed to write session separator to '{log_file}': {e}")
+
 def setup_logging():
     log_file = get_log_file_path()
     log_dir = os.path.dirname(log_file)
@@ -82,6 +102,7 @@ def setup_logging():
 
     # File Handler
     try:
+        _write_session_separator(log_file)
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
