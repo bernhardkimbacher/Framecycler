@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__file__).resolve().parents[1] / "src" / "framecycler" / "_version.py"
-APP_VERSION = "1.0.0"
+APP_VERSION = "0.0.1"
 
 
 def git(*args: str) -> str:

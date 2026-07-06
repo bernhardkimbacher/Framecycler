@@ -3,6 +3,7 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtCore import Qt, QPoint, QRectF, Signal
 from PySide6.QtGui import QPainter, QColor, QFont, QPen
 from ..color.ocio_manager import OCIOManager
+from .fonts import mono_font, ui_font
 
 # Import C++ Engine binary extension
 try:
@@ -50,6 +51,9 @@ class Viewport(QOpenGLWidget):
         self.scrub_start_x = 0
         self.scrub_start_frame = 0
         self.scrub_sensitivity = 8.0  # Pixels per frame scroll
+        self.left_press_pos = None
+        self.left_drag_started = False
+        self.click_threshold = 5
         self.setMouseTracking(True)
         
         # Viewfinder HUD info overlays
@@ -189,7 +193,7 @@ class Viewport(QOpenGLWidget):
             painter.setPen(QPen(QColor(255, 165, 0, 180), 2, Qt.DashLine))
             painter.drawLine(wipe_x, 0, wipe_x, metrics_rect.height())
             painter.setPen(QPen(QColor(255, 165, 0, 220), 1))
-            font = QFont("Courier New", 10, QFont.Bold)
+            font = mono_font(10, QFont.Weight.Bold)
             painter.setFont(font)
             painter.drawText(wipe_x + 5, metrics_rect.height() // 2, "A | B")
 
@@ -219,10 +223,10 @@ class Viewport(QOpenGLWidget):
                     self.dragging_wipe = True
                     self.setCursor(Qt.SizeHorCursor)
                     return
-            self.scrubbing_frames = True
+            self.left_press_pos = event.position()
+            self.left_drag_started = False
             self.scrub_start_x = event.position().x()
             self.scrub_start_frame = self.current_frame
-            self.setCursor(Qt.SizeHorCursor)
         elif event.button() == Qt.MiddleButton:
             self.panning = True
             self.last_mouse_pos = event.position().toPoint()
@@ -258,11 +262,17 @@ class Viewport(QOpenGLWidget):
             self.wipe_pos = max(0.0, min(1.0, event.position().x() / self.width()))
             self.wipe_changed.emit(self.wipe_pos)
             self.update()
-        elif self.scrubbing_frames:
-            delta_x = event.position().x() - self.scrub_start_x
-            frame_offset = int(delta_x / self.scrub_sensitivity)
-            target_frame = self.scrub_start_frame + frame_offset
-            self.frame_scrubbed.emit(target_frame)
+        elif self.left_press_pos is not None and (event.buttons() & Qt.LeftButton):
+            delta_x = abs(event.position().x() - self.left_press_pos.x())
+            delta_y = abs(event.position().y() - self.left_press_pos.y())
+            if not self.left_drag_started and (delta_x > self.click_threshold or delta_y > self.click_threshold):
+                self.left_drag_started = True
+                self.scrubbing_frames = True
+                self.setCursor(Qt.SizeHorCursor)
+            if self.scrubbing_frames:
+                frame_offset = int((event.position().x() - self.scrub_start_x) / self.scrub_sensitivity)
+                target_frame = self.scrub_start_frame + frame_offset
+                self.frame_scrubbed.emit(target_frame)
         elif self.panning:
             delta = event.position().toPoint() - self.last_mouse_pos
             self.pan_offset += delta
@@ -285,9 +295,15 @@ class Viewport(QOpenGLWidget):
             self.update()
             return
 
+        if event.button() == Qt.LeftButton and self.left_press_pos is not None:
+            if not self.left_drag_started and not self.dragging_wipe and self.main_window:
+                self.main_window.toggle_playback()
+
         self.dragging_wipe = False
         self.panning = False
         self.scrubbing_frames = False
+        self.left_press_pos = None
+        self.left_drag_started = False
         self.setCursor(Qt.ArrowCursor)
 
     def wheelEvent(self, event):
@@ -340,7 +356,6 @@ class Viewport(QOpenGLWidget):
         
         # Draw text
         painter.setPen(QColor(255, 255, 255))
-        font = QFont("Outfit", 13, QFont.Bold)
-        font.setStyleHint(QFont.SansSerif)
+        font = ui_font(13, QFont.Weight.Bold)
         painter.setFont(font)
         painter.drawText(box_x, box_y, box_w, box_h, Qt.AlignCenter, text)

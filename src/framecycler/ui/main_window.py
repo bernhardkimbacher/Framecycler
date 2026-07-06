@@ -1,8 +1,8 @@
 import os
 import sys
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QFileDialog, QMenuBar, QMenu, QPushButton, 
-                             QComboBox, QLabel, QDockWidget, QSlider)
+                             QComboBox, QLabel, QDockWidget, QSlider, QInputDialog)
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QFont
 
@@ -20,6 +20,16 @@ from .viewport import Viewport
 from .timeline import Timeline
 from .theme import get_viewfinder_stylesheet
 from .settings_dialog import SettingsDialog
+from .widgets import WideComboBox
+from .fonts import ui_font
+
+PRESET_FRAME_RATES = [
+    ("23.976", 23.976),
+    ("24", 24.0),
+    ("25", 25.0),
+    ("29.97", 29.97),
+    ("30", 30.0),
+]
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -46,7 +56,7 @@ class MainWindow(QMainWindow):
         self.end_frame = 0
         self.in_point = 0
         self.out_point = 0
-        self.fps = 24.0
+        self.fps = self.settings.default_fps
         
         # Dynamic menus references
         self.exr_layer_combo = None
@@ -96,30 +106,30 @@ class MainWindow(QMainWindow):
         
         # Left header: Channel extraction icons / drop-down
         header_layout.addWidget(QLabel("LAYER:"))
-        self.exr_layer_combo = QComboBox()
+        self.exr_layer_combo = WideComboBox(min_popup_width=240)
         self.exr_layer_combo.addItem("beauty")
         self.exr_layer_combo.currentIndexChanged.connect(self._on_exr_layer_changed)
         header_layout.addWidget(self.exr_layer_combo)
         
-        header_layout.addSpacing(20)
-        header_layout.addWidget(QLabel("COMPARE:"))
-        self.compare_combo = QComboBox()
-        self.compare_combo.addItems(["A Only", "Split Screen", "Difference", "Side-by-Side"])
-        self.compare_combo.currentIndexChanged.connect(self.viewport.set_compare_mode)
-        header_layout.addWidget(self.compare_combo)
-        
         # Resolution label (no "RESO:" text prefix, just width x height)
-        lbl_font = QFont("Segoe UI", 10)
+        lbl_font = ui_font(10)
         header_layout.addSpacing(20)
         self.lbl_resolution = QLabel("")
         self.lbl_resolution.setFont(lbl_font)
         header_layout.addWidget(self.lbl_resolution)
         
-        # IN/OUT colorspace label just to the right of resolution
+        # IN/OUT colorspace info and Look selector
         header_layout.addSpacing(20)
         self.lbl_ocio_info = QLabel("")
         self.lbl_ocio_info.setFont(lbl_font)
         header_layout.addWidget(self.lbl_ocio_info)
+
+        header_layout.addSpacing(20)
+        header_layout.addWidget(QLabel("LOOK:"))
+        self.look_combo = WideComboBox(min_popup_width=420)
+        self.look_combo.currentTextChanged.connect(self._on_look_combo_changed)
+        self._populate_look_combo()
+        header_layout.addWidget(self.look_combo)
         
         header_layout.addStretch()
         
@@ -141,61 +151,79 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.viewport, stretch=1)
         
         # Readout row just above the timeline
-        readout_layout = QHBoxLayout()
+        readout_widget = QWidget()
+        readout_layout = QGridLayout(readout_widget)
         readout_layout.setContentsMargins(10, 2, 10, 2)
-        
+        readout_layout.setColumnStretch(0, 1)
+        readout_layout.setColumnStretch(1, 0)
+        readout_layout.setColumnStretch(2, 1)
+
         self.lbl_frame = QLabel("FR: 0000")
         self.lbl_fps = QLabel("FPS: 24.00")
-        self.lbl_tc = QLabel("TC: 01:00:00:00")
-        
-        readout_font = QFont("Segoe UI", 11) # Timeline matched slightly bigger font
+
+        readout_font = ui_font(11)
         self.lbl_frame.setFont(readout_font)
         self.lbl_fps.setFont(readout_font)
-        self.lbl_tc.setFont(readout_font)
-        
-        readout_layout.addWidget(self.lbl_frame)
-        readout_layout.addStretch()
-        readout_layout.addWidget(self.lbl_fps)
-        readout_layout.addStretch()
-        readout_layout.addWidget(self.lbl_tc)
-        
-        main_layout.addLayout(readout_layout)
-        main_layout.addWidget(self.timeline)
-        
-        # Transport controls row
-        transport_layout = QHBoxLayout()
-        transport_layout.setContentsMargins(10, 0, 10, 5)
-        
-        self.btn_play = QPushButton("PLAY")
-        self.btn_play.clicked.connect(self.toggle_playback)
-        self.btn_prev = QPushButton("<")
-        self.btn_prev.setMaximumWidth(30)
-        self.btn_prev.clicked.connect(lambda: self.seek_to_frame(self.current_frame - 1))
-        self.btn_next = QPushButton(">")
-        self.btn_next.setMaximumWidth(30)
-        self.btn_next.clicked.connect(lambda: self.seek_to_frame(self.current_frame + 1))
-        
-        self.combo_loop = QComboBox()
-        self.combo_loop.addItems(["LOOP", "BOUNCE", "ONCE"])
-        self.combo_loop.setCurrentText(self.settings.loop_mode.upper())
-        self.combo_loop.currentTextChanged.connect(self._on_loop_mode_changed)
-        
-        self.btn_tc_toggle = QPushButton("TC / FR")
-        self.btn_tc_toggle.clicked.connect(self.toggle_timecode_mode)
-        
-        # Play/loop buttons in the center, and tc toggle on the right
-        transport_layout.addStretch()
-        transport_layout.addWidget(self.btn_prev)
-        transport_layout.addWidget(self.btn_play)
-        transport_layout.addWidget(self.btn_next)
-        transport_layout.addWidget(self.combo_loop)
-        transport_layout.addStretch()
-        transport_layout.addWidget(self.btn_tc_toggle)
-        
-        main_layout.addLayout(transport_layout)
-        
 
-        
+        readout_layout.addWidget(self.lbl_frame, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        readout_layout.addWidget(self.lbl_fps, 0, 1, Qt.AlignCenter)
+        readout_layout.addWidget(QWidget(), 0, 2)
+
+        main_layout.addWidget(readout_widget)
+
+        # Transport controls row (above timeline)
+        transport_layout = QHBoxLayout()
+        transport_layout.setContentsMargins(10, 0, 10, 2)
+
+        transport_font = ui_font(13)
+
+        self.btn_begin = self._make_transport_button("|<", transport_font)
+        self.btn_begin.setToolTip("Jump to beginning")
+        self.btn_begin.clicked.connect(lambda: self.seek_to_frame(self.in_point))
+
+        self.btn_step_back = self._make_transport_button("<|", transport_font)
+        self.btn_step_back.setToolTip("Step back one frame")
+        self.btn_step_back.clicked.connect(lambda: self.seek_to_frame(self.current_frame - 1))
+
+        self.btn_play_reverse = self._make_transport_button("◀", transport_font)
+        self.btn_play_reverse.setToolTip("Play reverse")
+        self.btn_play_reverse.setCheckable(True)
+        self.btn_play_reverse.clicked.connect(lambda: self._toggle_playback_direction(-1))
+
+        self.btn_stop = self._make_transport_button("■", transport_font)
+        self.btn_stop.setToolTip("Stop")
+        self.btn_stop.clicked.connect(self.stop_playback)
+
+        self.btn_play_forward = self._make_transport_button("▶", transport_font)
+        self.btn_play_forward.setToolTip("Play forward")
+        self.btn_play_forward.setCheckable(True)
+        self.btn_play_forward.clicked.connect(lambda: self._toggle_playback_direction(1))
+
+        self.btn_step_forward = self._make_transport_button("|>", transport_font)
+        self.btn_step_forward.setToolTip("Step forward one frame")
+        self.btn_step_forward.clicked.connect(lambda: self.seek_to_frame(self.current_frame + 1))
+
+        self.btn_end = self._make_transport_button(">|", transport_font)
+        self.btn_end.setToolTip("Jump to end")
+        self.btn_end.clicked.connect(lambda: self.seek_to_frame(self.out_point))
+
+        transport_layout.addStretch()
+        for btn in (
+            self.btn_begin,
+            self.btn_step_back,
+            self.btn_play_reverse,
+            self.btn_stop,
+            self.btn_play_forward,
+            self.btn_step_forward,
+            self.btn_end,
+        ):
+            transport_layout.addWidget(btn)
+        transport_layout.addStretch()
+
+        main_layout.addLayout(transport_layout)
+        main_layout.addWidget(self.timeline)
+        self.timeline.set_display_options(self.settings.timecode_mode, self.fps)
+        self._update_readout_display()
         # Setup Menu bar
         self._build_menu()
         
@@ -242,6 +270,56 @@ class MainWindow(QMainWindow):
         act_reset.setShortcut(QKeySequence("F"))
         act_reset.triggered.connect(self.viewport.reset_view)
         view_menu.addAction(act_reset)
+
+        # Playback menu
+        playback_menu = menubar.addMenu("&Playback")
+
+        self.loop_mode_actions = []
+        loop_modes = [("Loop", "loop"), ("Bounce", "bounce"), ("Once", "once")]
+        for label, mode in loop_modes:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(mode == self.settings.loop_mode)
+            act.triggered.connect(lambda checked=False, m=mode: self._set_loop_mode(m))
+            playback_menu.addAction(act)
+            self.loop_mode_actions.append((mode, act))
+
+        playback_menu.addSeparator()
+
+        frame_rate_menu = playback_menu.addMenu("Frame Rate")
+        self.frame_rate_actions = []
+        for label, fps in PRESET_FRAME_RATES:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(self._fps_matches(self.fps, fps))
+            act.triggered.connect(lambda checked=False, f=fps: self._set_playback_fps(f))
+            frame_rate_menu.addAction(act)
+            self.frame_rate_actions.append((fps, act))
+
+        frame_rate_menu.addSeparator()
+        act_custom_fps = QAction("Custom...", self)
+        act_custom_fps.triggered.connect(self._prompt_custom_frame_rate)
+        frame_rate_menu.addAction(act_custom_fps)
+
+        playback_menu.addSeparator()
+        playback_menu.addSection("Display")
+
+        act_show_frames = QAction("Show Frames", self)
+        act_show_frames.setCheckable(True)
+        act_show_frames.setChecked(not self.settings.timecode_mode)
+        act_show_frames.triggered.connect(lambda: self._set_timecode_display_mode(False))
+        playback_menu.addAction(act_show_frames)
+
+        act_show_timecode = QAction("Show Timecode", self)
+        act_show_timecode.setCheckable(True)
+        act_show_timecode.setChecked(self.settings.timecode_mode)
+        act_show_timecode.triggered.connect(lambda: self._set_timecode_display_mode(True))
+        playback_menu.addAction(act_show_timecode)
+
+        self.timecode_display_actions = [
+            (False, act_show_frames),
+            (True, act_show_timecode),
+        ]
         
         # Plugins menu
         plugins_menu = menubar.addMenu("&Plugins")
@@ -249,28 +327,47 @@ class MainWindow(QMainWindow):
             for action in plugin.get_menu_actions():
                 plugins_menu.addAction(action)
                 
-        # Grading menu (Built-in grading tool)
-        grading_menu = menubar.addMenu("&Grading")
-        
+        # Tools menu (grading and compare)
+        tools_menu = menubar.addMenu("&Tools")
+
+        tools_menu.addSection("Grading")
+
         act_exposure = QAction("Exposure...", self)
         act_exposure.setShortcut(QKeySequence("E"))
         act_exposure.triggered.connect(self._activate_exposure_mode)
-        grading_menu.addAction(act_exposure)
-        
+        tools_menu.addAction(act_exposure)
+
         act_gamma = QAction("Gamma...", self)
         act_gamma.setShortcut(QKeySequence("Y"))
         act_gamma.triggered.connect(self._activate_gamma_mode)
-        grading_menu.addAction(act_gamma)
-        
+        tools_menu.addAction(act_gamma)
+
         act_offset = QAction("Offset...", self)
         act_offset.setShortcut(QKeySequence("O"))
         act_offset.triggered.connect(self._activate_offset_mode)
-        grading_menu.addAction(act_offset)
-        
+        tools_menu.addAction(act_offset)
+
         act_reset_grade = QAction("Reset Color Grade", self)
         act_reset_grade.setShortcut(QKeySequence("Home"))
         act_reset_grade.triggered.connect(self._reset_grade)
-        grading_menu.addAction(act_reset_grade)
+        tools_menu.addAction(act_reset_grade)
+
+        tools_menu.addSection("Compare")
+
+        self.compare_actions = []
+        compare_modes = [
+            ("A Only", 0),
+            ("Split Screen", 1),
+            ("Difference", 2),
+            ("Side-by-Side", 3),
+        ]
+        for label, mode in compare_modes:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(mode == self.viewport.compare_mode)
+            act.triggered.connect(lambda checked=False, m=mode: self._set_compare_mode(m))
+            tools_menu.addAction(act)
+            self.compare_actions.append((mode, act))
         
         # OCIO Pipeline menu
         self.ocio_menu = menubar.addMenu("&OCIO")
@@ -325,6 +422,8 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, name=d: self._set_display_output(name))
             self.display_output_menu.addAction(act)
 
+        self._populate_look_combo()
+
     def _setup_hotkeys(self):
         # Frame stepping
         self._add_shortcut("Left", lambda: self.seek_to_frame(self.current_frame - 1))
@@ -342,6 +441,9 @@ class MainWindow(QMainWindow):
         
         # Play/Pause
         self._add_shortcut("Space", self.toggle_playback)
+
+        # Frame / timecode display toggle
+        self._add_shortcut("T", self._toggle_timecode_display)
         
         # Channel views toggles
         self._add_shortcut("R", lambda: self.toggle_channel_mask(1))
@@ -354,6 +456,58 @@ class MainWindow(QMainWindow):
         action.setShortcut(QKeySequence(key_str))
         action.triggered.connect(callback)
         self.addAction(action)
+
+    def _make_transport_button(self, label: str, font: QFont) -> QPushButton:
+        btn = QPushButton(label)
+        btn.setFixedSize(36, 28)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.setFont(font)
+        return btn
+
+    def _update_playback_buttons(self):
+        if not hasattr(self, "btn_play_forward"):
+            return
+        self.btn_play_forward.blockSignals(True)
+        self.btn_play_reverse.blockSignals(True)
+        self.btn_play_forward.setChecked(self.playing and self.playback_direction == 1)
+        self.btn_play_reverse.setChecked(self.playing and self.playback_direction == -1)
+        self.btn_play_forward.blockSignals(False)
+        self.btn_play_reverse.blockSignals(False)
+
+    def _toggle_playback_direction(self, direction: int):
+        if self.playing and self.playback_direction == direction:
+            self.stop_playback()
+        else:
+            self.playback_direction = direction
+            self.start_playback()
+
+    def _populate_look_combo(self):
+        if not hasattr(self, "look_combo") or self.look_combo is None:
+            return
+        self.look_combo.blockSignals(True)
+        self.look_combo.clear()
+        self.look_combo.addItems(self.ocio_manager.get_looks())
+        current = self.ocio_manager.look or "None (Bypass)"
+        idx = self.look_combo.findText(current)
+        if idx >= 0:
+            self.look_combo.setCurrentIndex(idx)
+        self.look_combo.blockSignals(False)
+        self.look_combo.refresh_popup_geometry()
+
+    def _sync_look_combo(self, name: str):
+        if not hasattr(self, "look_combo") or self.look_combo is None:
+            return
+        self.look_combo.blockSignals(True)
+        idx = self.look_combo.findText(name)
+        if idx >= 0:
+            self.look_combo.setCurrentIndex(idx)
+        self.look_combo.blockSignals(False)
+
+    def _set_compare_mode(self, mode: int):
+        self.viewport.set_compare_mode(mode)
+        if hasattr(self, "compare_actions"):
+            for m, act in self.compare_actions:
+                act.setChecked(m == mode)
 
     def _open_file_dialog(self, slot: int):
         path, _ = QFileDialog.getOpenFileName(
@@ -400,6 +554,8 @@ class MainWindow(QMainWindow):
                 
                 self.timeline.set_range(self.start_frame, self.end_frame)
                 self.timeline.set_in_out(self.in_point, self.out_point)
+                self.timeline.set_display_options(self.settings.timecode_mode, self.fps)
+                self._sync_frame_rate_menu(self.fps)
                 
                 # Populate EXR layers in header combobox if applicable
                 self.exr_layer_combo.clear()
@@ -410,6 +566,7 @@ class MainWindow(QMainWindow):
                     else:
                         layers.add("beauty")
                 self.exr_layer_combo.addItems(sorted(list(layers)))
+                self.exr_layer_combo.refresh_popup_geometry()
                 
                 # Update resolution label readout outside the image
                 w = meta.get("width", 0)
@@ -452,7 +609,7 @@ class MainWindow(QMainWindow):
             self.decoders[slot] = None
             
         # 4. Reset playback parameters
-        self.fps = 24.0
+        self.fps = self.settings.default_fps
         self.start_frame = 0
         self.end_frame = 0
         self.in_point = 0
@@ -469,10 +626,9 @@ class MainWindow(QMainWindow):
         self.exr_layer_combo.addItem("beauty")
         
         self.lbl_resolution.setText("")
-        self.lbl_frame.setText("FR: 0000")
-        self.lbl_fps.setText("FPS: 24.00")
-        self.lbl_tc.setText("TC: 01:00:00:00")
+        self.lbl_fps.setText(self._format_fps_label(self.fps))
         self.lbl_ocio_info.setText("")
+        self._update_readout_display()
         
         # 6. Redraw viewport and update status
         self.viewport.resolution_str = "0x0"
@@ -493,12 +649,13 @@ class MainWindow(QMainWindow):
             frame_a_dict = self.caches[0].get_frame(frame)
             if frame_a_dict:
                 frame_a = frame_a_dict["data"]
-                self.viewport.current_timecode = frame_a_dict["timecode"]
+                tc = frame_a_dict["timecode"] or Timecode.frame_to_timecode(frame, self.fps, 0)
+                self.viewport.current_timecode = tc
                 self.viewport.set_frame_a(
                     frame_a,
                     frame_a_dict["channels"],
                     frame,
-                    frame_a_dict["timecode"],
+                    tc,
                     self.fps
                 )
                 
@@ -517,12 +674,9 @@ class MainWindow(QMainWindow):
         self.timeline.set_current_frame(frame)
         
         # Update UI readouts
-        if hasattr(self, "lbl_frame") and self.lbl_frame:
-            self.lbl_frame.setText(f"FR: {frame:04d}")
         if hasattr(self, "lbl_fps") and self.lbl_fps:
-            self.lbl_fps.setText(f"FPS: {self.fps:.2f}")
-        if hasattr(self, "lbl_tc") and self.lbl_tc:
-            self.lbl_tc.setText(f"TC: {self.viewport.current_timecode}")
+            self.lbl_fps.setText(self._format_fps_label(self.fps))
+        self._update_readout_display()
             
         # Fire plugin event
         for plugin in self.plugins:
@@ -563,16 +717,16 @@ class MainWindow(QMainWindow):
         if self.timer.isActive():
             return
         self.playing = True
-        self.btn_play.setText("PAUSE")
-        
+        self._update_playback_buttons()
+
         # Match rate timer interval (ms)
         interval_ms = int(1000.0 / self.fps)
         self.timer.start(interval_ms)
 
     def stop_playback(self):
         self.playing = False
-        self.btn_play.setText("PLAY")
         self.timer.stop()
+        self._update_playback_buttons()
 
     # In / Out controls
     def _set_in_point_here(self):
@@ -604,20 +758,86 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Viewing active Slot {'A' if slot == 0 else 'B'}")
         self.seek_to_frame(self.current_frame)
 
-    def toggle_timecode_mode(self):
-        self.settings.timecode_mode = not self.settings.timecode_mode
-        self.settings.save()
-        self.timeline.update()
-        self.seek_to_frame(self.current_frame)
+    def _toggle_timecode_display(self):
+        self._set_timecode_display_mode(not self.settings.timecode_mode)
 
-    def _on_loop_mode_changed(self, text):
-        self.settings.loop_mode = text.lower()
+    def _set_timecode_display_mode(self, show_timecode: bool):
+        self.settings.timecode_mode = show_timecode
         self.settings.save()
+        self.timeline.set_display_options(self.settings.timecode_mode, self.fps)
+        self._update_readout_display()
+        if hasattr(self, "timecode_display_actions"):
+            for mode, act in self.timecode_display_actions:
+                act.setChecked(mode == show_timecode)
+
+    def _update_readout_display(self):
+        if not hasattr(self, "lbl_frame") or self.lbl_frame is None:
+            return
+        self.lbl_frame.setText(
+            Timecode.format_position_label(
+                self.current_frame, self.settings.timecode_mode, self.fps
+            )
+        )
+
+    def _set_loop_mode(self, mode: str):
+        self.settings.loop_mode = mode
+        self.settings.save()
+        if hasattr(self, "loop_mode_actions"):
+            for m, act in self.loop_mode_actions:
+                act.setChecked(m == mode)
+
+    def _fps_matches(self, a: float, b: float, tol: float = 0.001) -> bool:
+        return abs(a - b) < tol
+
+    def _format_fps_label(self, fps: float) -> str:
+        if self._fps_matches(fps, 23.976) or self._fps_matches(fps, 29.97):
+            return f"FPS: {fps:.3f}"
+        return f"FPS: {fps:.2f}"
+
+    def _sync_frame_rate_menu(self, fps: float):
+        if not hasattr(self, "frame_rate_actions"):
+            return
+        for preset_fps, act in self.frame_rate_actions:
+            act.setChecked(self._fps_matches(fps, preset_fps))
+
+    def _set_playback_fps(self, fps: float):
+        fps = max(1.0, min(120.0, float(fps)))
+        self.fps = fps
+        self.settings.default_fps = fps
+        self.settings.save()
+
+        self.viewport.fps = fps
+        if hasattr(self, "lbl_fps") and self.lbl_fps:
+            self.lbl_fps.setText(self._format_fps_label(fps))
+
+        self.timeline.set_display_options(self.settings.timecode_mode, self.fps)
+        self._update_readout_display()
+        self._sync_frame_rate_menu(fps)
+
+        if self.playing:
+            self.timer.start(int(1000.0 / self.fps))
+
+    def _prompt_custom_frame_rate(self):
+        fps, ok = QInputDialog.getDouble(
+            self,
+            "Custom Frame Rate",
+            "Frames per second:",
+            self.fps,
+            1.0,
+            120.0,
+            3,
+        )
+        if ok:
+            self._set_playback_fps(fps)
 
     def _on_exr_layer_changed(self, index):
         if self.exr_layer_combo.count() > 0:
             self.viewport.exr_layer_str = self.exr_layer_combo.currentText()
             self.viewport.update()
+
+    def _on_look_combo_changed(self, text: str):
+        if text and text != (self.ocio_manager.look or "None (Bypass)"):
+            self._set_look(text)
 
     def _on_wipe_moved(self, pos):
         self.viewport.wipe_pos = pos
@@ -632,6 +852,7 @@ class MainWindow(QMainWindow):
     def _set_look(self, name):
         self.ocio_manager.set_look(name)
         self.viewport.update_ocio_pipeline()
+        self._sync_look_combo(name)
         self._build_ocio_submenu()
         self._update_ocio_info_label()
 
@@ -648,13 +869,13 @@ class MainWindow(QMainWindow):
         if path:
             self.ocio_manager.load_custom_lut(path)
             self.viewport.update_ocio_pipeline()
+            self._populate_look_combo()
             self._build_ocio_submenu()
             self._update_ocio_info_label()
         
     def _update_ocio_info_label(self):
         if hasattr(self, "lbl_ocio_info") and self.lbl_ocio_info:
-            look_str = self.ocio_manager.look if self.ocio_manager.look else "None"
-            info = f"IN: {self.ocio_manager.input_colorspace} | LOOK: {look_str} | OUT: {self.ocio_manager.display_output}"
+            info = f"IN: {self.ocio_manager.input_colorspace} | OUT: {self.ocio_manager.display_output}"
             
             # Append grading info if active
             grade_parts = []
@@ -735,9 +956,11 @@ class MainWindow(QMainWindow):
             # Reload OCIO if path changed
             self.ocio_manager.load_config(self.settings.ocio_config_path)
             self.viewport.update_ocio_pipeline()
+            self._populate_look_combo()
             self._build_ocio_submenu()
 
     def _update_ui_states(self):
+        self._populate_look_combo()
         self._build_ocio_submenu()
 
     def dragEnterEvent(self, event):

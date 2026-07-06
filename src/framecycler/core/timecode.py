@@ -51,3 +51,9 @@ class Timecode:
         if show_timecode:
             return Timecode.frame_to_timecode(frame, fps, start_frame)
         return str(frame)
+
+    @staticmethod
+    def format_position_label(frame: int, show_timecode: bool, fps: float, start_frame: int = 0) -> str:
+        if show_timecode:
+            return f"TC: {Timecode.frame_to_timecode(frame, fps, start_frame)}"
+        return f"FR: {frame:04d}"

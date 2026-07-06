@@ -1,6 +1,9 @@
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QRect, Signal, QPoint
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush
+
+from ..core.timecode import Timecode
+from .fonts import ui_font
 
 class Timeline(QWidget):
     frame_changed = Signal(int)
@@ -8,7 +11,7 @@ class Timeline(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(45)
+        self.setMinimumHeight(52)
         
         # Ranges & playback playhead state
         self.start_frame = 0
@@ -16,12 +19,19 @@ class Timeline(QWidget):
         self.current_frame = 0
         self.in_point = 0
         self.out_point = 100
+        self.fps = 24.0
+        self.show_timecode = False
         
         # Caching information
         self.cached_frames = set()
         
         # Dragging state
         self.scrubbing = False
+
+    def set_display_options(self, show_timecode: bool, fps: float):
+        self.show_timecode = show_timecode
+        self.fps = fps
+        self.update()
         
     def set_range(self, start: int, end: int):
         self.start_frame = start
@@ -132,23 +142,6 @@ class Timeline(QWidget):
         x_out = self._x_from_frame(self.out_point)
         painter.fillRect(x_in, track_y, x_out - x_in, track_h, QBrush(QColor(255, 165, 0, 20)))  # Semi-transparent yellow shade
         
-        # Draw ticks/numbers at top of timeline
-        painter.setPen(QPen(QColor(100, 100, 100), 1))
-        painter.setFont(QFont("Courier New", 7))
-        
-        # Ticks step calculation
-        step = max(1, frame_range // 10)
-        # Round step to logical increments
-        if step > 100:
-            step = (step // 100) * 100
-        elif step > 10:
-            step = (step // 10) * 10
-            
-        for f in range(self.start_frame, self.end_frame + 1, step):
-            tx = self._x_from_frame(f)
-            painter.drawLine(tx, track_y - 4, tx, track_y)
-            painter.drawText(tx - 10, track_y - 6, str(f))
-            
         # Draw In/Out brackets
         in_color = QColor(255, 180, 0)
         out_color = QColor(255, 180, 0)
@@ -165,16 +158,32 @@ class Timeline(QWidget):
         painter.drawLine(x_out, track_y - 2, x_out - 4, track_y - 2)
         painter.drawLine(x_out, track_y + track_h + 2, x_out - 4, track_y + track_h + 2)
         
-        # Draw Playhead position (thin red line + triangle)
+        # Draw playhead position (label, triangle, and line)
         x_playhead = self._x_from_frame(self.current_frame)
+        label = Timecode.format_position_label(self.current_frame, self.show_timecode, self.fps)
+
+        label_font = ui_font(10)
+        painter.setFont(label_font)
+        metrics = painter.fontMetrics()
+        text_w = metrics.horizontalAdvance(label)
+        text_h = metrics.height()
+        label_x = max(track_x, min(track_x + track_w - text_w, x_playhead - text_w // 2))
+        label_y = 4
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(30, 30, 30, 220)))
+        painter.drawRoundedRect(label_x - 4, label_y, text_w + 8, text_h + 4, 3, 3)
+        painter.setPen(QPen(QColor(220, 220, 220)))
+        painter.drawText(label_x, label_y + text_h, label)
+
+        tri_top = label_y + text_h + 8
         painter.setPen(QPen(QColor(230, 30, 30), 2))
-        painter.drawLine(x_playhead, track_y - 6, x_playhead, track_y + track_h + 2)
-        
-        # Draw playhead triangle at top
+        painter.drawLine(x_playhead, tri_top, x_playhead, track_y + track_h + 2)
+
         poly = [
-            QPoint(x_playhead - 5, track_y - 6),
-            QPoint(x_playhead + 5, track_y - 6),
-            QPoint(x_playhead, track_y - 1)
+            QPoint(x_playhead - 5, tri_top + 5),
+            QPoint(x_playhead + 5, tri_top + 5),
+            QPoint(x_playhead, tri_top),
         ]
         painter.setBrush(QBrush(QColor(230, 30, 30)))
         painter.setPen(Qt.NoPen)

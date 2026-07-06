@@ -58,11 +58,13 @@ def main():
             color: #ffffff;
             border: 1px solid #3d3d3d;
             border-radius: 3px;
-            padding: 3px 6px;
+            padding: 4px 8px;
+            font-size: 12px;
+            min-height: 22px;
         }
         QComboBox::drop-down {
             border: none;
-            width: 15px;
+            width: 18px;
         }
         QComboBox QAbstractItemView {
             background-color: #252525;
@@ -70,6 +72,12 @@ def main():
             selection-background-color: #3b3b3b;
             selection-color: #ffffff;
             border: 1px solid #3d3d3d;
+            outline: none;
+        }
+        QComboBox QAbstractItemView::item {
+            height: 22px;
+            padding: 1px 12px;
+            font-size: 12px;
         }
         QPushButton {
             background-color: #252525;

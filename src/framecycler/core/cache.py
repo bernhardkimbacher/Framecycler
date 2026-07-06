@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Set
 from ..decoders.base import BaseDecoder
 from .settings import Settings
+from .timecode import Timecode
 
 # Try importing the compiled C++ engine extension module
 try:
@@ -60,12 +61,12 @@ class CacheEngine:
         if self.native_cache.has_frame(frame_index):
             data_view = self.native_cache.get_frame_data(frame_index)
             if data_view is not None:
-                # Return layout matching python decoder metadata wrapper
+                meta = self.decoder.get_metadata()
                 return {
                     "data": data_view,
-                    "channels": self.decoder.get_metadata()["channels"],
+                    "channels": meta["channels"],
                     "frame_index": frame_index,
-                    "timecode": ""  # Handled by viewport / overlays
+                    "timecode": Timecode.frame_to_timecode(frame_index, meta["fps"], 0),
                 }
                 
         # 2. Cache miss: Read frame synchronously, store in C++ cache and return

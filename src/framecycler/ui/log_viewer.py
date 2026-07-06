@@ -1,9 +1,10 @@
 import os
 import logging
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QPlainTextEdit, QHBoxLayout, QPushButton
-from PySide6.QtGui import QFont, QKeySequence, QAction, QFontDatabase
+from PySide6.QtGui import QKeySequence, QAction
 from PySide6.QtCore import Qt
 from ..core.logging_config import get_log_file_path
+from .fonts import mono_font
 
 class LogViewerDialog(QDialog):
     def __init__(self, parent=None):
@@ -48,9 +49,7 @@ class LogViewerDialog(QDialog):
         self.log_text = QPlainTextEdit(self)
         self.log_text.setReadOnly(True)
         
-        font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
-        font.setPointSize(10)
-        self.log_text.setFont(font)
+        self.log_text.setFont(mono_font(10))
         
         layout.addWidget(self.log_text)
 
