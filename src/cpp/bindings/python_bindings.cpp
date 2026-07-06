@@ -18,9 +18,10 @@ PYBIND11_MODULE(framecycler_engine, m) {
             const float* ptr = static_cast<const float*>(info.ptr);
             self.write_frame(frame_index, width, height, channels, ptr, info.size);
         })
-        .def("get_frame_data", [](CacheManager& self, int frame_index) -> py::object {
+        .def("get_frame_data", [](py::object self, int frame_index) -> py::object {
+            auto& self_cpp = self.cast<CacheManager&>();
             int width = 0, height = 0, channels = 0;
-            const float* ptr = self.get_frame_data(frame_index, width, height, channels);
+            const float* ptr = self_cpp.get_frame_data(frame_index, width, height, channels);
             if (!ptr) {
                 return py::none();
             }
@@ -29,7 +30,7 @@ PYBIND11_MODULE(framecycler_engine, m) {
                 { height, width, channels },
                 { width * channels * sizeof(float), channels * sizeof(float), sizeof(float) },
                 ptr,
-                py::cast(&self) // Keep cache owner alive
+                self // Keep the original Python owner object alive!
             );
         })
         .def("get_cached_frames", &CacheManager::get_cached_frames)

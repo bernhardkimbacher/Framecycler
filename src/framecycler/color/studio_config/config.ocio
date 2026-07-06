@@ -6,6 +6,7 @@ environment:
 search_path: luts
 
 roles:
+  aces_interchange: ACEScg
   color_picking: sRGB - Texture
   color_timing: ACEScg
   compositing_log: ACEScg
@@ -27,6 +28,23 @@ displays:
 
 active_displays: [sRGB, Rec.709]
 active_views: [sRGB View, Rec.709 View, ACEScg Linear, Raw]
+
+looks:
+  - !<Look>
+    name: ARRI LogC3 to Rec709
+    process_space: ACEScg
+    transform: !<GroupTransform>
+      children:
+        - !<ColorSpaceTransform> {src: ACEScg, dst: ARRI Alexa LogC3}
+        - !<FileTransform> {src: ARRI_LogC3_to_Rec709.cube, interpolation: linear}
+
+  - !<Look>
+    name: ARRI LogC4 to Rec709
+    process_space: ACEScg
+    transform: !<GroupTransform>
+      children:
+        - !<ColorSpaceTransform> {src: ACEScg, dst: ARRI LogC4}
+        - !<FileTransform> {src: ARRI_LogC4_to_Rec709.cube, interpolation: linear}
 
 colorspaces:
   - !<ColorSpace>
@@ -55,10 +73,15 @@ colorspaces:
     equalitygroup: ""
     bitdepth: 8ui
     description: |
-      Standard sRGB texture / monitor space
+      Standard sRGB texture / monitor space (gamma-encoded, Rec.709 primaries)
     isdata: false
     allocation: uniform
-    to_scene_reference: !<MatrixTransform> {matrix: [0.4124, 0.3576, 0.1805, 0, 0.2126, 0.7152, 0.0722, 0, 0.0193, 0.1192, 0.9505, 0, 0, 0, 0, 1]}
+    to_scene_reference: !<GroupTransform>
+      children:
+        # 1. Decode sRGB gamma (gamma-encoded -> linear)
+        - !<ExponentWithLinearTransform> {gamma: [2.4, 2.4, 2.4, 1.0], offset: [0.055, 0.055, 0.055, 0.0], direction: forward}
+        # 2. Convert Rec.709 primaries -> AP1 (ACEScg) primaries
+        - !<BuiltinTransform> {style: "UTILITY - ACES-AP1_to_LINEAR-REC709_BFD", direction: inverse}
 
   - !<ColorSpace>
     name: Rec.709 - Texture
@@ -66,10 +89,15 @@ colorspaces:
     equalitygroup: ""
     bitdepth: 8ui
     description: |
-      Rec.709 HDTV display space
+      Rec.709 HDTV display space (BT.1886 gamma, Rec.709 primaries)
     isdata: false
     allocation: uniform
-    to_scene_reference: !<MatrixTransform> {matrix: [0.4124, 0.3576, 0.1805, 0, 0.2126, 0.7152, 0.0722, 0, 0.0193, 0.1192, 0.9505, 0, 0, 0, 0, 1]}
+    to_scene_reference: !<GroupTransform>
+      children:
+        # 1. Decode Rec.709 BT.1886 gamma (power 2.4, gamma-encoded -> linear)
+        - !<ExponentTransform> {value: [2.4, 2.4, 2.4, 1.0], direction: forward}
+        # 2. Convert Rec.709 primaries -> AP1 (ACEScg) primaries
+        - !<BuiltinTransform> {style: "UTILITY - ACES-AP1_to_LINEAR-REC709_BFD", direction: inverse}
 
   - !<ColorSpace>
     name: ARRI Alexa LogC3

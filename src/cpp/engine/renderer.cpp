@@ -34,6 +34,15 @@ void GLRenderer::initialize() {
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     
     glBindVertexArray(0);
+    
+    // Explicitly disable automatic sRGB linearization of framebuffer writes.
+    // On macOS, QOpenGLWidget creates an sRGB-capable surface by default, which causes
+    // the GL driver to linearize (de-gamma) any values written to the framebuffer,
+    // treating them as linear light. Since OCIO already encodes the sRGB gamma curve,
+    // this would result in the gamma being stripped and the image appearing desaturated.
+    // Disabling this ensures the framebuffer stores exactly what the shader outputs.
+    glDisable(GL_FRAMEBUFFER_SRGB);
+    
     _initialized = true;
 }
 
@@ -88,7 +97,9 @@ void GLRenderer::_upload_texture(GLuint& tex_id, int w, int h, int channels, con
         internal_format = GL_R32F;
     }
     
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1); // disable row padding assumption for non-pow2 / 3-channel textures
     glTexImage2D(GL_TEXTURE_2D, 0, internal_format, w, h, 0, gl_format, GL_FLOAT, data);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4); // restore default
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
@@ -99,6 +110,9 @@ void GLRenderer::render(
     float scale_x, float scale_y, float pan_x, float pan_y
 ) {
     if (!_initialized || _shader_program == 0) return;
+    
+    // Re-assert each frame: some GL drivers re-enable this between draw calls.
+    glDisable(GL_FRAMEBUFFER_SRGB);
     
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -134,6 +148,11 @@ void GLRenderer::render(
             // Map uniform to slot
             std::string lut_sampler_name = "ocio_lut3d_" + std::to_string(i);
             GLint loc = glGetUniformLocation(_shader_program, lut_sampler_name.c_str());
+            if (loc == -1) {
+                // OCIO v2.2+ appends 'Sampler' to the texture uniform name
+                lut_sampler_name += "Sampler";
+                loc = glGetUniformLocation(_shader_program, lut_sampler_name.c_str());
+            }
             if (loc != -1) {
                 glUniform1i(loc, tex_unit_start);
             }
@@ -253,6 +272,10 @@ void GLRenderer::_compile_shader_program(const std::string& ocio_code) {
     _shader_program = glCreateProgram();
     glAttachShader(_shader_program, vs);
     glAttachShader(_shader_program, fs);
+    
+    glBindAttribLocation(_shader_program, 0, "position");
+    glBindAttribLocation(_shader_program, 1, "texCoords");
+    
     glLinkProgram(_shader_program);
     
     glDeleteShader(vs);

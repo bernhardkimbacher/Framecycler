@@ -160,6 +160,7 @@ python build.py
 | `Space` | Play / Pause |
 | `Left` / `Right` | Step backward / forward by 1 frame |
 | `Shift + Left/Right` | Step backward / forward by 10 frames |
+| `Shift + X` | Clear viewer inputs (empty slots A & B) |
 | `[` | Set Playback Range **In** Point |
 | `]` | Set Playback Range **Out** Point |
 | `1` | View active **Slot A** |
@@ -167,12 +168,7 @@ python build.py
 | `T` | Toggle timeline between **Frame Numbers** and **Timecode** |
 | `Ctrl + H` | Toggle camera HUD viewfinder overlay |
 | `F` | Reset Viewport Zoom & Pan |
-| `Home` | Reset CDL Color Grading properties to default values |
 | `R` | Toggle **Red** channel isolation |
 | `G` | Toggle **Green** channel isolation |
 | `B` | Toggle **Blue** channel isolation |
 | `A` | Toggle **Alpha** channel isolation |
-| `S` | Activate **Slope** interactive mouse adjustment (left-drag value, release to exit) |
-| `O` | Activate **Offset** interactive mouse adjustment (left-drag value, release to exit) |
-| `P` | Activate **Power** interactive mouse adjustment (left-drag value, release to exit) |
-| `Shift + S` | Activate **Saturation** interactive mouse adjustment (left-drag value, release to exit) |

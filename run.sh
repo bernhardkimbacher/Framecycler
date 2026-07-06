@@ -29,7 +29,7 @@ echo "[INFO] Activating virtual environment..."
 source .venv/bin/activate
 
 # 4. Check/Install Python dependencies
-if ! python3 -c "import PySide6, OpenGL, numpy, av, OpenColorIO, cv2" &> /dev/null; then
+if ! python3 -c "import PySide6, OpenGL, numpy, av, OpenColorIO, cv2, cmake" &> /dev/null; then
     echo "[INFO] Dependencies missing or incomplete. Installing from requirements.txt..."
     pip install -r requirements.txt
 else

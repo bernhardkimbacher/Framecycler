@@ -4,12 +4,36 @@ import subprocess
 import shutil
 
 def find_cmake():
+    # 1. Check if 'cmake' is in PATH
     if shutil.which("cmake"):
         return "cmake"
-    vs_cmake = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-    if os.path.exists(vs_cmake):
-        return vs_cmake
-    raise FileNotFoundError("Could not find cmake.exe in PATH or Visual Studio BuildTools.")
+        
+    # 2. Check Python package fallback (if cmake was installed via pip)
+    try:
+        import cmake
+        cmake_bin = os.path.join(cmake.CMAKE_BIN_DIR, "cmake")
+        if os.path.exists(cmake_bin):
+            return cmake_bin
+        cmake_exe = os.path.join(cmake.CMAKE_BIN_DIR, "cmake.exe")
+        if os.path.exists(cmake_exe):
+            return cmake_exe
+    except ImportError:
+        pass
+
+    # 3. Check Windows-specific Visual Studio CMake path
+    if sys.platform == "win32":
+        vs_cmake = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+        if os.path.exists(vs_cmake):
+            return vs_cmake
+        raise FileNotFoundError(
+            "Could not find 'cmake.exe' in PATH, python packages, or Visual Studio BuildTools.\n"
+            "Please install CMake and ensure it is in your PATH."
+        )
+    else:
+        raise FileNotFoundError(
+            "Could not find 'cmake' in PATH or python packages.\n"
+            "Please install CMake using your package manager (e.g., 'brew install cmake' on macOS, or 'sudo apt install cmake' on Linux)."
+        )
 
 def find_vcvarsall():
     # Look for vcvars64.bat or vcvarsall.bat
@@ -95,6 +119,24 @@ def build_extension():
                 
     if not copied:
         raise FileNotFoundError("Could not locate compiled framecycler_engine binary.")
+    
+    # On macOS, ad-hoc sign the compiled binary to satisfy Gatekeeper.
+    # Without this, macOS provenance tracking quarantines freshly compiled .so files
+    # and kills the process with SIGKILL (exit code 9) on import.
+    if sys.platform == "darwin":
+        so_path = os.path.join(dest_dir, next(
+            f for f in os.listdir(dest_dir)
+            if "framecycler_engine" in f and f.endswith(".so")
+        ))
+        print(f"Signing binary for macOS Gatekeeper: {so_path}")
+        sign_result = subprocess.run(
+            ["codesign", "--force", "--sign", "-", so_path],
+            capture_output=True, text=True
+        )
+        if sign_result.returncode != 0:
+            print(f"Warning: codesign failed (non-fatal): {sign_result.stderr.strip()}")
+        else:
+            print("Binary signed successfully.")
         
     print("=== Build Completed Successfully ===")
 

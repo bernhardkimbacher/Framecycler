@@ -73,6 +73,19 @@ class DPXDecoder(BaseDecoder):
         if len(img.shape) > 2 and img.shape[2] == 4:
             channels = ["R", "G", "B", "A"]
             
+        # Read DPX header for transfer characteristic & colorimetric specification
+        transfer_char = 0
+        colorimetric = 0
+        try:
+            with open(first_file, "rb") as f:
+                f.seek(801)
+                b = f.read(2)
+                if len(b) == 2:
+                    transfer_char = b[0]
+                    colorimetric = b[1]
+        except Exception as e:
+            print(f"DPXDecoder: failed to read transfer/colorimetric headers: {e}")
+
         return {
             "width": w,
             "height": h,
@@ -81,7 +94,9 @@ class DPXDecoder(BaseDecoder):
             "start_frame": self.start_frame,
             "end_frame": self.end_frame,
             "timecode_start": Timecode.frame_to_timecode(0, 24.0, self.start_frame),
-            "channels": channels
+            "channels": channels,
+            "transfer_characteristic": transfer_char,
+            "colorimetric_specification": colorimetric
         }
 
     def get_metadata(self) -> Dict[str, Any]:

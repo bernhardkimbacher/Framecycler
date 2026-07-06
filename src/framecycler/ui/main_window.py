@@ -193,8 +193,7 @@ class MainWindow(QMainWindow):
         
         main_layout.addLayout(transport_layout)
         
-        # Build collapsible CDL Panel
-        self._build_cdl_dock()
+
         
         # Setup Menu bar
         self._build_menu()
@@ -215,6 +214,11 @@ class MainWindow(QMainWindow):
         act_open_b = QAction("Open Media (Slot B)...", self)
         act_open_b.triggered.connect(lambda: self._open_file_dialog(1))
         file_menu.addAction(act_open_b)
+        
+        act_clear = QAction("Clear", self)
+        act_clear.setShortcut(QKeySequence("Shift+X"))
+        act_clear.triggered.connect(self.clear_media)
+        file_menu.addAction(act_clear)
         
         file_menu.addSeparator()
         
@@ -244,15 +248,38 @@ class MainWindow(QMainWindow):
             for action in plugin.get_menu_actions():
                 plugins_menu.addAction(action)
                 
-        # Tools menu
-        tools_menu = menubar.addMenu("&Tools")
-        cdl_toggle_act = self.cdl_dock.toggleViewAction()
-        cdl_toggle_act.setText("CDL Color Grading")
-        tools_menu.addAction(cdl_toggle_act)
+        # Grading menu (Built-in grading tool)
+        grading_menu = menubar.addMenu("&Grading")
+        
+        act_exposure = QAction("Exposure...", self)
+        act_exposure.setShortcut(QKeySequence("E"))
+        act_exposure.triggered.connect(self._activate_exposure_mode)
+        grading_menu.addAction(act_exposure)
+        
+        act_gamma = QAction("Gamma...", self)
+        act_gamma.setShortcut(QKeySequence("Y"))
+        act_gamma.triggered.connect(self._activate_gamma_mode)
+        grading_menu.addAction(act_gamma)
+        
+        act_offset = QAction("Offset...", self)
+        act_offset.setShortcut(QKeySequence("O"))
+        act_offset.triggered.connect(self._activate_offset_mode)
+        grading_menu.addAction(act_offset)
+        
+        act_reset_grade = QAction("Reset Color Grade", self)
+        act_reset_grade.setShortcut(QKeySequence("Home"))
+        act_reset_grade.triggered.connect(self._reset_grade)
+        grading_menu.addAction(act_reset_grade)
         
         # OCIO Pipeline menu
         self.ocio_menu = menubar.addMenu("&OCIO")
         self._build_ocio_submenu()
+        
+        # Help menu
+        help_menu = menubar.addMenu("&Help")
+        act_view_logs = QAction("View Logs", self)
+        act_view_logs.triggered.connect(self._show_log_viewer)
+        help_menu.addAction(act_view_logs)
 
     def _build_ocio_submenu(self):
         self.ocio_menu.clear()
@@ -266,102 +293,28 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, name=cs: self._set_input_colorspace(name))
             self.input_space_menu.addAction(act)
             
-        # 2. Displays list
-        self.display_menu = self.ocio_menu.addMenu("Display Device")
-        for d in self.ocio_manager.get_displays():
+        # 2. Look list
+        self.look_menu = self.ocio_menu.addMenu("Look")
+        for look in self.ocio_manager.get_looks():
+            act = QAction(look, self)
+            act.setCheckable(True)
+            act.setChecked(look == (self.ocio_manager.look or "None (Bypass)"))
+            act.triggered.connect(lambda checked=False, name=look: self._set_look(name))
+            self.look_menu.addAction(act)
+            
+        self.look_menu.addSeparator()
+        act_load_lut = QAction("Load Custom LUT...", self)
+        act_load_lut.triggered.connect(self._load_custom_lut)
+        self.look_menu.addAction(act_load_lut)
+        
+        # 3. Display Output list
+        self.display_output_menu = self.ocio_menu.addMenu("Display Output")
+        for d in self.ocio_manager.get_display_outputs():
             act = QAction(d, self)
             act.setCheckable(True)
-            act.setChecked(d == self.ocio_manager.display)
-            act.triggered.connect(lambda checked=False, name=d: self._set_display(name))
-            self.display_menu.addAction(act)
-            
-        # 3. Views list
-        self.view_menu = self.ocio_menu.addMenu("View Transform")
-        for v in self.ocio_manager.get_views(self.ocio_manager.display):
-            act = QAction(v, self)
-            act.setCheckable(True)
-            act.setChecked(v == self.ocio_manager.view)
-            act.triggered.connect(lambda checked=False, name=v: self._set_view_transform(name))
-            self.view_menu.addAction(act)
-
-    def _build_cdl_dock(self):
-        self.cdl_dock = QDockWidget("CDL Color Grading", self)
-        self.cdl_dock.setObjectName("cdl_dock")
-        self.cdl_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        
-        # Slope slider
-        slope_layout = QHBoxLayout()
-        slope_layout.addWidget(QLabel("SLOPE (R, G, B)"))
-        self.slope_val_label = QLabel("1.00")
-        self.slope_val_label.setAlignment(Qt.AlignRight)
-        slope_layout.addWidget(self.slope_val_label)
-        layout.addLayout(slope_layout)
-        
-        self.slope_slider = QSlider(Qt.Horizontal)
-        self.slope_slider.setRange(0, 200)  # 0.0 to 2.0
-        self.slope_slider.setValue(100)
-        self.slope_slider.setFocusPolicy(Qt.NoFocus)
-        self.slope_slider.valueChanged.connect(self._on_cdl_changed)
-        layout.addWidget(self.slope_slider)
-        
-        # Offset slider
-        offset_layout = QHBoxLayout()
-        offset_layout.addWidget(QLabel("OFFSET"))
-        self.offset_val_label = QLabel("0.00")
-        self.offset_val_label.setAlignment(Qt.AlignRight)
-        offset_layout.addWidget(self.offset_val_label)
-        layout.addLayout(offset_layout)
-        
-        self.offset_slider = QSlider(Qt.Horizontal)
-        self.offset_slider.setRange(-100, 100)  # -1.0 to 1.0
-        self.offset_slider.setValue(0)
-        self.offset_slider.setFocusPolicy(Qt.NoFocus)
-        self.offset_slider.valueChanged.connect(self._on_cdl_changed)
-        layout.addWidget(self.offset_slider)
-        
-        # Power slider
-        power_layout = QHBoxLayout()
-        power_layout.addWidget(QLabel("POWER"))
-        self.power_val_label = QLabel("1.00")
-        self.power_val_label.setAlignment(Qt.AlignRight)
-        power_layout.addWidget(self.power_val_label)
-        layout.addLayout(power_layout)
-        
-        self.slope_power = QSlider(Qt.Horizontal)
-        self.slope_power.setRange(10, 300)  # 0.1 to 3.0
-        self.slope_power.setValue(100)
-        self.slope_power.setFocusPolicy(Qt.NoFocus)
-        self.slope_power.valueChanged.connect(self._on_cdl_changed)
-        layout.addWidget(self.slope_power)
-        
-        # Saturation slider
-        sat_layout = QHBoxLayout()
-        sat_layout.addWidget(QLabel("SATURATION"))
-        self.sat_val_label = QLabel("1.00")
-        self.sat_val_label.setAlignment(Qt.AlignRight)
-        sat_layout.addWidget(self.sat_val_label)
-        layout.addLayout(sat_layout)
-        
-        self.sat_slider = QSlider(Qt.Horizontal)
-        self.sat_slider.setRange(0, 200)  # 0.0 to 2.0
-        self.sat_slider.setValue(100)
-        self.sat_slider.setFocusPolicy(Qt.NoFocus)
-        self.sat_slider.valueChanged.connect(self._on_cdl_changed)
-        layout.addWidget(self.sat_slider)
-        
-        # Home button to reset CDL
-        self.btn_home = QPushButton("Home")
-        self.btn_home.setFocusPolicy(Qt.NoFocus)
-        self.btn_home.clicked.connect(self._reset_cdl)
-        layout.addWidget(self.btn_home)
-        
-        layout.addStretch()
-        self.cdl_dock.setWidget(panel)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.cdl_dock)
-        self.cdl_dock.setVisible(False)
+            act.setChecked(d == self.ocio_manager.display_output)
+            act.triggered.connect(lambda checked=False, name=d: self._set_display_output(name))
+            self.display_output_menu.addAction(act)
 
     def _setup_hotkeys(self):
         # Frame stepping
@@ -381,23 +334,11 @@ class MainWindow(QMainWindow):
         # Play/Pause
         self._add_shortcut("Space", self.toggle_playback)
         
-        # Timecode display toggle
-        self._add_shortcut("T", self.toggle_timecode_mode)
-        
-        # CDL Reset
-        self._add_shortcut("Home", self._reset_cdl)
-        
         # Channel views toggles
         self._add_shortcut("R", lambda: self.toggle_channel_mask(1))
         self._add_shortcut("G", lambda: self.toggle_channel_mask(2))
         self._add_shortcut("B", lambda: self.toggle_channel_mask(3))
         self._add_shortcut("A", lambda: self.toggle_channel_mask(4))
-        
-        # CDL Interactive Adjustments
-        self._add_shortcut("P", lambda: self.activate_adjustment_mode('power'))
-        self._add_shortcut("O", lambda: self.activate_adjustment_mode('offset'))
-        self._add_shortcut("S", lambda: self.activate_adjustment_mode('slope'))
-        self._add_shortcut("Shift+S", lambda: self.activate_adjustment_mode('saturation'))
 
     def _add_shortcut(self, key_str: str, callback):
         action = QAction(self)
@@ -416,6 +357,9 @@ class MainWindow(QMainWindow):
 
     def load_media(self, path: str, slot: int):
         self.statusBar().showMessage(f"Loading media: {os.path.basename(path)}...")
+        
+        # Clear viewport references to prevent holding dangling pointers to old cache buffers
+        self.viewport.clear_frames()
         
         # Shutdown existing slot cache
         if self.caches[slot] is not None:
@@ -463,6 +407,12 @@ class MainWindow(QMainWindow):
                 h = meta.get("height", 0)
                 self.lbl_resolution.setText(f"{w}x{h}")
                 
+                # Auto-detect input colorspace from filename/metadata
+                detected_cs = self.ocio_manager.detect_input_colorspace(path, meta)
+                self.ocio_manager.input_colorspace = detected_cs
+                self.viewport.update_ocio_pipeline()
+                self._build_ocio_submenu()
+                
             self._update_ocio_info_label()
             
             # Perform initial frame read
@@ -477,6 +427,48 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"Error loading: {e}")
             print(f"Error: {e}")
+
+    def clear_media(self):
+        # 1. Stop playback if active
+        self.stop_playback()
+        
+        # 2. Clear viewport references to prevent holding dangling pointers
+        self.viewport.clear_frames()
+        
+        # 3. Close and delete all decoders and caches
+        for slot in range(2):
+            if self.caches[slot] is not None:
+                self.caches[slot].close()
+                self.caches[slot] = None
+            self.decoders[slot] = None
+            
+        # 4. Reset playback parameters
+        self.fps = 24.0
+        self.start_frame = 0
+        self.end_frame = 0
+        self.in_point = 0
+        self.out_point = 0
+        self.current_frame = 0
+        
+        # 5. Reset UI controls
+        self.timeline.set_range(0, 0)
+        self.timeline.set_in_out(0, 0)
+        self.timeline.set_current_frame(0)
+        self.timeline.set_cached_frames(set())
+        
+        self.exr_layer_combo.clear()
+        self.exr_layer_combo.addItem("beauty")
+        
+        self.lbl_resolution.setText("")
+        self.lbl_frame.setText("FR: 0000")
+        self.lbl_fps.setText("FPS: 24.00")
+        self.lbl_tc.setText("TC: 01:00:00:00")
+        self.lbl_ocio_info.setText("")
+        
+        # 6. Redraw viewport and update status
+        self.viewport.resolution_str = "0x0"
+        self.viewport.update()
+        self.statusBar().showMessage("Viewer inputs cleared.")
 
     def seek_to_frame(self, frame: int):
         # Clip to range
@@ -628,47 +620,80 @@ class MainWindow(QMainWindow):
         self._build_ocio_submenu()
         self._update_ocio_info_label()
 
-    def _set_display(self, name):
-        self.ocio_manager.display = name
-        self.ocio_manager.view = self.ocio_manager.get_views(name)[0]
+    def _set_look(self, name):
+        self.ocio_manager.set_look(name)
         self.viewport.update_ocio_pipeline()
         self._build_ocio_submenu()
         self._update_ocio_info_label()
 
-    def _set_view_transform(self, name):
-        self.ocio_manager.view = name
+    def _set_display_output(self, name):
+        self.ocio_manager.set_display_output(name)
         self.viewport.update_ocio_pipeline()
         self._build_ocio_submenu()
         self._update_ocio_info_label()
+
+    def _load_custom_lut(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Custom LUT (.cube)", "", "LUT Files (*.cube)"
+        )
+        if path:
+            self.ocio_manager.load_custom_lut(path)
+            self.viewport.update_ocio_pipeline()
+            self._build_ocio_submenu()
+            self._update_ocio_info_label()
         
     def _update_ocio_info_label(self):
         if hasattr(self, "lbl_ocio_info") and self.lbl_ocio_info:
-            info = f"IN: {self.ocio_manager.input_colorspace} | OUT: {self.ocio_manager.display} ({self.ocio_manager.view})"
+            look_str = self.ocio_manager.look if self.ocio_manager.look else "None"
+            info = f"IN: {self.ocio_manager.input_colorspace} | LOOK: {look_str} | OUT: {self.ocio_manager.display_output}"
+            
+            # Append grading info if active
+            grade_parts = []
+            if self.ocio_manager.grade_exposure != 0.0:
+                grade_parts.append(f"Exp: {self.ocio_manager.grade_exposure:+.2f}")
+            if self.ocio_manager.grade_gamma != 1.0:
+                grade_parts.append(f"Gam: {self.ocio_manager.grade_gamma:.2f}")
+            if self.ocio_manager.grade_offset != 0.0:
+                grade_parts.append(f"Off: {self.ocio_manager.grade_offset:+.3f}")
+                
+            if grade_parts:
+                info += f" | GRADE: {', '.join(grade_parts)}"
+                
             self.lbl_ocio_info.setText(info)
 
-    # CDL value slot adjustments
-    def _on_cdl_changed(self):
-        slope = self.slope_slider.value() / 100.0
-        offset = self.offset_slider.value() / 100.0
-        power = self.slope_power.value() / 100.0
-        sat = self.sat_slider.value() / 100.0
-        
-        if hasattr(self, "slope_val_label"):
-            self.slope_val_label.setText(f"{slope:.2f}")
-        if hasattr(self, "offset_val_label"):
-            self.offset_val_label.setText(f"{offset:.2f}")
-        if hasattr(self, "power_val_label"):
-            self.power_val_label.setText(f"{power:.2f}")
-        if hasattr(self, "sat_val_label"):
-            self.sat_val_label.setText(f"{sat:.2f}")
-            
-        self.ocio_manager.set_cdl(
-            slope=[slope, slope, slope],
-            offset=[offset, offset, offset],
-            power=[power, power, power],
-            sat=sat
-        )
+    def _activate_exposure_mode(self):
+        self.viewport.adjustment_mode = 'exposure'
+        self.viewport.adjust_start_value = self.ocio_manager.grade_exposure
+        self.viewport.setCursor(Qt.SizeHorCursor)
+        self.viewport.update()
+        self.statusBar().showMessage("Interactive adjustment: Left-drag mouse horizontally to adjust EXPOSURE")
+
+    def _activate_gamma_mode(self):
+        self.viewport.adjustment_mode = 'gamma'
+        self.viewport.adjust_start_value = self.ocio_manager.grade_gamma
+        self.viewport.setCursor(Qt.SizeHorCursor)
+        self.viewport.update()
+        self.statusBar().showMessage("Interactive adjustment: Left-drag mouse horizontally to adjust GAMMA")
+
+    def _activate_offset_mode(self):
+        self.viewport.adjustment_mode = 'offset'
+        self.viewport.adjust_start_value = self.ocio_manager.grade_offset
+        self.viewport.setCursor(Qt.SizeHorCursor)
+        self.viewport.update()
+        self.statusBar().showMessage("Interactive adjustment: Left-drag mouse horizontally to adjust OFFSET")
+
+    def _reset_grade(self):
+        self.ocio_manager.grade_exposure = 0.0
+        self.ocio_manager.grade_gamma = 1.0
+        self.ocio_manager.grade_offset = 0.0
         self.viewport.update_ocio_pipeline()
+        self._update_ocio_info_label()
+        self.statusBar().showMessage("Color grading parameters reset to defaults.")
+
+    def _show_log_viewer(self):
+        from .log_viewer import LogViewerDialog
+        dialog = LogViewerDialog(self)
+        dialog.exec()
 
     def toggle_channel_mask(self, mask: int):
         if self.viewport.channel_mask == mask:
@@ -681,28 +706,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "channel_buttons"):
             for val, btn in self.channel_buttons.items():
                 btn.setChecked(val == active_mask)
-
-    def activate_adjustment_mode(self, mode: str):
-        if mode == 'slope':
-            val = self.slope_slider.value() / 100.0
-        elif mode == 'offset':
-            val = self.offset_slider.value() / 100.0
-        elif mode == 'power':
-            val = self.slope_power.value() / 100.0
-        elif mode == 'saturation':
-            val = self.sat_slider.value() / 100.0
-            
-        self.viewport.adjustment_mode = mode
-        self.viewport.adjust_start_value = val
-        self.viewport.adjust_current_value = val
-        self.viewport.update()
-        self.statusBar().showMessage(f"Interactive adjustment: Drag mouse horizontally to adjust {mode.upper()}")
-
-    def _reset_cdl(self):
-        self.slope_slider.setValue(100)
-        self.offset_slider.setValue(0)
-        self.slope_power.setValue(100)
-        self.sat_slider.setValue(100)
 
     # Settings and helper dialogs
     def _open_settings_dialog(self):
