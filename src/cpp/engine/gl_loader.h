@@ -24,6 +24,7 @@
     #define GL_VERTEX_SHADER 0x8B31
     #define GL_FRAGMENT_SHADER 0x8B30
     #define GL_COMPILE_STATUS 0x8B81
+    #define GL_FRAMEBUFFER_SRGB 0x8DB9
     
     // OpenGL extension function typedefs
     typedef void (APIENTRY * PFNGLGENVERTEXARRAYSPROC) (GLsizei n, GLuint *arrays);
@@ -32,6 +33,7 @@
     typedef void (APIENTRY * PFNGLBINDBUFFERPROC) (GLenum target, GLuint buffer);
     typedef void (APIENTRY * PFNGLBUFFERDATAPROC) (GLenum target, GLsizeiptr size, const void *data, GLenum usage);
     typedef void (APIENTRY * PFNGLENABLEVERTEXATTRIBARRAYPROC) (GLuint index);
+    typedef void (APIENTRY * PFNGLBINDATTRIBLOCATIONPROC) (GLuint program, GLuint index, const GLchar *name);
     typedef void (APIENTRY * PFNGLVERTEXATTRIBPOINTERPROC) (GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer);
     typedef void (APIENTRY * PFNGLDELETEVERTEXARRAYSPROC) (GLsizei n, const GLuint *arrays);
     typedef void (APIENTRY * PFNGLDELETEBUFFERSPROC) (GLsizei n, const GLuint *buffers);
@@ -65,6 +67,7 @@
     inline PFNGLBINDBUFFERPROC glBindBuffer = nullptr;
     inline PFNGLBUFFERDATAPROC glBufferData = nullptr;
     inline PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray = nullptr;
+    inline PFNGLBINDATTRIBLOCATIONPROC glBindAttribLocation = nullptr;
     inline PFNGLVERTEXATTRIBPOINTERPROC glVertexAttribPointer = nullptr;
     inline PFNGLDELETEVERTEXARRAYSPROC glDeleteVertexArrays = nullptr;
     inline PFNGLDELETEBUFFERSPROC glDeleteBuffers = nullptr;
@@ -100,6 +103,7 @@
         glBindBuffer = (PFNGLBINDBUFFERPROC)wglGetProcAddress("glBindBuffer");
         glBufferData = (PFNGLBUFFERDATAPROC)wglGetProcAddress("glBufferData");
         glEnableVertexAttribArray = (PFNGLENABLEVERTEXATTRIBARRAYPROC)wglGetProcAddress("glEnableVertexAttribArray");
+        glBindAttribLocation = (PFNGLBINDATTRIBLOCATIONPROC)wglGetProcAddress("glBindAttribLocation");
         glVertexAttribPointer = (PFNGLVERTEXATTRIBPOINTERPROC)wglGetProcAddress("glVertexAttribPointer");
         glDeleteVertexArrays = (PFNGLDELETEVERTEXARRAYSPROC)wglGetProcAddress("glDeleteVertexArrays");
         glDeleteBuffers = (PFNGLDELETEBUFFERSPROC)wglGetProcAddress("glDeleteBuffers");
