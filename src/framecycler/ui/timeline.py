@@ -160,7 +160,9 @@ class Timeline(QWidget):
         
         # Draw playhead position (label, triangle, and line)
         x_playhead = self._x_from_frame(self.current_frame)
-        label = Timecode.format_position_label(self.current_frame, self.show_timecode, self.fps)
+        label = Timecode.format_position_label(
+            self.current_frame, self.show_timecode, self.fps, prefixed=False
+        )
 
         label_font = ui_font(10)
         painter.setFont(label_font)

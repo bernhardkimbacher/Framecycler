@@ -62,9 +62,17 @@ class QuickTimeDecoder(BaseDecoder):
         if hasattr(self.stream, "metadata") and self.stream.metadata:
             merged_meta.update(self.stream.metadata)
 
+        pixel_aspect_ratio = 1.0
+        sample_aspect = getattr(self.stream, "sample_aspect_ratio", None)
+        if sample_aspect is not None and sample_aspect.denominator:
+            pixel_aspect_ratio = float(sample_aspect.numerator) / float(sample_aspect.denominator)
+            if pixel_aspect_ratio <= 0.0:
+                pixel_aspect_ratio = 1.0
+
         self.metadata = {
             "width": self.width,
             "height": self.height,
+            "pixel_aspect_ratio": pixel_aspect_ratio,
             "fps": self.fps,
             "frame_count": self.frame_count,
             "start_frame": self.start_frame,

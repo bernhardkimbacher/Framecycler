@@ -13,6 +13,7 @@ from ..color.ocio_manager import OCIOManager
 from ..decoders.exr_decoder import EXRDecoder
 from ..decoders.dpx_decoder import DPXDecoder
 from ..decoders.qt_decoder import QuickTimeDecoder
+from ..decoders.image_io import ANAMORPHIC_PIXEL_ASPECT, SQUARE_PIXEL_ASPECT
 from ..extensions.ocio_api_tool import OcioApiTool
 
 
@@ -29,6 +30,11 @@ PRESET_FRAME_RATES = [
     ("25", 25.0),
     ("29.97", 29.97),
     ("30", 30.0),
+]
+
+PIXEL_ASPECT_MODES = [
+    ("Square", "square"),
+    ("Anamorphic", "anamorphic"),
 ]
 
 class MainWindow(QMainWindow):
@@ -57,6 +63,9 @@ class MainWindow(QMainWindow):
         self.in_point = 0
         self.out_point = 0
         self.fps = self.settings.default_fps
+        self.active_exr_layer = "beauty"
+        self.pixel_aspect_mode = "square"
+        self.file_pixel_aspect_ratio = SQUARE_PIXEL_ASPECT
         
         # Dynamic menus references
         self.exr_layer_combo = None
@@ -270,6 +279,18 @@ class MainWindow(QMainWindow):
         act_reset.setShortcut(QKeySequence("F"))
         act_reset.triggered.connect(self.viewport.reset_view)
         view_menu.addAction(act_reset)
+
+        # Image menu
+        image_menu = menubar.addMenu("&Image")
+        par_menu = image_menu.addMenu("Pixel Aspect Ratio")
+        self.pixel_aspect_actions = []
+        for label, mode in PIXEL_ASPECT_MODES:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(mode == self.pixel_aspect_mode)
+            act.triggered.connect(lambda checked=False, m=mode: self._set_pixel_aspect_mode(m))
+            par_menu.addAction(act)
+            self.pixel_aspect_actions.append((mode, act))
 
         # Playback menu
         playback_menu = menubar.addMenu("&Playback")
@@ -509,6 +530,32 @@ class MainWindow(QMainWindow):
             for m, act in self.compare_actions:
                 act.setChecked(m == mode)
 
+    def _pixel_aspect_for_mode(self, mode: str) -> float:
+        if mode == "anamorphic":
+            return ANAMORPHIC_PIXEL_ASPECT
+        return SQUARE_PIXEL_ASPECT
+
+    def _pixel_aspect_mode_for_value(self, par: float) -> str:
+        if abs(par - ANAMORPHIC_PIXEL_ASPECT) < abs(par - SQUARE_PIXEL_ASPECT):
+            return "anamorphic"
+        return "square"
+
+    def _set_pixel_aspect_mode(self, mode: str):
+        self.pixel_aspect_mode = mode
+        self.viewport.set_pixel_aspect_ratio(self._pixel_aspect_for_mode(mode))
+        if hasattr(self, "pixel_aspect_actions"):
+            for m, act in self.pixel_aspect_actions:
+                act.setChecked(m == mode)
+
+    def _apply_file_pixel_aspect_ratio(self, par: float):
+        self.file_pixel_aspect_ratio = par if par > 0.0 else SQUARE_PIXEL_ASPECT
+        mode = self._pixel_aspect_mode_for_value(self.file_pixel_aspect_ratio)
+        self.pixel_aspect_mode = mode
+        self.viewport.set_pixel_aspect_ratio(self.file_pixel_aspect_ratio)
+        if hasattr(self, "pixel_aspect_actions"):
+            for m, act in self.pixel_aspect_actions:
+                act.setChecked(m == mode)
+
     def _open_file_dialog(self, slot: int):
         path, _ = QFileDialog.getOpenFileName(
             self, f"Load Media for Slot {'A' if slot == 0 else 'B'}",
@@ -559,19 +606,30 @@ class MainWindow(QMainWindow):
                 
                 # Populate EXR layers in header combobox if applicable
                 self.exr_layer_combo.clear()
-                layers = set()
-                for chan in meta.get("channels", []):
-                    if "." in chan:
-                        layers.add(chan.split(".")[0])
-                    else:
-                        layers.add("beauty")
-                self.exr_layer_combo.addItems(sorted(list(layers)))
-                self.exr_layer_combo.refresh_popup_geometry()
+                layers = meta.get("layers", [])
+                if not layers and isinstance(decoder, EXRDecoder):
+                    layers = ["beauty"]
+                if layers:
+                    self.exr_layer_combo.addItems(layers)
+                    self.exr_layer_combo.refresh_popup_geometry()
+                    if isinstance(decoder, EXRDecoder):
+                        self.active_exr_layer = decoder.active_layer or layers[0]
+                        self.viewport.exr_layer_str = self.active_exr_layer
+                        layer_idx = self.exr_layer_combo.findText(self.active_exr_layer)
+                        if layer_idx >= 0:
+                            self.exr_layer_combo.blockSignals(True)
+                            self.exr_layer_combo.setCurrentIndex(layer_idx)
+                            self.exr_layer_combo.blockSignals(False)
+                else:
+                    self.exr_layer_combo.addItem("beauty")
                 
                 # Update resolution label readout outside the image
                 w = meta.get("width", 0)
                 h = meta.get("height", 0)
                 self.lbl_resolution.setText(f"{w}x{h}")
+
+                par = meta.get("pixel_aspect_ratio", SQUARE_PIXEL_ASPECT)
+                self._apply_file_pixel_aspect_ratio(par)
                 
                 # Auto-detect input colorspace from filename/metadata
                 detected_cs = self.ocio_manager.detect_input_colorspace(path, meta)
@@ -628,6 +686,7 @@ class MainWindow(QMainWindow):
         self.lbl_resolution.setText("")
         self.lbl_fps.setText(self._format_fps_label(self.fps))
         self.lbl_ocio_info.setText("")
+        self._set_pixel_aspect_mode("square")
         self._update_readout_display()
         
         # 6. Redraw viewport and update status
@@ -831,8 +890,18 @@ class MainWindow(QMainWindow):
             self._set_playback_fps(fps)
 
     def _on_exr_layer_changed(self, index):
-        if self.exr_layer_combo.count() > 0:
-            self.viewport.exr_layer_str = self.exr_layer_combo.currentText()
+        if self.exr_layer_combo.count() == 0:
+            return
+        layer = self.exr_layer_combo.currentText()
+        self.active_exr_layer = layer
+        self.viewport.exr_layer_str = layer
+        decoder = self.decoders[0]
+        if isinstance(decoder, EXRDecoder):
+            decoder.active_layer = layer
+            if self.caches[0] is not None:
+                self.caches[0].clear()
+            self.seek_to_frame(self.current_frame)
+        else:
             self.viewport.update()
 
     def _on_look_combo_changed(self, text: str):

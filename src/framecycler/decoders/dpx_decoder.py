@@ -1,9 +1,9 @@
 import os
 import re
-import cv2
 import numpy as np
 from typing import Dict, Any, List, Tuple
 from .base import BaseDecoder
+from . import image_io
 from ..core.timecode import Timecode
 
 class DPXDecoder(BaseDecoder):
@@ -62,41 +62,21 @@ class DPXDecoder(BaseDecoder):
 
     def _read_sequence_metadata(self) -> Dict[str, Any]:
         first_file = self.file_paths[0]
-        img = cv2.imread(first_file, cv2.IMREAD_UNCHANGED)
-        if img is None:
-            raise ValueError(f"Failed to load DPX file: {first_file}")
-            
-        h, w = img.shape[:2]
-        
-        # DPX is typically RGB or RGBA
-        channels = ["R", "G", "B"]
-        if len(img.shape) > 2 and img.shape[2] == 4:
-            channels = ["R", "G", "B", "A"]
-            
-        # Read DPX header for transfer characteristic & colorimetric specification
-        transfer_char = 0
-        colorimetric = 0
-        try:
-            with open(first_file, "rb") as f:
-                f.seek(801)
-                b = f.read(2)
-                if len(b) == 2:
-                    transfer_char = b[0]
-                    colorimetric = b[1]
-        except Exception as e:
-            print(f"DPXDecoder: failed to read transfer/colorimetric headers: {e}")
+        img_meta = image_io.read_metadata(first_file)
+        channels = image_io.display_channels_for_metadata(img_meta)
 
         return {
-            "width": w,
-            "height": h,
+            "width": img_meta.width,
+            "height": img_meta.height,
+            "pixel_aspect_ratio": img_meta.pixel_aspect_ratio,
             "fps": 24.0,
             "frame_count": len(self.file_paths),
             "start_frame": self.start_frame,
             "end_frame": self.end_frame,
             "timecode_start": Timecode.frame_to_timecode(0, 24.0, self.start_frame),
             "channels": channels,
-            "transfer_characteristic": transfer_char,
-            "colorimetric_specification": colorimetric
+            "transfer_characteristic": img_meta.transfer_characteristic,
+            "colorimetric_specification": img_meta.colorimetric_specification,
         }
 
     def get_metadata(self) -> Dict[str, Any]:
@@ -111,25 +91,9 @@ class DPXDecoder(BaseDecoder):
         if not file_path:
             closest_frame = min(self.frame_numbers, key=lambda x: abs(x - frame_index))
             file_path = self.frame_map[closest_frame]
-            
-        img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-        if img is None:
-            raise ValueError(f"Failed to decode DPX frame: {file_path}")
-            
-        # OpenCV loads DPX as BGR or BGRA. Convert to RGB/RGBA.
-        if len(img.shape) > 2:
-            if img.shape[2] == 3:
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            elif img.shape[2] == 4:
-                img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
-                
-        # Normalize image to float32 [0.0, 1.0] depending on input type
-        if img.dtype == np.uint8:
-            img = img.astype(np.float32) / 255.0
-        elif img.dtype == np.uint16:
-            img = img.astype(np.float32) / 65535.0
-        else:
-            img = img.astype(np.float32)
+
+        img = image_io.read_pixels(file_path)
+        img = img.astype(np.float32)
             
         tc = Timecode.frame_to_timecode(frame_index, self.metadata["fps"], 0)
         

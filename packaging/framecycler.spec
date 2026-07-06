@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_dynamic_libs
+
 block_cipher = None
 root = Path(SPECPATH).resolve().parent
 
@@ -25,12 +27,12 @@ engine_bins = [
 a = Analysis(
     [str(root / "src" / "framecycler" / "__main__.py")],
     pathex=[str(root / "src")],
-    binaries=engine_bins,
+    binaries=engine_bins + collect_dynamic_libs("OpenImageIO"),
     datas=[
         (str(root / "src" / "framecycler" / "color" / "studio_config"), "framecycler/color/studio_config"),
         (str(root / "assets" / "icons"), "assets/icons"),
     ],
-    hiddenimports=[],
+    hiddenimports=["OpenImageIO"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

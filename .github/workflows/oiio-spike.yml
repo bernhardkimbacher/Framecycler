@@ -7,6 +7,13 @@ on:
       - "scripts/oiio_spike.py"
       - ".github/workflows/oiio-spike.yml"
       - "requirements-oiio-spike.txt"
+      - "requirements.txt"
+      - "src/framecycler/decoders/image_io.py"
+      - "src/framecycler/decoders/exr_decoder.py"
+      - "src/framecycler/decoders/dpx_decoder.py"
+      - "tests/test_image_io.py"
+      - "tests/test_decoders_oiio.py"
+      - "tests/oiio_fixtures.py"
 
 jobs:
   spike:
@@ -40,3 +47,6 @@ jobs:
 
       - name: Run OIIO spike
         run: ${{ matrix.python }} scripts/oiio_spike.py
+
+      - name: Run OIIO unit tests
+        run: ${{ matrix.python }} -m unittest tests.test_image_io tests.test_decoders_oiio -v

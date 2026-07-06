@@ -28,6 +28,7 @@ class Viewport(QOpenGLWidget):
         self.frame_data_b = None
         self.width_a, self.height_a, self.channels_a = 0, 0, 3
         self.width_b, self.height_b, self.channels_b = 0, 0, 3
+        self.pixel_aspect_ratio = 1.0
         
         # Viewport layout and sliders
         self.compare_mode = 0      # 0 = normal (A only), 1 = split-screen, 2 = difference, 3 = tiling
@@ -84,6 +85,12 @@ class Viewport(QOpenGLWidget):
             self.channels_b = data.shape[2] if len(data.shape) > 2 else 1
         self.update()
 
+    def set_pixel_aspect_ratio(self, par: float):
+        if par <= 0.0:
+            par = 1.0
+        self.pixel_aspect_ratio = par
+        self.update()
+
     def set_compare_mode(self, mode: int):
         self.compare_mode = mode
         self.update()
@@ -138,7 +145,7 @@ class Viewport(QOpenGLWidget):
         # the result is identical whether logical or physical values are used.
         widget_w, widget_h = self.width(), self.height()
         aspect_widget = widget_w / widget_h
-        aspect_frame = self.width_a / self.height_a
+        aspect_frame = (self.width_a * self.pixel_aspect_ratio) / self.height_a
         
         scale_x = 1.0
         scale_y = 1.0
@@ -319,6 +326,7 @@ class Viewport(QOpenGLWidget):
     def clear_frames(self):
         self.frame_data_a = None
         self.frame_data_b = None
+        self.pixel_aspect_ratio = 1.0
         self.update()
 
     def _draw_adjustment_overlay(self, painter: QPainter):
