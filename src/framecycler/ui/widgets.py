@@ -1,9 +1,11 @@
 from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QFrame,
     QListView,
+    QMenu,
     QStyleFactory,
 )
 
@@ -17,6 +19,22 @@ FALLBACK_ROW_HEIGHT = 22
 # Fusion style makes Qt draw the popup itself (a plain, top-anchored list)
 # so our sizing and scroll locking can take effect.
 _FUSION_STYLE = QStyleFactory.create("Fusion")
+
+
+def add_menu_section(menu: QMenu, title: str, *, first: bool = False) -> None:
+    """Add a visible section title to a menu.
+
+    QMenu.addSection() text is ignored on macOS native menus, so use a
+    disabled action row that renders reliably across platforms.
+    """
+    if not first:
+        menu.addSeparator()
+    section = QAction(title, menu)
+    section.setEnabled(False)
+    font = QFont(section.font())
+    font.setBold(True)
+    section.setFont(font)
+    menu.addAction(section)
 
 
 class WideComboBox(QComboBox):

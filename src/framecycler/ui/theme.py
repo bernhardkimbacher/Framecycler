@@ -33,6 +33,13 @@ def get_viewfinder_stylesheet() -> str:
         background-color: #00aa00;
         color: #ffffff;
     }}
+
+    QMenu::item:disabled {{
+        color: #777777;
+        background: transparent;
+        font-weight: bold;
+        padding-top: 4px;
+    }}
     
     QDialog {{
         background-color: #1c1c1c;

@@ -21,7 +21,7 @@ from .viewport import Viewport
 from .timeline import Timeline
 from .theme import get_viewfinder_stylesheet
 from .settings_dialog import SettingsDialog
-from .widgets import WideComboBox
+from .widgets import WideComboBox, add_menu_section
 from .fonts import ui_font
 
 PRESET_FRAME_RATES = [
@@ -295,6 +295,8 @@ class MainWindow(QMainWindow):
         # Playback menu
         playback_menu = menubar.addMenu("&Playback")
 
+        add_menu_section(playback_menu, "Mode", first=True)
+
         self.loop_mode_actions = []
         loop_modes = [("Loop", "loop"), ("Bounce", "bounce"), ("Once", "once")]
         for label, mode in loop_modes:
@@ -322,8 +324,7 @@ class MainWindow(QMainWindow):
         act_custom_fps.triggered.connect(self._prompt_custom_frame_rate)
         frame_rate_menu.addAction(act_custom_fps)
 
-        playback_menu.addSeparator()
-        playback_menu.addSection("Display")
+        add_menu_section(playback_menu, "Display")
 
         act_show_frames = QAction("Show Frames", self)
         act_show_frames.setCheckable(True)
@@ -351,7 +352,7 @@ class MainWindow(QMainWindow):
         # Tools menu (grading and compare)
         tools_menu = menubar.addMenu("&Tools")
 
-        tools_menu.addSection("Grading")
+        add_menu_section(tools_menu, "Grading", first=True)
 
         act_exposure = QAction("Exposure...", self)
         act_exposure.setShortcut(QKeySequence("E"))
@@ -373,7 +374,7 @@ class MainWindow(QMainWindow):
         act_reset_grade.triggered.connect(self._reset_grade)
         tools_menu.addAction(act_reset_grade)
 
-        tools_menu.addSection("Compare")
+        add_menu_section(tools_menu, "Compare")
 
         self.compare_actions = []
         compare_modes = [
