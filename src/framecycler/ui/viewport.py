@@ -14,6 +14,7 @@ except ImportError:
 class Viewport(QOpenGLWidget):
     wipe_changed = Signal(float)
     frame_scrubbed = Signal(int)
+    zoom_mode_changed = Signal(object)
     
     def __init__(self, ocio_manager: OCIOManager, parent=None):
         super().__init__(parent)
@@ -37,6 +38,7 @@ class Viewport(QOpenGLWidget):
         
         # Mouse zoom and drag
         self.zoom = 1.0
+        self.zoom_mode = "fit"
         self.pan_offset = QPoint(0, 0)
         self.last_mouse_pos = QPoint(0, 0)
         
@@ -76,6 +78,7 @@ class Viewport(QOpenGLWidget):
         self.current_timecode = timecode
         self.fps = fps
         self.resolution_str = f"{self.width_a}x{self.height_a}"
+        self._apply_zoom_mode()
         self.update()
 
     def set_frame_b(self, data: np.ndarray):
@@ -89,6 +92,8 @@ class Viewport(QOpenGLWidget):
         if par <= 0.0:
             par = 1.0
         self.pixel_aspect_ratio = par
+        if self.zoom_mode != "fit":
+            self._apply_zoom_mode()
         self.update()
 
     def set_compare_mode(self, mode: int):
@@ -103,10 +108,49 @@ class Viewport(QOpenGLWidget):
         self.hud_visible = not self.hud_visible
         self.update()
 
-    def reset_view(self):
-        self.zoom = 1.0
+    def _fit_scales(self):
+        widget_w, widget_h = self.width(), self.height()
+        if widget_w <= 0 or widget_h <= 0 or self.width_a <= 0 or self.height_a <= 0:
+            return 1.0, 1.0
+
+        aspect_widget = widget_w / widget_h
+        aspect_frame = (self.width_a * self.pixel_aspect_ratio) / self.height_a
+        scale_x = 1.0
+        scale_y = 1.0
+        if aspect_widget > aspect_frame:
+            scale_x = aspect_frame / aspect_widget
+        else:
+            scale_y = aspect_widget / aspect_frame
+        return scale_x, scale_y
+
+    def _actual_size_zoom(self):
+        scale_x, _ = self._fit_scales()
+        widget_w = self.width()
+        if widget_w <= 0 or scale_x <= 0.0 or self.width_a <= 0:
+            return 1.0
+        return (self.width_a * self.pixel_aspect_ratio) / (widget_w * scale_x)
+
+    def _apply_zoom_mode(self):
+        if self.zoom_mode == "fit":
+            self.zoom = 1.0
+        elif isinstance(self.zoom_mode, int):
+            self.zoom = self._actual_size_zoom() * (self.zoom_mode / 100.0)
+        self.zoom_mode_changed.emit(self.zoom_mode)
+
+    def fit_to_screen(self):
+        self.zoom_mode = "fit"
         self.pan_offset = QPoint(0, 0)
+        self._apply_zoom_mode()
         self.update()
+
+    def set_zoom_percent(self, percent: int):
+        self.zoom_mode = percent
+        self.pan_offset = QPoint(0, 0)
+        self._apply_zoom_mode()
+        self.update()
+
+    def reset_view(self):
+        self.fit_to_screen()
 
     def update_ocio_pipeline(self):
         """
@@ -207,7 +251,9 @@ class Viewport(QOpenGLWidget):
     def resizeGL(self, w, h):
         # Qt's QOpenGLWidget already sets glViewport(0, 0, w, h) in physical device pixels
         # before calling resizeGL. No additional glViewport call is needed here.
-        pass
+        if self.zoom_mode != "fit":
+            self._apply_zoom_mode()
+            self.update()
 
 
             
@@ -316,6 +362,9 @@ class Viewport(QOpenGLWidget):
     def wheelEvent(self, event):
         zoom_factor = 1.1 if event.angleDelta().y() > 0 else 0.9
         self.zoom = max(0.1, min(20.0, self.zoom * zoom_factor))
+        if self.zoom_mode is not None:
+            self.zoom_mode = None
+            self.zoom_mode_changed.emit(None)
         self.update()
 
     def cleanup(self):

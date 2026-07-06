@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self.viewport = Viewport(self.ocio_manager, self)
         self.viewport.wipe_changed.connect(self._on_wipe_moved)
         self.viewport.frame_scrubbed.connect(self.seek_to_frame)
+        self.viewport.zoom_mode_changed.connect(self._sync_zoom_actions)
         
         # Create Custom Timeline
         self.timeline = Timeline(self)
@@ -270,15 +271,29 @@ class MainWindow(QMainWindow):
         
         # View menu
         view_menu = menubar.addMenu("&View")
+        self.view_menu = view_menu
         act_hud = QAction("Toggle HUD", self)
         act_hud.setShortcut(QKeySequence("Ctrl+H"))
         act_hud.triggered.connect(self.viewport.toggle_hud)
         view_menu.addAction(act_hud)
-        
-        act_reset = QAction("Reset Pan/Zoom", self)
-        act_reset.setShortcut(QKeySequence("F"))
-        act_reset.triggered.connect(self.viewport.reset_view)
-        view_menu.addAction(act_reset)
+
+        add_menu_section(view_menu, "Zoom")
+        self.zoom_actions = []
+        zoom_options = [
+            ("Fit to Screen", "fit", "F"),
+            ("Actual Size", 100, "1"),
+            ("200%", 200, "2"),
+            ("300%", 300, "3"),
+            ("400%", 400, "4"),
+        ]
+        for label, mode, shortcut in zoom_options:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(mode == "fit")
+            act.setShortcut(QKeySequence(shortcut))
+            act.triggered.connect(lambda checked=False, m=mode: self._set_zoom_mode(m))
+            view_menu.addAction(act)
+            self.zoom_actions.append((mode, act))
 
         # Image menu
         image_menu = menubar.addMenu("&Image")
@@ -457,10 +472,6 @@ class MainWindow(QMainWindow):
         self._add_shortcut("[", self._set_in_point_here)
         self._add_shortcut("]", self._set_out_point_here)
         
-        # A/B comparisons
-        self._add_shortcut("1", lambda: self._toggle_comparison_slot(0))
-        self._add_shortcut("2", lambda: self._toggle_comparison_slot(1))
-        
         # Play/Pause
         self._add_shortcut("Space", self.toggle_playback)
 
@@ -530,6 +541,23 @@ class MainWindow(QMainWindow):
         if hasattr(self, "compare_actions"):
             for m, act in self.compare_actions:
                 act.setChecked(m == mode)
+
+    def _set_zoom_mode(self, mode):
+        if mode == "fit":
+            self.viewport.fit_to_screen()
+        else:
+            self.viewport.set_zoom_percent(mode)
+        self._sync_zoom_actions(mode)
+
+    def _sync_zoom_actions(self, mode=None):
+        if not hasattr(self, "zoom_actions"):
+            return
+        if mode is None:
+            mode = self.viewport.zoom_mode
+        for m, act in self.zoom_actions:
+            act.blockSignals(True)
+            act.setChecked(m == mode)
+            act.blockSignals(False)
 
     def _pixel_aspect_for_mode(self, mode: str) -> float:
         if mode == "anamorphic":
