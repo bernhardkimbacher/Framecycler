@@ -20,3 +20,12 @@ cmake_install.cmake
 
 # Testing
 tests_config_temp/
+
+# macOS system files
+.DS_Store
+**/.DS_Store
+
+# Compiled binaries
+*.so
+*.dylib
+*.dll
