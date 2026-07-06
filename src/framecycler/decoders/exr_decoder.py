@@ -97,7 +97,7 @@ class EXRDecoder(BaseDecoder):
     def get_metadata(self) -> Dict[str, Any]:
         return self.metadata
 
-    def read_frame(self, frame_index: int, layer: Optional[str] = None) -> Dict[str, Any]:
+    def read_frame(self, frame_index: int, layer: Optional[str] = None, resolution_scale: float = 1.0) -> Dict[str, Any]:
         if frame_index < self.start_frame or frame_index > self.end_frame:
             raise IndexError(f"Frame index {frame_index} out of bounds ({self.start_frame}-{self.end_frame})")
             
@@ -108,8 +108,7 @@ class EXRDecoder(BaseDecoder):
             file_path = self.frame_map[closest_frame]
 
         read_layer = layer if layer is not None else self.active_layer
-        img = image_io.read_pixels(file_path, layer=read_layer)
-        img = img.astype(np.float32)
+        img = image_io.read_pixels(file_path, layer=read_layer, resolution_scale=resolution_scale)
         
         tc = Timecode.frame_to_timecode(frame_index, self.metadata["fps"], 0)
         

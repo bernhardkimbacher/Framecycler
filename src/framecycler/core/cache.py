@@ -1,8 +1,9 @@
+import heapq
 import threading
 import queue
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Any, Set
+from typing import Callable, Dict, Any, List, Set, Tuple
 from ..decoders.base import BaseDecoder
 from .settings import Settings
 from .timecode import Timecode
@@ -13,32 +14,47 @@ try:
 except ImportError:
     import framecycler_engine
 
+
 class CacheEngine:
     def __init__(self, decoder: BaseDecoder, settings: Settings):
         self.decoder = decoder
         self.settings = settings
-        
-        # Instantiate compiled C++ CacheManager (stores uncompressed floats in pre-allocated RAM)
+
+        # Instantiate compiled C++ CacheManager (stores half-float pixels in pre-allocated RAM)
         self.native_cache = framecycler_engine.CacheManager(self.settings.ram_cache_limit_gb)
         self.lock = threading.Lock()
-        
+
+        # Priority decode queue: (priority, sequence, frame_index) — lower priority value = sooner
+        self._decode_heap: List[Tuple[int, int, int]] = []
+        self._heap_seq = 0
+        self._frame_ready_callbacks: List[Callable[[int], None]] = []
+
         # Asynchronous pre-fetch queue & threads
         self.request_queue = queue.Queue()
         self.active_requests: Set[int] = set()
         self.executor = ThreadPoolExecutor(max_workers=self.settings.reader_threads)
-        
+
         # Playback states
         meta = self.decoder.get_metadata()
         start = meta.get("start_frame", 0)
         end = meta.get("end_frame", meta["frame_count"] - 1)
-        
+
         self.current_playhead = start
         self.play_direction = 1
         self.playback_range = (start, end)
-        
+
         self.running = True
         self.manager_thread = threading.Thread(target=self._manager_loop, daemon=True)
         self.manager_thread.start()
+
+    def add_frame_ready_callback(self, callback: Callable[[int], None]) -> None:
+        self._frame_ready_callbacks.append(callback)
+
+    @staticmethod
+    def _to_cache_dtype(img: np.ndarray) -> np.ndarray:
+        if img.dtype == np.float16:
+            return img
+        return np.ascontiguousarray(img.astype(np.float16))
 
     def set_playback_range(self, start: int, end: int):
         with self.lock:
@@ -53,11 +69,12 @@ class CacheEngine:
             self.native_cache.set_playhead(frame_index, direction, self.playback_range[0], self.playback_range[1])
         self.trigger_prefetch()
 
-    def get_frame(self, frame_index: int) -> Dict[str, Any]:
+    def get_frame(self, frame_index: int) -> Dict[str, Any] | None:
         """
-        Fetches frame. Returns zero-copy NumPy view of C++ buffer immediately on cache-hit.
+        Returns a zero-copy NumPy view of the C++ cache buffer on hit.
+        On miss, schedules a high-priority background decode and returns None
+        without blocking the caller.
         """
-        # 1. Check C++ cache manager
         if self.native_cache.has_frame(frame_index):
             data_view = self.native_cache.get_frame_data(frame_index)
             if data_view is not None:
@@ -68,39 +85,17 @@ class CacheEngine:
                     "frame_index": frame_index,
                     "timecode": Timecode.frame_to_timecode(frame_index, meta["fps"], 0),
                 }
-                
-        # 2. Cache miss: Read frame synchronously, store in C++ cache and return
-        try:
-            frame_data = self.decoder.read_frame(frame_index)
-            img = frame_data["data"]
-            h, w = img.shape[:2]
-            channels = img.shape[2] if len(img.shape) > 2 else 1
-            
-            # Write to C++ native allocator
-            self.native_cache.write_frame(frame_index, w, h, channels, img)
-            
-            # Fetch the zero-copy array back to ensure we share memory
-            shared_view = self.native_cache.get_frame_data(frame_index)
-            
-            return {
-                "data": shared_view if shared_view is not None else img,
-                "channels": frame_data["channels"],
-                "frame_index": frame_index,
-                "timecode": frame_data["timecode"]
-            }
-        except Exception as e:
-            print(f"CacheEngine: Synchronous read failure on frame {frame_index}: {e}")
-            return None
+
+        self._schedule_frame(frame_index, priority=0)
+        return None
 
     def get_cached_frames(self) -> Set[int]:
         return set(self.native_cache.get_cached_frames())
 
     def update_settings(self):
         with self.lock:
-            # Update RAM Cache ceiling in C++
             self.native_cache.set_ram_limit(self.settings.ram_cache_limit_gb)
-            
-            # Rescale reader threads
+
             new_threads = self.settings.reader_threads
             if self.executor._max_workers != new_threads:
                 self.executor.shutdown(wait=False)
@@ -108,6 +103,24 @@ class CacheEngine:
 
     def trigger_prefetch(self):
         self.request_queue.put(None)
+
+    def _schedule_frame(self, frame_index: int, priority: int) -> None:
+        with self.lock:
+            if self.native_cache.has_frame(frame_index):
+                return
+            if frame_index in self.active_requests:
+                return
+            self.active_requests.add(frame_index)
+            heapq.heappush(self._decode_heap, (priority, self._heap_seq, frame_index))
+            self._heap_seq += 1
+        self.trigger_prefetch()
+
+    def _notify_frame_ready(self, frame_index: int) -> None:
+        for callback in list(self._frame_ready_callbacks):
+            try:
+                callback(frame_index)
+            except Exception as exc:
+                print(f"CacheEngine: frame-ready callback failed for frame {frame_index}: {exc}")
 
     def _manager_loop(self):
         while self.running:
@@ -118,6 +131,7 @@ class CacheEngine:
             if not self.running:
                 break
             self._fill_cache_requests()
+            self._process_decode_queue()
 
     def _fill_cache_requests(self):
         with self.lock:
@@ -125,27 +139,34 @@ class CacheEngine:
             direction = self.play_direction
             start_range, end_range = self.playback_range
             frame_count = self.decoder.get_metadata()["frame_count"]
-            
+
         if frame_count <= 0:
             return
-            
-        prefetch_sequence = []
-        max_prefetch_ahead = 100
+
         curr = playhead
-        
-        for _ in range(max_prefetch_ahead):
+        for distance in range(1, 101):
             curr += direction
             if curr > end_range:
                 curr = start_range
             elif curr < start_range:
                 curr = end_range
-                
-            if not self.native_cache.has_frame(curr) and curr not in self.active_requests:
-                prefetch_sequence.append(curr)
-                
-        for frame_idx in prefetch_sequence:
-            with self.lock:
-                self.active_requests.add(frame_idx)
+
+            self._schedule_frame(curr, priority=distance)
+
+    def _process_decode_queue(self):
+        to_submit: List[int] = []
+        with self.lock:
+            max_batch = self.settings.reader_threads
+            while self._decode_heap and len(to_submit) < max_batch:
+                _priority, _seq, frame_idx = heapq.heappop(self._decode_heap)
+                if self.native_cache.has_frame(frame_idx):
+                    self.active_requests.discard(frame_idx)
+                    continue
+                if frame_idx not in self.active_requests:
+                    self.active_requests.add(frame_idx)
+                to_submit.append(frame_idx)
+
+        for frame_idx in to_submit:
             self.executor.submit(self._read_and_cache_worker, frame_idx)
 
     def _read_and_cache_worker(self, frame_index: int):
@@ -156,17 +177,19 @@ class CacheEngine:
                 with self.lock:
                     self.active_requests.discard(frame_index)
                 return
-                
-            frame_data = self.decoder.read_frame(frame_index)
-            img = frame_data["data"]
+
+            frame_data = self.decoder.read_frame(
+                frame_index, resolution_scale=self.settings.resolution_scale
+            )
+            img = self._to_cache_dtype(frame_data["data"])
             h, w = img.shape[:2]
             channels = img.shape[2] if len(img.shape) > 2 else 1
-            
-            # Save directly into pre-allocated C++ memory
+
             self.native_cache.write_frame(frame_index, w, h, channels, img)
-            
+
             with self.lock:
                 self.active_requests.discard(frame_index)
+            self._notify_frame_ready(frame_index)
         except Exception:
             with self.lock:
                 self.active_requests.discard(frame_index)
@@ -175,6 +198,7 @@ class CacheEngine:
         self.native_cache.clear()
         with self.lock:
             self.active_requests.clear()
+            self._decode_heap.clear()
 
     def close(self):
         self.running = False

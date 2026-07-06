@@ -59,12 +59,13 @@ class BaseDecoder(ABC):
         pass
 
     @abstractmethod
-    def read_frame(self, frame_index: int) -> Dict[str, Any]:
+    def read_frame(self, frame_index: int, resolution_scale: float = 1.0) -> Dict[str, Any]:
         """
         Decodes and returns the frame at the specified index.
+        resolution_scale: 1.0 = full resolution; values below 1.0 downsample for playback.
         Returns:
         {
-            "data": np.ndarray (float32, shape=(H, W, C)),
+            "data": np.ndarray (float16, shape=(H, W, C)),
             "channels": List[str],
             "frame_index": int,
             "timecode": str

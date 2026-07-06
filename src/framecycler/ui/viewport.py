@@ -29,6 +29,8 @@ class Viewport(QOpenGLWidget):
         self.frame_data_b = None
         self.width_a, self.height_a, self.channels_a = 0, 0, 3
         self.width_b, self.height_b, self.channels_b = 0, 0, 3
+        self._upload_token_a = 0
+        self._upload_token_b = 0
         self.pixel_aspect_ratio = 1.0
         
         # Viewport layout and sliders
@@ -71,6 +73,7 @@ class Viewport(QOpenGLWidget):
 
     def set_frame_a(self, data: np.ndarray, channels: list, index: int, timecode: str, fps: float):
         self.frame_data_a = data
+        self._upload_token_a += 1
         self.height_a, self.width_a = data.shape[:2]
         self.channels_a = data.shape[2] if len(data.shape) > 2 else 1
         
@@ -84,6 +87,7 @@ class Viewport(QOpenGLWidget):
     def set_frame_b(self, data: np.ndarray):
         self.frame_data_b = data
         if data is not None:
+            self._upload_token_b += 1
             self.height_b, self.width_b = data.shape[:2]
             self.channels_b = data.shape[2] if len(data.shape) > 2 else 1
         self.update()
@@ -203,11 +207,11 @@ class Viewport(QOpenGLWidget):
         pan_x = (self.pan_offset.x() / widget_w) * 2.0
         pan_y = -(self.pan_offset.y() / widget_h) * 2.0
         
-        # Ensure arrays are C-contiguous — non-contiguous views (e.g. zero-copy C++ cache slices)
-        # can have unexpected strides that cause OpenGL to read garbage bytes between rows,
-        # producing pixel streak artifacts.
-        data_a = np.ascontiguousarray(self.frame_data_a)
-        data_b = np.ascontiguousarray(self.frame_data_b) if self.frame_data_b is not None else None
+        # Ensure arrays are C-contiguous for OpenGL upload — only copy when needed.
+        data_a = self.frame_data_a if self.frame_data_a.flags["C_CONTIGUOUS"] else np.ascontiguousarray(self.frame_data_a)
+        data_b = None
+        if self.frame_data_b is not None:
+            data_b = self.frame_data_b if self.frame_data_b.flags["C_CONTIGUOUS"] else np.ascontiguousarray(self.frame_data_b)
 
         # Qt requires that QPainter be started BEFORE any native OpenGL calls inside
         # paintGL, and that raw GL calls be wrapped in beginNativePainting() /
@@ -218,8 +222,8 @@ class Viewport(QOpenGLWidget):
 
         # Run C++ compiled hardware rendering pass
         self.native_renderer.render(
-            data_a, self.width_a, self.height_a, self.channels_a,
-            data_b, self.width_b, self.height_b, self.channels_b,
+            data_a, self.width_a, self.height_a, self.channels_a, self._upload_token_a,
+            data_b, self.width_b, self.height_b, self.channels_b, self._upload_token_b,
             self.compare_mode, self.wipe_pos, self.channel_mask,
             scale_x * self.zoom, scale_y * self.zoom, pan_x, pan_y
         )
@@ -375,6 +379,8 @@ class Viewport(QOpenGLWidget):
     def clear_frames(self):
         self.frame_data_a = None
         self.frame_data_b = None
+        self._upload_token_a = 0
+        self._upload_token_b = 0
         self.pixel_aspect_ratio = 1.0
         self.update()
 

@@ -37,8 +37,19 @@ class TestOIIODecoders(unittest.TestCase):
         self.assertIn("layers", meta)
         frame = decoder.read_frame(1001)
         self.assertEqual(frame["data"].shape, (16, 32, 3))
-        self.assertEqual(frame["data"].dtype, np.float32)
+        self.assertEqual(frame["data"].dtype, np.float16)
         self.assertAlmostEqual(float(frame["data"].mean()), 0.33, places=3)
+
+    def test_exr_decoder_resolution_scale(self):
+        path = self.tmp_path / "shot.1001.exr"
+        write_float_exr(path, value=0.33)
+        decoder = EXRDecoder(str(path))
+        meta = decoder.get_metadata()
+        self.assertEqual(meta["width"], 32)
+        self.assertEqual(meta["height"], 16)
+        frame = decoder.read_frame(1001, resolution_scale=0.5)
+        self.assertEqual(frame["data"].shape, (8, 16, 3))
+        self.assertEqual(frame["data"].dtype, np.float16)
 
     def test_exr_decoder_layer_switch(self):
         path = self.tmp_path / "shot.1001.exr"
@@ -62,7 +73,7 @@ class TestOIIODecoders(unittest.TestCase):
         self.assertIn("colorimetric_specification", meta)
         frame = decoder.read_frame(1001)
         self.assertEqual(frame["data"].shape, (16, 32, 3))
-        self.assertEqual(frame["data"].dtype, np.float32)
+        self.assertEqual(frame["data"].dtype, np.float16)
 
 
 if __name__ == "__main__":

@@ -14,8 +14,13 @@ class Settings:
         self.loop_mode = "loop"  # loop, bounce, once
         self.timecode_mode = False  # True = Timecode mode, False = Frame mode
         self.recent_files = []
+        self.resolution_scale = 1.0
         
         self.load()
+
+    @staticmethod
+    def clamp_resolution_scale(scale: float) -> float:
+        return max(0.01, min(1.0, float(scale)))
 
     def load(self):
         if not os.path.exists(self.config_path):
@@ -30,6 +35,9 @@ class Settings:
                 self.loop_mode = data.get("loop_mode", self.loop_mode)
                 self.timecode_mode = data.get("timecode_mode", self.timecode_mode)
                 self.recent_files = data.get("recent_files", self.recent_files)
+                self.resolution_scale = self.clamp_resolution_scale(
+                    data.get("resolution_scale", self.resolution_scale)
+                )
         except Exception as e:
             print(f"Error loading settings: {e}")
 
@@ -43,7 +51,8 @@ class Settings:
                 "ocio_config_path": self.ocio_config_path,
                 "loop_mode": self.loop_mode,
                 "timecode_mode": self.timecode_mode,
-                "recent_files": self.recent_files
+                "recent_files": self.recent_files,
+                "resolution_scale": self.resolution_scale,
             }
             with open(self.config_path, "w") as f:
                 json.dump(data, f, indent=4)

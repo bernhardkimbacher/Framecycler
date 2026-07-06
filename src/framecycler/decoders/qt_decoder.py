@@ -4,6 +4,7 @@ import numpy as np
 import threading
 from typing import Dict, Any
 from .base import BaseDecoder
+from . import image_io
 from ..core.timecode import Timecode
 
 class QuickTimeDecoder(BaseDecoder):
@@ -108,13 +109,18 @@ class QuickTimeDecoder(BaseDecoder):
         self._frame_generator = self.container.decode(video=0)
         self._current_frame_index = -1
 
-    def read_frame(self, frame_index: int) -> Dict[str, Any]:
+    def read_frame(self, frame_index: int, resolution_scale: float = 1.0) -> Dict[str, Any]:
         if frame_index < self.start_frame or frame_index > self.end_frame:
             raise IndexError(f"Frame index {frame_index} out of bounds ({self.start_frame}-{self.end_frame})")
             
         if self._single_frame_data is not None:
+            data = self._single_frame_data["data"]
+            if resolution_scale < 1.0:
+                if data.dtype != np.float16:
+                    data = data.astype(np.float16)
+                data = image_io.downsample_pixels(data, resolution_scale)
             return {
-                "data": self._single_frame_data["data"],
+                "data": data,
                 "channels": self.channels,
                 "frame_index": frame_index,
                 "timecode": self._single_frame_data["timecode"]
@@ -129,7 +135,7 @@ class QuickTimeDecoder(BaseDecoder):
                 try:
                     frame = next(self._frame_generator)
                     self._current_frame_index = internal_index
-                    return self._process_frame(frame, frame_index)
+                    return self._process_frame(frame, frame_index, resolution_scale)
                 except (StopIteration, av.FFmpegError):
                     pass
                     
@@ -154,32 +160,32 @@ class QuickTimeDecoder(BaseDecoder):
                     
                     if approx_internal == internal_index:
                         self._current_frame_index = internal_index
-                        return self._process_frame(frame, frame_index)
+                        return self._process_frame(frame, frame_index, resolution_scale)
                     elif approx_internal > internal_index:
                         # We seeked past or skipped it, fall back to last decoded frame if close, or just return this frame
                         self._current_frame_index = approx_internal
-                        return self._process_frame(frame, self.start_frame + approx_internal)
+                        return self._process_frame(frame, self.start_frame + approx_internal, resolution_scale)
                     
                     last_frame = frame
                 except (StopIteration, av.FFmpegError):
                     # End of stream or decoder error
                     if last_frame is not None:
-                        return self._process_frame(last_frame, frame_index)
+                        return self._process_frame(last_frame, frame_index, resolution_scale)
                     raise ValueError(f"Failed to seek or read frame {frame_index}")
 
-    def _process_frame(self, frame, frame_index: int) -> Dict[str, Any]:
+    def _process_frame(self, frame, frame_index: int, resolution_scale: float = 1.0) -> Dict[str, Any]:
         # Convert PyAV frame to RGB/RGBA NumPy array
         pix_format = 'rgba' if "A" in self.channels else 'rgb24'
         img_frame = frame.to_ndarray(format=pix_format)
         
-        # Convert to float32 normalized to [0.0, 1.0]
-        img_float = img_frame.astype(np.float32) / 255.0
+        img = (img_frame.astype(np.float32) / 255.0).astype(np.float16)
+        if resolution_scale < 1.0:
+            img = image_io.downsample_pixels(img, resolution_scale)
         
-        # Timecode calculation (frame_index is already absolute)
         tc = Timecode.frame_to_timecode(frame_index, self.fps, 0)
         
         return {
-            "data": img_float,
+            "data": img,
             "channels": self.channels,
             "frame_index": frame_index,
             "timecode": tc

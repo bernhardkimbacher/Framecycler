@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <iostream>
 
-CacheManager::CacheManager(double ram_limit_gb) 
+CacheManager::CacheManager(double ram_limit_gb)
     : _current_playhead(0), _play_direction(1), _in_point(0), _out_point(100), _allocated_bytes(0) {
     set_ram_limit(ram_limit_gb);
 }
@@ -27,18 +27,17 @@ bool CacheManager::has_frame(int frame_index) {
     return _frame_to_slot.find(frame_index) != _frame_to_slot.end();
 }
 
-void CacheManager::write_frame(int frame_index, int width, int height, int channels, const float* pixel_data, size_t data_size) {
+void CacheManager::write_frame(int frame_index, int width, int height, int channels, const uint16_t* pixel_data, size_t data_size) {
     std::lock_guard<std::mutex> lock(_mutex);
-    
-    // Check if frame already cached, just copy over
+
     auto it = _frame_to_slot.find(frame_index);
     if (it != _frame_to_slot.end()) {
         size_t slot_idx = it->second;
         auto& slot = _slots[slot_idx];
         if (slot.data.size() < data_size) {
-            _allocated_bytes -= slot.data.size() * sizeof(float);
+            _allocated_bytes -= slot.data.size() * sizeof(uint16_t);
             slot.data.resize(data_size);
-            _allocated_bytes += data_size * sizeof(float);
+            _allocated_bytes += data_size * sizeof(uint16_t);
         }
         std::copy(pixel_data, pixel_data + data_size, slot.data.begin());
         slot.width = width;
@@ -47,18 +46,15 @@ void CacheManager::write_frame(int frame_index, int width, int height, int chann
         slot.active = true;
         return;
     }
-    
-    size_t req_bytes = data_size * sizeof(float);
-    
-    // Check if we need to evict a slot
-    size_t target_slot_idx = -1;
+
+    size_t req_bytes = data_size * sizeof(uint16_t);
+
+    size_t target_slot_idx = static_cast<size_t>(-1);
     if (_allocated_bytes + req_bytes > _max_bytes) {
-        // Cache full! Find slot to reuse
         int frame_count = std::max(1, _out_point - _in_point + 1);
         target_slot_idx = _find_slot_to_evict(frame_count);
     }
-    
-    // If no slot to evict or slots pool has room, allocate a new slot
+
     if (target_slot_idx == static_cast<size_t>(-1)) {
         FrameBuffer new_slot;
         new_slot.data.resize(data_size);
@@ -67,39 +63,37 @@ void CacheManager::write_frame(int frame_index, int width, int height, int chann
         new_slot.height = height;
         new_slot.channels = channels;
         new_slot.active = true;
-        
+
         _slots.push_back(new_slot);
         size_t new_idx = _slots.size() - 1;
         _frame_to_slot[frame_index] = new_idx;
         _slot_to_frame[new_idx] = frame_index;
         _allocated_bytes += req_bytes;
     } else {
-        // Reuse slot (zero memory allocation)
         auto& slot = _slots[target_slot_idx];
-        
-        // Remove old mapping
+
         int old_frame = _slot_to_frame[target_slot_idx];
         _frame_to_slot.erase(old_frame);
-        
-        _allocated_bytes -= slot.data.size() * sizeof(float);
-        
+
+        _allocated_bytes -= slot.data.size() * sizeof(uint16_t);
+
         if (slot.data.size() < data_size) {
             slot.data.resize(data_size);
         }
         std::copy(pixel_data, pixel_data + data_size, slot.data.begin());
-        
+
         slot.width = width;
         slot.height = height;
         slot.channels = channels;
         slot.active = true;
-        
+
         _frame_to_slot[frame_index] = target_slot_idx;
         _slot_to_frame[target_slot_idx] = frame_index;
-        _allocated_bytes += slot.data.size() * sizeof(float);
+        _allocated_bytes += slot.data.size() * sizeof(uint16_t);
     }
 }
 
-const float* CacheManager::get_frame_data(int frame_index, int& width, int& height, int& channels) {
+const uint16_t* CacheManager::get_frame_data(int frame_index, int& width, int& height, int& channels) {
     std::lock_guard<std::mutex> lock(_mutex);
     auto it = _frame_to_slot.find(frame_index);
     if (it == _frame_to_slot.end()) {
@@ -133,31 +127,29 @@ void CacheManager::clear() {
 
 size_t CacheManager::_find_slot_to_evict(int frame_count) {
     if (_slots.empty()) {
-        return -1;
+        return static_cast<size_t>(-1);
     }
-    
-    // Find inactive slots first
+
     for (size_t i = 0; i < _slots.size(); ++i) {
         if (!_slots[i].active) {
             return i;
         }
     }
-    
-    // Find slot furthest from current playhead (accounting for range wrap)
+
     size_t furthest_idx = 0;
     int max_distance = -1;
-    
+
     for (size_t i = 0; i < _slots.size(); ++i) {
         int frame_num = _slot_to_frame[i];
         int direct_dist = std::abs(frame_num - _current_playhead);
         int wrapped_dist = std::abs(frame_count - direct_dist);
         int dist = std::min(direct_dist, wrapped_dist);
-        
+
         if (dist > max_distance) {
             max_distance = dist;
             furthest_idx = i;
         }
     }
-    
+
     return furthest_idx;
 }

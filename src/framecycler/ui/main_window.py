@@ -37,6 +37,12 @@ PIXEL_ASPECT_MODES = [
     ("Anamorphic", "anamorphic"),
 ]
 
+PRESET_RESOLUTION_SCALES = [
+    ("1", 1.0),
+    ("0.5", 0.5),
+    ("0.25", 0.25),
+]
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -66,6 +72,8 @@ class MainWindow(QMainWindow):
         self.active_exr_layer = "beauty"
         self.pixel_aspect_mode = "square"
         self.file_pixel_aspect_ratio = SQUARE_PIXEL_ASPECT
+        self.source_width = 0
+        self.source_height = 0
         
         # Dynamic menus references
         self.exr_layer_combo = None
@@ -306,6 +314,21 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, m=mode: self._set_pixel_aspect_mode(m))
             par_menu.addAction(act)
             self.pixel_aspect_actions.append((mode, act))
+
+        resolution_menu = image_menu.addMenu("Resolution")
+        self.resolution_actions = []
+        for label, scale in PRESET_RESOLUTION_SCALES:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(self._scale_matches(self.settings.resolution_scale, scale))
+            act.triggered.connect(lambda checked=False, s=scale: self._set_resolution_scale(s))
+            resolution_menu.addAction(act)
+            self.resolution_actions.append((scale, act))
+
+        resolution_menu.addSeparator()
+        act_custom_resolution = QAction("Custom...", self)
+        act_custom_resolution.triggered.connect(self._prompt_custom_resolution)
+        resolution_menu.addAction(act_custom_resolution)
 
         # Playback menu
         playback_menu = menubar.addMenu("&Playback")
@@ -616,7 +639,9 @@ class MainWindow(QMainWindow):
                 decoder = QuickTimeDecoder(path)
                 
             self.decoders[slot] = decoder
-            self.caches[slot] = CacheEngine(decoder, self.settings)
+            cache = CacheEngine(decoder, self.settings)
+            cache.add_frame_ready_callback(lambda frame_index, s=slot: self._on_cache_frame_ready(s, frame_index))
+            self.caches[slot] = cache
             
             # Setup sequence attributes from loaded slot 0
             if slot == 0:
@@ -655,7 +680,9 @@ class MainWindow(QMainWindow):
                 # Update resolution label readout outside the image
                 w = meta.get("width", 0)
                 h = meta.get("height", 0)
-                self.lbl_resolution.setText(f"{w}x{h}")
+                self.source_width = w
+                self.source_height = h
+                self._update_resolution_label()
 
                 par = meta.get("pixel_aspect_ratio", SQUARE_PIXEL_ASPECT)
                 self._apply_file_pixel_aspect_ratio(par)
@@ -713,6 +740,8 @@ class MainWindow(QMainWindow):
         self.exr_layer_combo.addItem("beauty")
         
         self.lbl_resolution.setText("")
+        self.source_width = 0
+        self.source_height = 0
         self.lbl_fps.setText(self._format_fps_label(self.fps))
         self.lbl_ocio_info.setText("")
         self._set_pixel_aspect_mode("square")
@@ -728,33 +757,13 @@ class MainWindow(QMainWindow):
         frame = max(self.start_frame, min(self.end_frame, frame))
         self.current_frame = frame
         
-        # Load frame from cache slots
-        frame_a = None
-        frame_b = None
-        
         if self.caches[0] is not None:
             self.caches[0].set_playhead(frame, self.playback_direction)
-            frame_a_dict = self.caches[0].get_frame(frame)
-            if frame_a_dict:
-                frame_a = frame_a_dict["data"]
-                tc = frame_a_dict["timecode"] or Timecode.frame_to_timecode(frame, self.fps, 0)
-                self.viewport.current_timecode = tc
-                self.viewport.set_frame_a(
-                    frame_a,
-                    frame_a_dict["channels"],
-                    frame,
-                    tc,
-                    self.fps
-                )
-                
         if self.caches[1] is not None:
-            # Sync slot B playhead
             self.caches[1].set_playhead(frame, self.playback_direction)
-            frame_b_dict = self.caches[1].get_frame(frame)
-            if frame_b_dict:
-                frame_b = frame_b_dict["data"]
-                self.viewport.set_frame_b(frame_b)
-                
+
+        self._apply_cached_frames(frame)
+        
         # Draw caching blocks in timeline
         if self.caches[self.active_slot] is not None:
             self.timeline.set_cached_frames(self.caches[self.active_slot].get_cached_frames())
@@ -769,6 +778,38 @@ class MainWindow(QMainWindow):
         # Fire plugin event
         for plugin in self.plugins:
             plugin.on_frame_changed(frame, self.viewport.current_timecode)
+
+    def _apply_cached_frames(self, frame: int):
+        if self.caches[0] is not None:
+            frame_a_dict = self.caches[0].get_frame(frame)
+            if frame_a_dict:
+                tc = frame_a_dict["timecode"] or Timecode.frame_to_timecode(frame, self.fps, 0)
+                self.viewport.current_timecode = tc
+                self.viewport.set_frame_a(
+                    frame_a_dict["data"],
+                    frame_a_dict["channels"],
+                    frame,
+                    tc,
+                    self.fps
+                )
+
+        if self.caches[1] is not None:
+            frame_b_dict = self.caches[1].get_frame(frame)
+            if frame_b_dict:
+                self.viewport.set_frame_b(frame_b_dict["data"])
+
+    def _on_cache_frame_ready(self, slot: int, frame_index: int):
+        if frame_index != self.current_frame:
+            return
+        QTimer.singleShot(0, lambda s=slot, f=frame_index: self._apply_cache_frame_on_main_thread(s, f))
+
+    def _apply_cache_frame_on_main_thread(self, slot: int, frame_index: int):
+        if frame_index != self.current_frame:
+            return
+        self._apply_cached_frames(frame_index)
+        active_cache = self.caches[self.active_slot]
+        if active_cache is not None:
+            self.timeline.set_cached_frames(active_cache.get_cached_frames())
 
     def _playback_tick(self):
         next_frame = self.current_frame + self.playback_direction
@@ -873,6 +914,62 @@ class MainWindow(QMainWindow):
         if hasattr(self, "loop_mode_actions"):
             for m, act in self.loop_mode_actions:
                 act.setChecked(m == mode)
+
+    def _scale_matches(self, a: float, b: float, tol: float = 0.001) -> bool:
+        return abs(a - b) < tol
+
+    def _format_resolution_label(self, source_w: int, source_h: int, scale: float) -> str:
+        if source_w <= 0 or source_h <= 0:
+            return ""
+        if scale >= 1.0 or self._scale_matches(scale, 1.0):
+            return f"{source_w}x{source_h}"
+        pct = int(round(scale * 100))
+        return f"{source_w}x{source_h} @ {pct}%"
+
+    def _update_resolution_label(self):
+        if hasattr(self, "lbl_resolution") and self.lbl_resolution is not None:
+            self.lbl_resolution.setText(
+                self._format_resolution_label(
+                    self.source_width,
+                    self.source_height,
+                    self.settings.resolution_scale,
+                )
+            )
+
+    def _sync_resolution_menu(self, scale: float):
+        if not hasattr(self, "resolution_actions"):
+            return
+        for preset_scale, act in self.resolution_actions:
+            act.setChecked(self._scale_matches(scale, preset_scale))
+
+    def _set_resolution_scale(self, scale: float):
+        scale = Settings.clamp_resolution_scale(scale)
+        self.settings.resolution_scale = scale
+        self.settings.save()
+
+        for cache in self.caches:
+            if cache is not None:
+                cache.clear()
+
+        self._update_resolution_label()
+        self._sync_resolution_menu(scale)
+        self.seek_to_frame(self.current_frame)
+
+        pct = int(round(scale * 100))
+        self.statusBar().showMessage(f"Resolution scale: {pct}%")
+
+    def _prompt_custom_resolution(self):
+        scale, ok = QInputDialog.getDouble(
+            self,
+            "Custom Resolution Scale",
+            "Scale factor (1.0 = full resolution):",
+            self.settings.resolution_scale,
+            0.01,
+            1.0,
+            3,
+        )
+        if ok:
+            self._set_resolution_scale(scale)
 
     def _fps_matches(self, a: float, b: float, tol: float = 0.001) -> bool:
         return abs(a - b) < tol

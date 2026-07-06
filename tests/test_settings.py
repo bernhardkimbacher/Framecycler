@@ -23,6 +23,7 @@ class TestSettings(unittest.TestCase):
         self.settings.reader_threads = 12
         self.settings.ram_cache_limit_gb = 16.0
         self.settings.default_fps = 30.0
+        self.settings.resolution_scale = 0.5
         self.settings.save()
 
         # Load into new instance
@@ -32,6 +33,14 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(new_settings.reader_threads, 12)
         self.assertEqual(new_settings.ram_cache_limit_gb, 16.0)
         self.assertEqual(new_settings.default_fps, 30.0)
+        self.assertEqual(new_settings.resolution_scale, 0.5)
+
+    def test_resolution_scale_clamped_on_load(self):
+        self.settings.resolution_scale = 2.0
+        self.settings.save()
+        new_settings = Settings(config_dir=self.settings.config_dir)
+        self.assertEqual(new_settings.resolution_scale, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

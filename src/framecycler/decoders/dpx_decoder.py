@@ -82,7 +82,7 @@ class DPXDecoder(BaseDecoder):
     def get_metadata(self) -> Dict[str, Any]:
         return self.metadata
 
-    def read_frame(self, frame_index: int) -> Dict[str, Any]:
+    def read_frame(self, frame_index: int, resolution_scale: float = 1.0) -> Dict[str, Any]:
         if frame_index < self.start_frame or frame_index > self.end_frame:
             raise IndexError(f"Frame index {frame_index} out of bounds ({self.start_frame}-{self.end_frame})")
             
@@ -92,8 +92,7 @@ class DPXDecoder(BaseDecoder):
             closest_frame = min(self.frame_numbers, key=lambda x: abs(x - frame_index))
             file_path = self.frame_map[closest_frame]
 
-        img = image_io.read_pixels(file_path)
-        img = img.astype(np.float32)
+        img = image_io.read_pixels(file_path, resolution_scale=resolution_scale)
             
         tc = Timecode.frame_to_timecode(frame_index, self.metadata["fps"], 0)
         

@@ -141,7 +141,57 @@ def read_metadata(path: str) -> ImageMetadata:
     )
 
 
-def read_pixels(path: str, layer: Optional[str] = None) -> np.ndarray:
+def downsample_pixels(arr: np.ndarray, scale: float) -> np.ndarray:
+    """Resize a float16 (H, W, C) array using OIIO box filter."""
+    scale = max(0.01, min(1.0, float(scale)))
+    if scale >= 1.0:
+        return np.ascontiguousarray(arr)
+
+    if arr.ndim == 2:
+        arr = arr[..., np.newaxis]
+
+    height, width, channels = arr.shape
+    new_w = max(1, round(width * scale))
+    new_h = max(1, round(height * scale))
+    if new_w == width and new_h == height:
+        return np.ascontiguousarray(arr)
+
+    channel_names = ["R", "G", "B", "A"][:channels]
+    if channels == 1:
+        channel_names = ["Y"]
+
+    src_spec = oiio.ImageSpec(width, height, channels, oiio.HALF)
+    src_spec.channelnames = channel_names
+    src_buf = oiio.ImageBuf(src_spec)
+    if not src_buf.set_pixels(oiio.HALF, arr):
+        raise ValueError(f"Failed to set source pixels: {src_buf.geterror()}")
+
+    dst_spec = oiio.ImageSpec(new_w, new_h, channels, oiio.HALF)
+    dst_spec.channelnames = channel_names
+    dst_buf = oiio.ImageBuf(dst_spec)
+    if not oiio.ImageBufAlgo.resize(dst_buf, src_buf, filtername="box"):
+        raise ValueError(f"Failed to resize image: {dst_buf.geterror()}")
+
+    out = np.asarray(dst_buf.get_pixels(oiio.HALF), dtype=np.float16)
+    if out.ndim == 2:
+        out = out[..., np.newaxis]
+    return np.ascontiguousarray(out)
+
+
+def _resize_image_buf(buf: "oiio.ImageBuf", scale: float) -> "oiio.ImageBuf":
+    spec = buf.spec()
+    new_w = max(1, round(spec.width * scale))
+    new_h = max(1, round(spec.height * scale))
+    if new_w == spec.width and new_h == spec.height:
+        return buf
+
+    dst = oiio.ImageBuf(oiio.ImageSpec(new_w, new_h, spec.nchannels, oiio.HALF))
+    if not oiio.ImageBufAlgo.resize(dst, buf, filtername="box"):
+        raise ValueError(f"Failed to resize image {buf.geterror()}: {dst.geterror()}")
+    return dst
+
+
+def read_pixels(path: str, layer: Optional[str] = None, resolution_scale: float = 1.0) -> np.ndarray:
     buf = oiio.ImageBuf(path)
     if buf.has_error:
         raise ValueError(f"Failed to read image {path}: {buf.geterror()}")
@@ -150,7 +200,10 @@ def read_pixels(path: str, layer: Optional[str] = None) -> np.ndarray:
     channel_names = list(spec.channelnames)
     indices = _layer_channel_indices(channel_names, layer)
 
-    arr = np.asarray(buf.get_pixels(oiio.FLOAT), dtype=np.float32)
+    if resolution_scale < 1.0:
+        buf = _resize_image_buf(buf, resolution_scale)
+
+    arr = np.asarray(buf.get_pixels(oiio.HALF), dtype=np.float16)
     if arr.ndim == 2:
         arr = arr[..., np.newaxis]
     arr = arr[..., indices]

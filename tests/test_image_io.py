@@ -46,7 +46,7 @@ class TestImageIO(unittest.TestCase):
         write_float_exr(path, value=0.42)
         arr = image_io.read_pixels(str(path))
         self.assertEqual(arr.shape, (16, 32, 3))
-        self.assertEqual(arr.dtype, np.float32)
+        self.assertEqual(arr.dtype, np.float16)
         self.assertAlmostEqual(float(arr[0, 0, 0]), 0.42, places=4)
 
     def test_list_layers_and_layer_read(self):
@@ -64,8 +64,21 @@ class TestImageIO(unittest.TestCase):
         write_uint16_dpx(path)
         arr = image_io.read_pixels(str(path))
         self.assertEqual(arr.shape, (16, 32, 3))
-        self.assertEqual(arr.dtype, np.float32)
+        self.assertEqual(arr.dtype, np.float16)
         self.assertGreater(arr.max(), 0.4)
+
+    def test_read_pixels_downsampled_exr(self):
+        path = self.tmp_path / "flat.exr"
+        write_float_exr(path, value=0.42)
+        arr = image_io.read_pixels(str(path), resolution_scale=0.5)
+        self.assertEqual(arr.shape, (8, 16, 3))
+        self.assertEqual(arr.dtype, np.float16)
+
+    def test_downsample_pixels_helper(self):
+        arr = np.full((16, 32, 3), np.float16(0.5), dtype=np.float16)
+        down = image_io.downsample_pixels(arr, 0.5)
+        self.assertEqual(down.shape, (8, 16, 3))
+        self.assertEqual(down.dtype, np.float16)
 
 
 if __name__ == "__main__":

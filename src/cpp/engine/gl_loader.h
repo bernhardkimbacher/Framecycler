@@ -19,6 +19,12 @@
     #define GL_RGB32F 0x8815
     #define GL_RGBA32F 0x8814
     #define GL_R32F 0x822E
+    #define GL_R16F 0x822D
+    #define GL_RGB16F 0x881B
+    #define GL_RGBA16F 0x881A
+    #define GL_HALF_FLOAT 0x140B
+    #define GL_PIXEL_UNPACK_BUFFER 0x88EC
+    #define GL_STREAM_DRAW 0x88E0
     #define GL_TEXTURE0 0x84C0
     #define GL_TEXTURE1 0x84C1
     #define GL_VERTEX_SHADER 0x8B31
