@@ -1,13 +1,13 @@
 name: Package Framecycler
 
 on:
-  # Allows manual triggers from the Actions tab on GitHub
   workflow_dispatch:
-
-  # Optional: Also build when a release version tag is pushed
   push:
     tags:
       - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -19,21 +19,33 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
         include:
           - os: windows-latest
-            sep: ";"
             ext: "pyd"
             python: "python"
+            vpk_channel: win
           - os: macos-latest
-            sep: ":"
             ext: "so"
             python: "python3"
+            vpk_channel: osx
           - os: ubuntu-latest
-            sep: ":"
             ext: "so"
             python: "python3"
+            vpk_channel: linux
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Derive release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.1-dev.${{ github.run_number }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Derived version: $VERSION"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -55,6 +67,8 @@ jobs:
         run: ${{ matrix.python }} build.py
 
       - name: Generate Build Version Metadata
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
         run: ${{ matrix.python }} scripts/generate_version.py
 
       - name: Generate Platform Bundle Icons
@@ -63,30 +77,76 @@ jobs:
       - name: Freeze Application with PyInstaller
         run: ${{ matrix.python }} -m PyInstaller --clean --noconfirm packaging/framecycler.spec
 
-      # Windows Installer Packaging
-      - name: Package Windows Installer
-        if: matrix.os == 'windows-latest'
-        run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-      # macOS zip packaging
-      - name: Package macOS Artifacts
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk --version 1.2.0
+
+      - name: Download previous Velopack release
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          vpk download github \
+            --repoUrl https://github.com/bernhardkimbacher/Framecycler \
+            --channel ${{ matrix.vpk_channel }} \
+            || echo "No previous release found (first release for this channel)."
+
+      - name: Create Velopack release (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          vpk pack `
+            -u com.bernhardkimbacher.framecycler-reboot `
+            -v ${{ steps.version.outputs.version }} `
+            -p dist/Framecycler `
+            -e Framecycler.exe `
+            -c win `
+            --icon assets/icons/app_icon.ico
+
+      - name: Create Velopack release (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          zip -r dist/Framecycler-macOS.zip dist/Framecycler.app
+          vpk pack \
+            -u com.bernhardkimbacher.framecycler-reboot \
+            -v ${{ steps.version.outputs.version }} \
+            -p dist/Framecycler.app/Contents \
+            -e Framecycler \
+            -c osx \
+            --bundleId com.bernhardkimbacher.framecycler-reboot \
+            --icon assets/icons/app_icon.icns
 
-      # Linux zip packaging
-      - name: Package Linux Artifacts
+      - name: Create Velopack release (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          tar -czvf dist/Framecycler-Linux.tar.gz -C dist/ Framecycler
+          vpk pack \
+            -u com.bernhardkimbacher.framecycler-reboot \
+            -v ${{ steps.version.outputs.version }} \
+            -p dist/Framecycler \
+            -e Framecycler \
+            -c linux \
+            --icon assets/icons/app_icon_512.png
 
-      # Upload Build Artifacts
-      - name: Upload Artifacts
+      - name: Publish Velopack release to GitHub
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          vpk upload github \
+            --repoUrl https://github.com/bernhardkimbacher/Framecycler \
+            --channel ${{ matrix.vpk_channel }} \
+            --publish \
+            --merge \
+            --tag v${{ steps.version.outputs.version }} \
+            --releaseName "Framecycler ${{ steps.version.outputs.version }}" \
+            --token "$GITHUB_TOKEN"
+
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Framecycler-Build-${{ matrix.os }}
           path: |
-            dist/*.zip
-            dist/*.tar.gz
-            dist/*Installer.exe
+            Releases/**

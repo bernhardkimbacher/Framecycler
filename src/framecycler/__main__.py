@@ -1,3 +1,8 @@
+import velopack
+
+# Velopack must run before any other app startup code so install/update hooks work.
+velopack.App().run()
+
 try:
     from .main import main
 except ImportError:

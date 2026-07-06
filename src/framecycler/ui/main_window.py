@@ -435,6 +435,9 @@ class MainWindow(QMainWindow):
         
         # Help menu
         help_menu = menubar.addMenu("&Help")
+        act_check_updates = QAction("Check for Updates…", self)
+        act_check_updates.triggered.connect(self._check_for_updates)
+        help_menu.addAction(act_check_updates)
         act_about = QAction("About Framecycler Reboot", self)
         act_about.setMenuRole(QAction.MenuRole.NoRole)
         act_about.triggered.connect(self._show_about_dialog)
@@ -1119,6 +1122,10 @@ class MainWindow(QMainWindow):
         from .about_dialog import AboutDialog
         dialog = AboutDialog(self)
         dialog.exec()
+
+    def _check_for_updates(self):
+        from ..core.updater import check_for_updates_interactive
+        check_for_updates_interactive(self)
 
     def _show_log_viewer(self):
         from .log_viewer import LogViewerDialog
