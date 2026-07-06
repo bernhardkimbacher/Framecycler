@@ -23,7 +23,7 @@ from .settings_dialog import SettingsDialog
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Framecycler")
+        self.setWindowTitle("Framecycler Reboot")
         self.resize(1200, 800)
         
         # Load stylesheet
@@ -277,6 +277,9 @@ class MainWindow(QMainWindow):
         
         # Help menu
         help_menu = menubar.addMenu("&Help")
+        act_about = QAction("About", self)
+        act_about.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(act_about)
         act_view_logs = QAction("View Logs", self)
         act_view_logs.triggered.connect(self._show_log_viewer)
         help_menu.addAction(act_view_logs)
@@ -689,6 +692,11 @@ class MainWindow(QMainWindow):
         self.viewport.update_ocio_pipeline()
         self._update_ocio_info_label()
         self.statusBar().showMessage("Color grading parameters reset to defaults.")
+
+    def _show_about_dialog(self):
+        from .about_dialog import AboutDialog
+        dialog = AboutDialog(self)
+        dialog.exec()
 
     def _show_log_viewer(self):
         from .log_viewer import LogViewerDialog

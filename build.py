@@ -47,6 +47,11 @@ def find_vcvarsall():
 
 def build_extension():
     print("=== Framecycler C++ Engine Build Script ===")
+
+    version_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "generate_version.py")
+    if os.path.exists(version_script):
+        print("Generating build version metadata...")
+        subprocess.run([sys.executable, version_script], check=True)
     
     cmake_path = find_cmake()
     vcvars_path = find_vcvarsall()

@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+src/framecycler/_version.py
 
 # C++ Build outputs
 build/

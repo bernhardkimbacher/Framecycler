@@ -67,6 +67,9 @@ if !ENGINE_FOUND! equ 0 (
 )
 
 REM 6. Run Framecycler
+echo [INFO] Generating build version metadata...
+python scripts\generate_version.py
+
 echo [INFO] Running Framecycler...
 python -m src.framecycler %*
 if %ERRORLEVEL% neq 0 (

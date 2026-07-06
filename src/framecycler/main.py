@@ -3,7 +3,9 @@ import os
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QSurfaceFormat
 from .ui.main_window import MainWindow
+from .core.app_icon import load_app_icon
 from .core.logging_config import setup_logging
+from .core.version import get_application_version
 
 def main():
     # Initialize global logging tool (writing to standard OS paths and console)
@@ -21,9 +23,13 @@ def main():
     QSurfaceFormat.setDefaultFormat(fmt)
     
     app = QApplication(sys.argv)
-    app.setApplicationName("Framecycler")
-    app.setApplicationVersion("1.0.0")
-    
+    app.setApplicationName("Framecycler Reboot")
+    app.setApplicationVersion(get_application_version())
+
+    app_icon = load_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
+
     # Custom dark styling and dropdown color correction
     app.setStyleSheet("""
         QMainWindow {
@@ -98,6 +104,8 @@ def main():
     """)
     
     window = MainWindow()
+    if not app_icon.isNull():
+        window.setWindowIcon(app_icon)
     window.show()
     
     sys.exit(app.exec())

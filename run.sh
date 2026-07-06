@@ -51,5 +51,8 @@ else
 fi
 
 # 6. Run Framecycler
+echo "[INFO] Generating build version metadata..."
+python3 scripts/generate_version.py
+
 echo "[INFO] Running Framecycler..."
 python3 -m src.framecycler "$@"

@@ -1,12 +1,12 @@
-# Framecycler // VFX Review Application Technical Manual
+# Framecycler Reboot // VFX Review Application Technical Manual
 
-Framecycler is a high-performance, lightweight Visual Effects Review application designed for Windows, macOS, and Linux. It is built on a **Hybrid Architecture** combining a compiled C++20 core engine (`framecycler_engine`) for memory allocations, cache eviction, and OpenGL rendering with a Python 3.12+ / PySide6 (Qt 6) UI shell for decoders and extension scriptability.
+Framecycler Reboot is a high-performance, lightweight Visual Effects Review application designed for Windows, macOS, and Linux. It is built on a **Hybrid Architecture** combining a compiled C++20 core engine (`framecycler_engine`) for memory allocations, cache eviction, and OpenGL rendering with a Python 3.12+ / PySide6 (Qt 6) UI shell for decoders and extension scriptability.
 
 ---
 
 ## 1. Architectural System Overview
 
-Framecycler splits execution between native C++ and Python coordinates to bypass Python's Global Interpreter Lock (GIL), avoid garbage collection (GC) stutters during uncompressed 4K playback, and maintain custom Python extension tools.
+Framecycler Reboot splits execution between native C++ and Python coordinates to bypass Python's Global Interpreter Lock (GIL), avoid garbage collection (GC) stutters during uncompressed 4K playback, and maintain custom Python extension tools.
 
 ```mermaid
 graph TD
@@ -23,7 +23,7 @@ graph TD
 ```
 
 ### Key Subsystem Division
-* **Python Layer**: Handles UI layouts, transport timer loops, metadata caching logic, background thread pre-fetching files loading (OpenCV / PyAV), and custom extension modules.
+* **Python Layer**: Handles UI layouts, transport timer loops, metadata caching logic, background thread pre-fetching files loading (OpenCV for EXR/DPX, PyAV for QuickTime), and custom extension modules.
 * **C++ Core Module (`framecycler_engine`)**: Written in C++20. Manages the contiguous raw frame memory cache blocks, LRU-based buffer recycling, and low-level GPU texture uploads / OpenGL shader rendering.
 
 ---
@@ -60,7 +60,7 @@ Located in `src/cpp/engine/` and compiled as a dynamic module (`.pyd` on Windows
 The interface bindings are defined in `src/cpp/bindings/python_bindings.cpp`.
 
 ### Zero-Copy Memory Sharing
-Framecycler achieves maximum performance by avoiding memory copying between C++ and Python. When Python requests cached frames, the C++ engine wraps the direct C++ pointer in a standard NumPy array structure:
+Framecycler Reboot achieves maximum performance by avoiding memory copying between C++ and Python. When Python requests cached frames, the C++ engine wraps the direct C++ pointer in a standard NumPy array structure:
 ```cpp
 return py::array_t<float>(
     { height, width, channels },                                                  // Shape
@@ -76,6 +76,8 @@ This enables the PySide6 UI and OpenGL paint loop to reference the raw C++ buffe
 ## 4. Media Decoding & Sequence Resolving
 
 Located in `src/framecycler/decoders/`.
+
+Supported formats: **EXR** (`exr_decoder.py`, OpenCV), **DPX** (`dpx_decoder.py`, OpenCV), and **QuickTime/MPEG-4** (`qt_decoder.py`, PyAV/FFmpeg).
 
 ### A. Sequence Detection & Drop-in Handlers
 When a single file is opened or dropped onto the application, `_find_sequence_from_single_file` inside `base.py` automatically parses its index pattern (e.g., `MOC_CAS_0010.0993.exr` $\rightarrow$ `MOC_CAS_0010.####.exr`), locates the directory, filters files matching that sequence name, and loads the sequence as a contiguous timeline starting at its absolute frame index.
@@ -111,8 +113,8 @@ Located in `src/framecycler/ui/`.
 * **Viewfinder Overlay (HUD)**: Removed cluttered status text from the viewport area, keeping only the A/B compare slider wipe line inside the image container.
 * **Timeline Status Row**: Positioned directly above the timeline slider. Displays `FR`, `FPS`, and `TC` in a clean, larger `Segoe UI` font that matches the timeline theme.
 * **Centered Transport Controls**: The playback buttons and loop mode dropdown are centered in the bottom transport bar, with `TC / FR` toggle aligned on the far right.
-* **Tools Menu & CDL Dock**: Adds a **Tools** menu providing a checkmarked toggle action mapping to the **CDL Color Grading** panel (which is closed/hidden on startup).
-* **Home Actions**: Added a **Home** button in the CDL dock and a global `Home` keyboard shortcut that resets Slope, Offset, Power, and Saturation to default values (`1.00`, `0.00`, `1.00`, `1.00`). Sliders and their button containers use `NoFocus` to prevent focused widgets from capturing the key event.
+* **Grading Menu**: Adds a **Grading** menu with interactive exposure, gamma, and offset adjustment modes (mouse-drag in the viewport). **Reset Color Grade** restores defaults (`Exposure: 0.0`, `Gamma: 1.0`, `Offset: 0.0`) via the menu or the `Home` shortcut.
+* **Plugins Menu**: Hosts registered extension tools (e.g. **Load OCIO from External API...** from `extensions/ocio_api_tool.py`).
 * **Channel Mask Highlights**: The quick channel selection buttons on the top right (`RGB`, `R`, `G`, `B`, `A`, `LUM`) are checkable and automatically highlight in blue (`#007acc`) when selected.
 
 ---
@@ -120,29 +122,36 @@ Located in `src/framecycler/ui/`.
 ## 7. Development & Compilation Instructions
 
 ### Automated Script Launches
-* **Windows**: Double-click or run [run.bat](file:///c:/Users/bernh/Github/Framecycler/run.bat) from PowerShell/CMD. It automatically activates `.venv`, verifies and installs dependencies in `requirements.txt`, builds the C++ module if missing, and launches the app passing any CLI parameters.
-* **macOS**: Use [run.sh](file:///c:/Users/bernh/Github/Framecycler/run.sh) which performs identical checks and compiles/executes on Unix.
+* **Windows**: Double-click or run [run.bat](run.bat) from PowerShell/CMD. It automatically activates `.venv`, verifies and installs dependencies in `requirements.txt`, builds the C++ module if missing, and launches the app passing any CLI parameters.
+* **macOS / Linux**: Use [run.sh](run.sh), which performs identical checks and compiles/executes on POSIX systems.
 
 ### Manual Virtual Environment Setup
 1. Create and activate virtual environment:
    ```powershell
+   # Windows
    python -m venv .venv
    .\.venv\Scripts\Activate.ps1
+   ```
+   ```bash
+   # macOS / Linux
+   python3 -m venv .venv
+   source .venv/bin/activate
    ```
 2. Install pip dependencies:
    ```bash
    pip install -r requirements.txt
    ```
 
-### Compiling C++ Extensions (Windows)
-Ensure you have **Visual Studio 2022 Build Tools (MSVC)** installed. Compile using the helper script:
-```powershell
+### Compiling C++ Extensions
+Ensure **CMake** is available (installed via pip in `requirements.txt`, or system package manager). On Windows, also install **Visual Studio 2022 Build Tools (MSVC)**. Compile using the helper script:
+```bash
 python build.py
 ```
-* **NMake compilation mechanics**: The script locates `vcvars64.bat` to initialize compiler path variables, configures the generator (`-G "NMake Makefiles"`), and builds the target `.pyd` module.
+* **Windows**: The script locates `vcvars64.bat` to initialize compiler path variables, configures the generator (`-G "NMake Makefiles"`), and builds the target `.pyd` module.
+* **macOS / Linux**: Uses standard CMake configure/build. On macOS, the compiled `.so` is ad-hoc signed automatically to satisfy Gatekeeper on import.
 
 ### Running App & Tests
-* Run Framecycler manually:
+* Run Framecycler Reboot manually:
    ```bash
    python -m src.framecycler
    ```
@@ -165,10 +174,15 @@ python build.py
 | `]` | Set Playback Range **Out** Point |
 | `1` | View active **Slot A** |
 | `2` | View active **Slot B** |
-| `T` | Toggle timeline between **Frame Numbers** and **Timecode** |
 | `Ctrl + H` | Toggle camera HUD viewfinder overlay |
 | `F` | Reset Viewport Zoom & Pan |
+| `E` | Enter interactive **Exposure** adjustment mode |
+| `Y` | Enter interactive **Gamma** adjustment mode |
+| `O` | Enter interactive **Offset** adjustment mode |
+| `Home` | Reset color grading to defaults |
 | `R` | Toggle **Red** channel isolation |
 | `G` | Toggle **Green** channel isolation |
 | `B` | Toggle **Blue** channel isolation |
 | `A` | Toggle **Alpha** channel isolation |
+
+The **TC / FR** readout toggle is available from the transport bar button; it is not bound to a keyboard shortcut.

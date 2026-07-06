@@ -54,8 +54,11 @@ jobs:
       - name: Compile Native C++ Core
         run: ${{ matrix.python }} build.py
 
+      - name: Generate Build Version Metadata
+        run: ${{ matrix.python }} scripts/generate_version.py
+
       - name: Freeze Application with PyInstaller
-        run: ${{ matrix.python }} -m PyInstaller --noconfirm --windowed --name=Framecycler --add-data "src/framecycler/color/studio_config${{ matrix.sep }}framecycler/color/studio_config" --add-binary "src/framecycler/framecycler_engine*.${{ matrix.ext }}${{ matrix.sep }}framecycler" src/framecycler/__main__.py
+        run: ${{ matrix.python }} -m PyInstaller --noconfirm --windowed --name=Framecycler --add-data "src/framecycler/color/studio_config${{ matrix.sep }}framecycler/color/studio_config" --add-data "assets/icons${{ matrix.sep }}assets/icons" --add-binary "src/framecycler/framecycler_engine*.${{ matrix.ext }}${{ matrix.sep }}framecycler" src/framecycler/__main__.py
 
       # Windows Installer Packaging
       - name: Package Windows Installer
