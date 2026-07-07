@@ -1,6 +1,6 @@
 import numpy as np
 from PySide6.QtWidgets import QRhiWidget, QWidget
-from PySide6.QtCore import Qt, QPoint, Signal, QTimer
+from PySide6.QtCore import Qt, QPoint, Signal, QTimer, QByteArray
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QRhiDepthStencilClearValue
 from ..color.ocio_manager import OCIOManager
 from ..render.rhi_viewport_renderer import RhiViewportRenderer
@@ -81,6 +81,8 @@ class Viewport(QRhiWidget):
 
         self.frame_data_a = None
         self.frame_data_b = None
+        self._upload_buffer_a: QByteArray | None = None
+        self._upload_buffer_b: QByteArray | None = None
         self.width_a, self.height_a, self.channels_a = 0, 0, 4
         self.width_b, self.height_b, self.channels_b = 0, 0, 4
         self._upload_token_a = 0
@@ -122,8 +124,17 @@ class Viewport(QRhiWidget):
         self._last_rhi = None
         self._ocio_pipeline_ready = False
 
-    def set_frame_a(self, data: np.ndarray, channels: list, index: int, timecode: str, fps: float):
+    def set_frame_a(
+        self,
+        data: np.ndarray,
+        channels: list,
+        index: int,
+        timecode: str,
+        fps: float,
+        upload_buffer: QByteArray | None = None,
+    ):
         self.frame_data_a = data
+        self._upload_buffer_a = upload_buffer
         self._upload_token_a += 1
         self.height_a, self.width_a = data.shape[:2]
         self.channels_a = data.shape[2] if len(data.shape) > 2 else 1
@@ -135,9 +146,10 @@ class Viewport(QRhiWidget):
         self._apply_zoom_mode()
         self.update()
 
-    def set_frame_b(self, data: np.ndarray):
+    def set_frame_b(self, data: np.ndarray, upload_buffer: QByteArray | None = None):
         self.frame_data_b = data
         if data is not None:
+            self._upload_buffer_b = upload_buffer
             self._upload_token_b += 1
             self.height_b, self.width_b = data.shape[:2]
             self.channels_b = data.shape[2] if len(data.shape) > 2 else 1
@@ -243,6 +255,10 @@ class Viewport(QRhiWidget):
         rhi_changed = self._last_rhi is not rhi
         self._last_rhi = rhi
 
+        if rhi_changed:
+            backend_name = rhi.backendName() if hasattr(rhi, "backendName") else str(rhi.backend())
+            print(f"Viewport: QRhi backend = {backend_name}")
+
         self.native_renderer.initialize(rhi)
         self._renderer_initialized = True
 
@@ -304,6 +320,10 @@ class Viewport(QRhiWidget):
             scale_y * self.zoom,
             pan_x,
             pan_y,
+            upload_buffer_a=self._upload_buffer_a,
+            upload_buffer_b=self._upload_buffer_b,
+            frame_index_a=self.current_frame,
+            frame_index_b=self.current_frame,
         )
 
     def _draw_hud(self, painter: QPainter):
@@ -447,6 +467,8 @@ class Viewport(QRhiWidget):
     def clear_frames(self):
         self.frame_data_a = None
         self.frame_data_b = None
+        self._upload_buffer_a = None
+        self._upload_buffer_b = None
         self._upload_token_a = 0
         self._upload_token_b = 0
         self.pixel_aspect_ratio = 1.0

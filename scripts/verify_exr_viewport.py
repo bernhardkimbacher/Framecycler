@@ -90,6 +90,7 @@ def main() -> int:
             frame_idx,
             hit["timecode"],
             decoder.get_metadata()["fps"],
+            upload_buffer=hit.get("upload_buffer"),
         )
         for _ in range(80):
             app.processEvents()

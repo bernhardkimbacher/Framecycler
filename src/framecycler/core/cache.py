@@ -4,6 +4,9 @@ import queue
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, Any, List, Set, Tuple
+
+from PySide6.QtCore import QByteArray
+
 from ..decoders.base import BaseDecoder
 from .settings import Settings
 from .timecode import Timecode
@@ -24,6 +27,9 @@ class CacheEngine:
         self.native_cache = framecycler_engine.CacheManager(self.settings.ram_cache_limit_gb)
         self.lock = threading.Lock()
 
+        # Pre-baked GPU upload buffers (built on decode worker threads, bounded separately from RAM cache)
+        self._upload_buffers: Dict[int, QByteArray] = {}
+
         # Priority decode queue: (priority, sequence, frame_index) — lower priority value = sooner
         self._decode_heap: List[Tuple[int, int, int]] = []
         self._heap_seq = 0
@@ -36,6 +42,8 @@ class CacheEngine:
 
         # Playback states
         meta = self.decoder.get_metadata()
+        meta_fps = meta.get("fps", 24.0)
+        self._max_upload_buffers = max(24, int(meta_fps * 3))
         start = meta.get("start_frame", 0)
         end = meta.get("end_frame", meta["frame_count"] - 1)
 
@@ -55,6 +63,12 @@ class CacheEngine:
         if img.dtype == np.float16:
             return img
         return np.ascontiguousarray(img.astype(np.float16))
+
+    @staticmethod
+    def _prepare_upload_buffer(img: np.ndarray) -> QByteArray:
+        """Pack a cache-ready float16 image into a QRhi upload buffer on a worker thread."""
+        pixel_bytes = np.ascontiguousarray(img, dtype=np.float16).tobytes()
+        return QByteArray(pixel_bytes)
 
     @staticmethod
     def _prepare_cache_image(img: np.ndarray) -> tuple[np.ndarray, int]:
@@ -98,6 +112,7 @@ class CacheEngine:
                     "channels": cache_channels,
                     "frame_index": frame_index,
                     "timecode": Timecode.frame_to_timecode(frame_index, meta["fps"], 0),
+                    "upload_buffer": self._get_upload_buffer(frame_index),
                 }
 
         self._schedule_frame(frame_index, priority=0)
@@ -105,6 +120,31 @@ class CacheEngine:
 
     def get_cached_frames(self) -> Set[int]:
         return set(self.native_cache.get_cached_frames())
+
+    def _get_upload_buffer(self, frame_index: int) -> QByteArray | None:
+        with self.lock:
+            return self._upload_buffers.get(frame_index)
+
+    def _store_upload_buffer(self, frame_index: int, upload_buffer: QByteArray) -> None:
+        with self.lock:
+            self._upload_buffers[frame_index] = upload_buffer
+            if len(self._upload_buffers) > self._max_upload_buffers:
+                self._evict_furthest_upload_buffer()
+
+    def _evict_furthest_upload_buffer(self) -> None:
+        if not self._upload_buffers:
+            return
+
+        playhead = self.current_playhead
+        frame_count = max(1, self.decoder.get_metadata().get("frame_count", 1))
+
+        def distance(frame_num: int) -> int:
+            direct_dist = abs(frame_num - playhead)
+            wrapped_dist = abs(frame_count - direct_dist)
+            return min(direct_dist, wrapped_dist)
+
+        furthest_frame = max(self._upload_buffers.keys(), key=distance)
+        del self._upload_buffers[furthest_frame]
 
     def update_settings(self):
         with self.lock:
@@ -198,11 +238,14 @@ class CacheEngine:
             img, channels = self._prepare_cache_image(frame_data["data"])
 
             self.native_cache.write_frame(frame_index, img.shape[1], img.shape[0], channels, img)
+            upload_buffer = self._prepare_upload_buffer(img)
+            self._store_upload_buffer(frame_index, upload_buffer)
 
             with self.lock:
                 self.active_requests.discard(frame_index)
             self._notify_frame_ready(frame_index)
-        except Exception:
+        except Exception as exc:
+            print(f"CacheEngine: decode failed for frame {frame_index}: {exc}")
             with self.lock:
                 self.active_requests.discard(frame_index)
 
@@ -211,6 +254,7 @@ class CacheEngine:
         with self.lock:
             self.active_requests.clear()
             self._decode_heap.clear()
+            self._upload_buffers.clear()
 
     def close(self):
         self.running = False

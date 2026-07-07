@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import struct
 import math
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 
 import numpy as np
 from PySide6.QtCore import QByteArray, QSize
@@ -56,6 +57,21 @@ QUAD_VERTICES = np.array(
 )
 
 
+class _RateLimitedLogger:
+    def __init__(self) -> None:
+        self._last_messages: dict[str, float] = {}
+
+    def warn(self, key: str, message: str, interval_sec: float = 5.0) -> None:
+        now = time.monotonic()
+        last = self._last_messages.get(key, 0.0)
+        if now - last >= interval_sec:
+            print(message)
+            self._last_messages[key] = now
+
+
+_RATE_LIMITER = _RateLimitedLogger()
+
+
 @dataclass
 class _TextureUploadState:
     texture: QRhiTexture | None = None
@@ -69,7 +85,7 @@ class _TextureUploadState:
 class _OcioLut3D:
     texture: QRhiTexture | None = None
     size: int = 0
-    rgba_data: list[float] = field(default_factory=list)
+    rgba_data: np.ndarray | None = None
     dirty: bool = False
 
 
@@ -95,13 +111,46 @@ def _upload_texture_bytes(
     *,
     row_stride_bytes: int = 0,
 ) -> None:
-    subres = QRhiTextureSubresourceUploadDescription(QByteArray(data))
+    _upload_texture_qbytearray(
+        batch,
+        texture,
+        QByteArray(data),
+        row_stride_bytes=row_stride_bytes,
+    )
+
+
+def _upload_texture_qbytearray(
+    batch,
+    texture: QRhiTexture,
+    data: QByteArray,
+    *,
+    row_stride_bytes: int = 0,
+) -> None:
+    subres = QRhiTextureSubresourceUploadDescription(data)
     if row_stride_bytes > 0:
         subres.setDataStride(row_stride_bytes)
     batch.uploadTexture(
         texture,
         QRhiTextureUploadDescription(QRhiTextureUploadEntry(0, 0, subres)),
     )
+
+
+def _upload_texture_3d(batch, texture: QRhiTexture, rgba: np.ndarray) -> None:
+    """Upload a 3D LUT volume slice-by-slice (required by QRhi on Metal/Vulkan)."""
+    volume = np.ascontiguousarray(rgba, dtype=np.float32)
+    if volume.ndim != 4 or volume.shape[-1] != 4:
+        raise ValueError("3D LUT upload expects an (D, H, W, 4) RGBA32F array")
+
+    depth, _height, width, _channels = volume.shape
+    row_stride = width * 4 * volume.itemsize
+    for layer in range(depth):
+        slice_bytes = volume[layer].tobytes()
+        subres = QRhiTextureSubresourceUploadDescription(QByteArray(slice_bytes))
+        subres.setDataStride(row_stride)
+        batch.uploadTexture(
+            texture,
+            QRhiTextureUploadDescription(QRhiTextureUploadEntry(layer, 0, subres)),
+        )
 
 
 class RhiViewportRenderer:
@@ -234,10 +283,12 @@ class RhiViewportRenderer:
         slot.size = size
 
         flat = np.asarray(data, dtype=np.float32).reshape(-1)
-        rgba = np.empty((flat.size // 3, 4), dtype=np.float32)
-        rgba[:, :3] = flat.reshape(-1, 3)
-        rgba[:, 3] = 1.0
-        slot.rgba_data = rgba.reshape(-1).tolist()
+        side = int(size)
+        rgb = flat.reshape(side, side, side, 3)
+        rgba = np.empty((side, side, side, 4), dtype=np.float32)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 1.0
+        slot.rgba_data = rgba
         slot.dirty = True
         self._invalidate_pipeline()
 
@@ -283,12 +334,21 @@ class RhiViewportRenderer:
         scale_y: float,
         pan_x: float,
         pan_y: float,
+        upload_buffer_a: QByteArray | None = None,
+        upload_buffer_b: QByteArray | None = None,
+        frame_index_a: int = -1,
+        frame_index_b: int = -1,
     ) -> None:
         if not self._initialized or self._rhi is None or cb is None or render_target is None or data_a is None:
             return
 
         self._ensure_static_resources_created()
         if not self._vertex_shader or not self._fragment_shader:
+            _RATE_LIMITER.warn(
+                "missing-shaders",
+                "RhiViewportRenderer: render skipped because shaders are not ready "
+                "(shader bake may have failed)",
+            )
             return
 
         batch = self._rhi.nextResourceUpdateBatch()
@@ -301,6 +361,8 @@ class RhiViewportRenderer:
             data_a,
             upload_token_a,
             batch,
+            pre_baked_buffer=upload_buffer_a,
+            frame_index=frame_index_a,
         )
         if data_b is not None:
             self._upload_texture(
@@ -311,16 +373,21 @@ class RhiViewportRenderer:
                 data_b,
                 upload_token_b,
                 batch,
+                pre_baked_buffer=upload_buffer_b,
+                frame_index=frame_index_b,
             )
 
         for lut in self._ocio_luts_3d:
-            if lut.dirty and lut.texture is not None and lut.rgba_data:
-                rgba_bytes = np.asarray(lut.rgba_data, dtype=np.float32).tobytes()
-                _upload_texture_bytes(batch, lut.texture, rgba_bytes)
+            if lut.dirty and lut.texture is not None and lut.rgba_data is not None:
+                _upload_texture_3d(batch, lut.texture, lut.rgba_data)
                 lut.dirty = False
 
         self._ensure_pipeline(render_target)
         if not self._pipeline or self._tex_a_state.texture is None:
+            _RATE_LIMITER.warn(
+                "missing-pipeline",
+                "RhiViewportRenderer: render skipped because graphics pipeline is not ready",
+            )
             cb.resourceUpdate(batch)
             return
 
@@ -366,7 +433,7 @@ class RhiViewportRenderer:
             _destroy_resource(lut.texture)
             lut.texture = None
             lut.size = 0
-            lut.rgba_data.clear()
+            lut.rgba_data = None
             lut.dirty = False
         self._ocio_luts_3d.clear()
         self._invalidate_pipeline()
@@ -609,6 +676,9 @@ class RhiViewportRenderer:
         data: np.ndarray,
         upload_token: int,
         batch,
+        *,
+        pre_baked_buffer: QByteArray | None = None,
+        frame_index: int = -1,
     ) -> None:
         if self._rhi is None or data is None or width <= 0 or height <= 0 or channels <= 0 or batch is None:
             return
@@ -635,9 +705,22 @@ class RhiViewportRenderer:
             state.texture.create()
             self._invalidate_pipeline()
 
-        pixel_bytes = np.asarray(data, dtype=np.float16).tobytes()
         row_stride = width * channels * 2
-        _upload_texture_bytes(batch, state.texture, pixel_bytes, row_stride_bytes=row_stride)
+        if pre_baked_buffer is not None and not pre_baked_buffer.isEmpty():
+            _upload_texture_qbytearray(
+                batch,
+                state.texture,
+                pre_baked_buffer,
+                row_stride_bytes=row_stride,
+            )
+        else:
+            _RATE_LIMITER.warn(
+                "sync-upload-fallback",
+                f"RhiViewportRenderer: no pre-staged upload buffer for frame {frame_index}, "
+                "falling back to synchronous main-thread packing (perf degraded)",
+            )
+            pixel_bytes = np.asarray(data, dtype=np.float16).tobytes()
+            _upload_texture_bytes(batch, state.texture, pixel_bytes, row_stride_bytes=row_stride)
 
         state.last_upload_token = upload_token
         state.last_w = width

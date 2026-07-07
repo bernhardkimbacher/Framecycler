@@ -105,6 +105,10 @@ class EXRDecoder(BaseDecoder):
         file_path = self.frame_map.get(frame_index)
         if not file_path:
             closest_frame = min(self.frame_numbers, key=lambda x: abs(x - frame_index))
+            print(
+                f"ExrDecoder: frame {frame_index} not in frame_map, "
+                f"serving nearest available frame {closest_frame}"
+            )
             file_path = self.frame_map[closest_frame]
 
         read_layer = layer if layer is not None else self.active_layer

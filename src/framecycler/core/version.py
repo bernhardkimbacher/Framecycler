@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 APP_NAME = "Framecycler Reboot"
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 COPYRIGHT_HOLDER = "Bernie Kimbacher"
 COPYRIGHT_YEAR = "2026"
 

@@ -1,7 +1,7 @@
 #pragma once
 #include <vector>
 #include <unordered_map>
-#include <mutex>
+#include <shared_mutex>
 #include <set>
 #include <cstdint>
 
@@ -45,5 +45,5 @@ private:
     int _in_point;
     int _out_point;
 
-    std::mutex _mutex;
+    std::shared_mutex _mutex;
 };

@@ -9,13 +9,13 @@ CacheManager::CacheManager(double ram_limit_gb)
 }
 
 void CacheManager::set_ram_limit(double ram_limit_gb) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::unique_lock<std::shared_mutex> lock(_mutex);
     _ram_limit_gb = ram_limit_gb;
     _max_bytes = static_cast<size_t>(ram_limit_gb * 1024.0 * 1024.0 * 1024.0);
 }
 
 void CacheManager::set_playhead(int playhead, int direction, int in_point, int out_point) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::unique_lock<std::shared_mutex> lock(_mutex);
     _current_playhead = playhead;
     _play_direction = direction;
     _in_point = in_point;
@@ -23,12 +23,12 @@ void CacheManager::set_playhead(int playhead, int direction, int in_point, int o
 }
 
 bool CacheManager::has_frame(int frame_index) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::shared_lock<std::shared_mutex> lock(_mutex);
     return _frame_to_slot.find(frame_index) != _frame_to_slot.end();
 }
 
 void CacheManager::write_frame(int frame_index, int width, int height, int channels, const uint16_t* pixel_data, size_t data_size) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::unique_lock<std::shared_mutex> lock(_mutex);
 
     auto it = _frame_to_slot.find(frame_index);
     if (it != _frame_to_slot.end()) {
@@ -94,7 +94,7 @@ void CacheManager::write_frame(int frame_index, int width, int height, int chann
 }
 
 const uint16_t* CacheManager::get_frame_data(int frame_index, int& width, int& height, int& channels) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::shared_lock<std::shared_mutex> lock(_mutex);
     auto it = _frame_to_slot.find(frame_index);
     if (it == _frame_to_slot.end()) {
         return nullptr;
@@ -108,7 +108,7 @@ const uint16_t* CacheManager::get_frame_data(int frame_index, int& width, int& h
 }
 
 std::vector<int> CacheManager::get_cached_frames() {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::shared_lock<std::shared_mutex> lock(_mutex);
     std::vector<int> frames;
     frames.reserve(_frame_to_slot.size());
     for (const auto& pair : _frame_to_slot) {
@@ -118,7 +118,7 @@ std::vector<int> CacheManager::get_cached_frames() {
 }
 
 void CacheManager::clear() {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::unique_lock<std::shared_mutex> lock(_mutex);
     _slots.clear();
     _frame_to_slot.clear();
     _slot_to_frame.clear();

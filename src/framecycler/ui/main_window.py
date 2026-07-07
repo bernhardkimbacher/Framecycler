@@ -84,6 +84,11 @@ class MainWindow(QMainWindow):
         # Playback timer
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._playback_tick)
+
+        # Timeline cache indicator refresh (throttled during playback)
+        self._cached_frames_timer = QTimer(self)
+        self._cached_frames_timer.setInterval(250)
+        self._cached_frames_timer.timeout.connect(self._refresh_timeline_cached_frames)
         
         # Plugins registration
         self.plugins = [OcioApiTool(self)]
@@ -767,9 +772,8 @@ class MainWindow(QMainWindow):
             self.caches[1].set_playhead(frame, self.playback_direction)
 
         self._apply_cached_frames(frame)
-        
-        # Draw caching blocks in timeline
-        if self.caches[self.active_slot] is not None:
+
+        if self.caches[self.active_slot] is not None and not self.playing:
             self.timeline.set_cached_frames(self.caches[self.active_slot].get_cached_frames())
             
         self.timeline.set_current_frame(frame)
@@ -794,13 +798,17 @@ class MainWindow(QMainWindow):
                     frame_a_dict["channels"],
                     frame,
                     tc,
-                    self.fps
+                    self.fps,
+                    upload_buffer=frame_a_dict.get("upload_buffer"),
                 )
 
         if self.caches[1] is not None:
             frame_b_dict = self.caches[1].get_frame(frame)
             if frame_b_dict:
-                self.viewport.set_frame_b(frame_b_dict["data"])
+                self.viewport.set_frame_b(
+                    frame_b_dict["data"],
+                    upload_buffer=frame_b_dict.get("upload_buffer"),
+                )
 
     def _on_cache_frame_ready(self, slot: int, frame_index: int):
         if frame_index != self.current_frame:
@@ -811,6 +819,12 @@ class MainWindow(QMainWindow):
         if frame_index != self.current_frame:
             return
         self._apply_cached_frames(frame_index)
+        if not self.playing:
+            active_cache = self.caches[self.active_slot]
+            if active_cache is not None:
+                self.timeline.set_cached_frames(active_cache.get_cached_frames())
+
+    def _refresh_timeline_cached_frames(self):
         active_cache = self.caches[self.active_slot]
         if active_cache is not None:
             self.timeline.set_cached_frames(active_cache.get_cached_frames())
@@ -855,10 +869,13 @@ class MainWindow(QMainWindow):
         # Match rate timer interval (ms)
         interval_ms = int(1000.0 / self.fps)
         self.timer.start(interval_ms)
+        self._cached_frames_timer.start()
 
     def stop_playback(self):
         self.playing = False
         self.timer.stop()
+        self._cached_frames_timer.stop()
+        self._refresh_timeline_cached_frames()
         self._update_playback_buttons()
 
     # In / Out controls
