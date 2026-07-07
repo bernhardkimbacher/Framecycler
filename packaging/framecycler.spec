@@ -24,10 +24,23 @@ engine_bins = [
     for path in (root / "src" / "framecycler").glob(f"framecycler_engine*{engine_ext}")
 ]
 
+
+def pyside6_qsb_binaries() -> list[tuple[str, str]]:
+    try:
+        import PySide6
+    except ImportError:
+        return []
+    pkg = Path(PySide6.__file__).resolve().parent
+    for name in ("qsb.exe", "qsb"):
+        candidate = pkg / name
+        if candidate.is_file():
+            return [(str(candidate), "PySide6")]
+    return []
+
 a = Analysis(
     [str(root / "src" / "framecycler" / "__main__.py")],
     pathex=[str(root / "src")],
-    binaries=engine_bins + collect_dynamic_libs("OpenImageIO"),
+    binaries=engine_bins + pyside6_qsb_binaries() + collect_dynamic_libs("OpenImageIO"),
     datas=[
         (str(root / "src" / "framecycler" / "color" / "studio_config"), "framecycler/color/studio_config"),
         (str(root / "src" / "framecycler" / "render" / "shaders"), "framecycler/render/shaders"),
@@ -84,7 +97,7 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleDisplayName": "Framecycler Reboot",
             "CFBundleName": "Framecycler Reboot",
-            "CFBundleShortVersionString": "0.2.2",
+            "CFBundleShortVersionString": "0.2.3",
             "NSHighResolutionCapable": True,
         },
     )

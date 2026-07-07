@@ -1,10 +1,24 @@
-import unittest
+import sys
+import tempfile
 import threading
+import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from src.framecycler.render.shader_baker import ShaderBaker
 
 
 class TestShaderBaker(unittest.TestCase):
+    def test_find_qsb_tool_frozen_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            qsb = Path(tmp) / "PySide6" / "qsb"
+            qsb.parent.mkdir(parents=True)
+            qsb.write_bytes(b"")
+            with patch.object(sys, "frozen", True, create=True), patch.object(
+                sys, "_MEIPASS", tmp, create=True
+            ):
+                self.assertEqual(ShaderBaker._find_qsb_tool(), str(qsb))
+
     def test_bake_sync(self):
         baker = ShaderBaker()
         if not baker.available:

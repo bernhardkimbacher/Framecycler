@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -20,15 +21,24 @@ class ShaderBaker:
 
     @staticmethod
     def _find_qsb_tool() -> str | None:
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            bundled = Path(sys._MEIPASS) / "PySide6"
+            for name in ("qsb", "qsb.exe"):
+                candidate = bundled / name
+                if candidate.is_file():
+                    return str(candidate)
+
         tool = shutil.which("pyside6-qsb")
         if tool:
             return tool
         try:
             import PySide6
 
-            candidate = Path(PySide6.__file__).resolve().parent / "qsb"
-            if candidate.exists():
-                return str(candidate)
+            pkg = Path(PySide6.__file__).resolve().parent
+            for name in ("qsb", "qsb.exe"):
+                candidate = pkg / name
+                if candidate.is_file():
+                    return str(candidate)
         except ImportError:
             pass
         return None
