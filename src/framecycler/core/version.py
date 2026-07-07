@@ -5,6 +5,10 @@ APP_NAME = "Framecycler Reboot"
 __version__ = "0.2.5"
 COPYRIGHT_HOLDER = "Bernie Kimbacher"
 COPYRIGHT_YEAR = "2026"
+LICENSE_NAME = "PolyForm Small Business License 1.0.0"
+LICENSE_URL = "https://polyformproject.org/licenses/small-business/1.0.0"
+LICENSE_EMPLOYEE_THRESHOLD = 10
+LICENSE_REVENUE_THRESHOLD_USD = 500_000
 
 
 def _repo_root() -> Path:
@@ -88,15 +92,20 @@ def get_about_text() -> str:
             "",
             f"Copyright © {COPYRIGHT_YEAR} {COPYRIGHT_HOLDER}",
             "",
-            "This program is free software: you can redistribute it and/or modify "
-            "it under the terms of the GNU Affero General Public License as published "
-            "by the Free Software Foundation, either version 3 of the License, or "
-            "(at your option) any later version.",
+            f"Licensed under the {LICENSE_NAME}.",
             "",
-            "This program is distributed in the hope that it will be useful, "
-            "but WITHOUT ANY WARRANTY; without even the implied warranty of "
-            "MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the "
-            "GNU Affero General Public License for more details.",
+            "You may use, modify, and distribute this software for any permitted purpose.",
+            "",
+            "Use for the benefit of your company is permitted if your company has "
+            f"fewer than {LICENSE_EMPLOYEE_THRESHOLD} total individuals working as "
+            "employees and independent contractors, and less than "
+            f"{LICENSE_REVENUE_THRESHOLD_USD:,} USD total revenue in the prior tax year.",
+            "",
+            "Organizations that do not meet these thresholds require a commercial "
+            f"license from {COPYRIGHT_HOLDER}.",
+            "",
+            f"Full terms: {LICENSE_URL}",
+            "See the LICENSE file distributed with this software.",
         ]
     )
     return "\n".join(lines)

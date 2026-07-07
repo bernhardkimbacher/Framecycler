@@ -26,7 +26,10 @@ class TestVersion(unittest.TestCase):
         text = get_about_text()
         self.assertIn(__version__, text)
         self.assertIn("Copyright", text)
-        self.assertIn("GNU Affero General Public License", text)
+        self.assertIn("PolyForm Small Business License", text)
+        self.assertIn("fewer than 10 total individuals", text)
+        self.assertIn("500,000 USD", text)
+        self.assertIn("commercial license", text)
         self.assertIn("Build commit:", text)
 
 

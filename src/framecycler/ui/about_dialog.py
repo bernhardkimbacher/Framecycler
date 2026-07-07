@@ -8,7 +8,7 @@ class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"About {APP_NAME}")
-        self.setFixedSize(520, 360)
+        self.setFixedSize(520, 440)
 
         self.setStyleSheet("""
             QDialog {
