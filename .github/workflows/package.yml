@@ -18,6 +18,10 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      VPK_PACK_ID: framecycler-reboot
+      VPK_PACK_TITLE: Framecycler-Reboot
+      VPK_BUNDLE_ID: com.bernhardkimbacher.framecycler-reboot
     strategy:
       fail-fast: false
       matrix:
@@ -104,7 +108,8 @@ jobs:
         shell: pwsh
         run: |
           vpk pack `
-            -u com.bernhardkimbacher.framecycler-reboot `
+            -u $env:VPK_PACK_ID `
+            --packTitle $env:VPK_PACK_TITLE `
             -v ${{ steps.version.outputs.version }} `
             -p dist/Framecycler `
             -e Framecycler.exe `
@@ -115,19 +120,21 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: |
           vpk pack \
-            -u com.bernhardkimbacher.framecycler-reboot \
+            -u "$VPK_PACK_ID" \
+            --packTitle "$VPK_PACK_TITLE" \
             -v ${{ steps.version.outputs.version }} \
-            -p dist/Framecycler.app \
+            -p dist/Framecycler-Reboot.app \
             -e Framecycler \
             -c osx \
-            --bundleId com.bernhardkimbacher.framecycler-reboot \
+            --bundleId "$VPK_BUNDLE_ID" \
             --icon assets/icons/app_icon.icns
 
       - name: Create Velopack release (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           vpk pack \
-            -u com.bernhardkimbacher.framecycler-reboot \
+            -u "$VPK_PACK_ID" \
+            --packTitle "$VPK_PACK_TITLE" \
             -v ${{ steps.version.outputs.version }} \
             -p dist/Framecycler \
             -e Framecycler \

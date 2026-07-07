@@ -77,13 +77,13 @@ coll = COLLECT(
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
-        name="Framecycler.app",
+        name="Framecycler-Reboot.app",
         icon=icon_path(),
         bundle_identifier="com.bernhardkimbacher.framecycler-reboot",
         info_plist={
             "CFBundleDisplayName": "Framecycler Reboot",
             "CFBundleName": "Framecycler Reboot",
-            "CFBundleShortVersionString": "0.1.1",
+            "CFBundleShortVersionString": "0.1.2",
             "NSHighResolutionCapable": True,
         },
     )

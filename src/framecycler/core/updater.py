@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog, QWidget
 
 GITHUB_REPO_URL = "https://github.com/bernhardkimbacher/Framecycler"
-PACK_ID = "com.bernhardkimbacher.framecycler-reboot"
+PACK_ID = "framecycler-reboot"
 
 
 class UpdateUnavailableError(RuntimeError):
