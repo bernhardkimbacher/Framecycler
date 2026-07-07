@@ -23,7 +23,7 @@ jobs:
       VPK_PACK_TITLE: Framecycler-Reboot
       VPK_BUNDLE_ID: com.bernhardkimbacher.framecycler-reboot
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
         include:
