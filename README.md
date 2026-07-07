@@ -17,7 +17,7 @@ graph TD
     E -->|pre-bake on worker thread| G[Upload Buffer Side-Cache]
     F -->|zero-copy float16 view| C
     G -->|pre-staged QByteArray| C
-    C -->|set_frame_a| H[QRhiWidget Viewport]
+    C -->|set_frame| H[QRhiWidget Viewport]
     H -->|render| I[RhiViewportRenderer - Python]
     I -->|QRhi GPU pass| J[Screen Display]
     K[OCIO Manager - Python] -->|GLSL sources and LUTs| I
@@ -171,7 +171,7 @@ The viewport header shows the current pipeline state, e.g. `IN: ARRI Alexa LogC3
 
 ### D. Automatic Input Color Space Detection
 
-When media is loaded into Slot A, the app attempts to set the input color space automatically from:
+When the first media source is loaded, the app attempts to set the input color space automatically from:
 
 1. **Metadata** — EXR/QuickTime color tags, DPX transfer characteristic, etc.
 2. **Filename hints** — e.g. `plate_logc3.####.exr`, `comp_acescg.exr`
@@ -200,8 +200,9 @@ Shader templates live in `src/framecycler/render/shaders/`; Python-side bundling
 
 Located in `src/framecycler/ui/`.
 
-* **Unified Header**: Displays `LAYER` and `COMPARE` dropdowns alongside the `Resolution` readout (e.g., `2048x1080`) and active `OCIO config status` (e.g. `IN: ARRI Alexa LogC3 | OUT: sRGB (sRGB View)`).
-* **Viewfinder Overlay (HUD)**: Removed cluttered status text from the viewport area, keeping only the A/B compare slider wipe line inside the image container.
+* **Compare Modes** (Tools → Compare): **Sequence** (default, plays sources back-to-back on a concatenated timeline), **Wipe** and **Difference** (first two sources), **Tile** (all sources in an aspect-preserving grid).
+* **File → Add Media**: Append a new source to the list. Drag-and-drop shows a **Replace Media** / **Add Media** overlay (left replaces all, right appends).
+* **Viewfinder Overlay (HUD)**: Keeps the Wipe compare divider line inside the image container when Wipe mode is active.
 * **Timeline Status Row**: Positioned directly above the timeline slider. Displays `FR`, `FPS`, and `TC` in a clean, larger `Segoe UI` font that matches the timeline theme.
 * **Centered Transport Controls**: The playback buttons and loop mode dropdown are centered in the bottom transport bar, with `TC / FR` toggle aligned on the far right.
 * **Grading Menu**: Adds a **Grading** menu with interactive exposure, gamma, and offset adjustment modes (mouse-drag in the viewport). **Reset Color Grade** restores defaults (`Exposure: 0.0`, `Gamma: 1.0`, `Offset: 0.0`) via the menu or the `Home` shortcut.
@@ -272,12 +273,11 @@ Shader baking at runtime uses `pyside6-qsb` (bundled with PySide6). Pinned depen
 | :--- | :--- |
 | `Space` | Play / Pause |
 | `Left` / `Right` | Step backward / forward by 1 frame |
+| `Cmd + Left/Right` (macOS) / `Ctrl + Left/Right` (Win/Linux) | Jump to previous / next clip; sets in/out to that clip and seeks to its first frame |
 | `Shift + Left/Right` | Step backward / forward by 10 frames |
-| `Shift + X` | Clear viewer inputs (empty slots A & B) |
+| `Shift + X` | Clear all loaded media sources |
 | `[` | Set Playback Range **In** Point |
 | `]` | Set Playback Range **Out** Point |
-| `1` | View active **Slot A** |
-| `2` | View active **Slot B** |
 | `Ctrl + H` | Toggle camera HUD viewfinder overlay |
 | `F` | Reset Viewport Zoom & Pan |
 | `E` | Enter interactive **Exposure** adjustment mode |

@@ -19,9 +19,9 @@ class BaseTool(ABC):
         """
         pass
 
-    def on_media_loaded(self, slot: int, file_path: str, metadata: Dict[str, Any]):
+    def on_media_loaded(self, source_index: int, file_path: str, metadata: Dict[str, Any]):
         """
-        Event callback fired when slot A (0) or slot B (1) loads new media.
+        Event callback fired when a media source is loaded into the source list.
         """
         pass
 

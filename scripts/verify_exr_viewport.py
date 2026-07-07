@@ -84,13 +84,15 @@ def main() -> int:
 
     def finish():
         viewport.update_ocio_pipeline()
-        viewport.set_frame_a(
+        viewport.set_frame(
+            0,
             hit["data"],
             hit["channels"],
-            frame_idx,
-            hit["timecode"],
-            decoder.get_metadata()["fps"],
+            local_frame=frame_idx,
+            timecode=hit["timecode"],
+            fps=decoder.get_metadata()["fps"],
             upload_buffer=hit.get("upload_buffer"),
+            is_primary=True,
         )
         for _ in range(80):
             app.processEvents()

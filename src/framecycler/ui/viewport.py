@@ -1,10 +1,31 @@
 import numpy as np
+from dataclasses import dataclass
 from PySide6.QtWidgets import QRhiWidget, QWidget
 from PySide6.QtCore import Qt, QPoint, Signal, QTimer, QByteArray
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QRhiDepthStencilClearValue
 from ..color.ocio_manager import OCIOManager
-from ..render.rhi_viewport_renderer import RhiViewportRenderer
+from ..core.tile_layout import TileLayout, compute_tile_layouts
+from ..render.rhi_viewport_renderer import FrameRenderSlot, RhiViewportRenderer, TileDrawParams
 from .fonts import mono_font, ui_font
+
+
+COMPARE_SEQUENCE = 0
+COMPARE_WIPE = 1
+COMPARE_DIFFERENCE = 2
+COMPARE_TILE = 3
+
+
+@dataclass
+class ViewportFrameSlot:
+    data: np.ndarray | None = None
+    upload_buffer: QByteArray | None = None
+    upload_token: int = 0
+    width: int = 0
+    height: int = 0
+    channels: int = 4
+    pixel_aspect_ratio: float = 1.0
+    timecode: str = "01:00:00:00"
+    local_frame: int = 0
 
 
 class ViewportHudOverlay(QWidget):
@@ -79,17 +100,13 @@ class Viewport(QRhiWidget):
 
         self.native_renderer = RhiViewportRenderer()
 
-        self.frame_data_a = None
-        self.frame_data_b = None
-        self._upload_buffer_a: QByteArray | None = None
-        self._upload_buffer_b: QByteArray | None = None
-        self.width_a, self.height_a, self.channels_a = 0, 0, 4
-        self.width_b, self.height_b, self.channels_b = 0, 0, 4
-        self._upload_token_a = 0
-        self._upload_token_b = 0
+        self.frame_slots: list[ViewportFrameSlot] = []
+        self.sequence_index = 0
+        self.source_labels: list[str] = []
+
         self.pixel_aspect_ratio = 1.0
 
-        self.compare_mode = 0
+        self.compare_mode = COMPARE_SEQUENCE
         self.channel_mask = 0
         self.wipe_pos = 0.5
 
@@ -124,46 +141,72 @@ class Viewport(QRhiWidget):
         self._last_rhi = None
         self._ocio_pipeline_ready = False
 
-    def set_frame_a(
+    def set_source_count(self, count: int) -> None:
+        while len(self.frame_slots) < count:
+            self.frame_slots.append(ViewportFrameSlot())
+        while len(self.frame_slots) > count:
+            self.frame_slots.pop()
+        self.native_renderer.ensure_texture_pool(count)
+
+    def set_frame(
         self,
-        data: np.ndarray,
-        channels: list,
         index: int,
-        timecode: str,
-        fps: float,
+        data: np.ndarray | None,
+        channels: list | None = None,
+        *,
+        local_frame: int = 0,
+        timecode: str = "01:00:00:00",
+        fps: float | None = None,
         upload_buffer: QByteArray | None = None,
+        pixel_aspect_ratio: float | None = None,
+        is_primary: bool = False,
     ):
-        self.frame_data_a = data
-        self._upload_buffer_a = upload_buffer
-        self._upload_token_a += 1
-        self.height_a, self.width_a = data.shape[:2]
-        self.channels_a = data.shape[2] if len(data.shape) > 2 else 1
-
-        self.current_frame = index
-        self.current_timecode = timecode
-        self.fps = fps
-        self.resolution_str = f"{self.width_a}x{self.height_a}"
-        self._apply_zoom_mode()
-        self.update()
-
-    def set_frame_b(self, data: np.ndarray, upload_buffer: QByteArray | None = None):
-        self.frame_data_b = data
+        self.set_source_count(max(len(self.frame_slots), index + 1))
+        slot = self.frame_slots[index]
+        slot.data = data
+        slot.upload_buffer = upload_buffer
         if data is not None:
-            self._upload_buffer_b = upload_buffer
-            self._upload_token_b += 1
-            self.height_b, self.width_b = data.shape[:2]
-            self.channels_b = data.shape[2] if len(data.shape) > 2 else 1
+            slot.upload_token += 1
+            slot.height, slot.width = data.shape[:2]
+            slot.channels = data.shape[2] if len(data.shape) > 2 else 1
+        if pixel_aspect_ratio is not None:
+            slot.pixel_aspect_ratio = pixel_aspect_ratio
+        slot.local_frame = local_frame
+        slot.timecode = timecode
+
+        if is_primary:
+            self.sequence_index = index
+            if fps is not None:
+                self.fps = fps
+            self.current_frame = local_frame
+            self.current_timecode = timecode
+            if data is not None:
+                self.resolution_str = f"{slot.width}x{slot.height}"
+                self.pixel_aspect_ratio = slot.pixel_aspect_ratio
+            self._apply_zoom_mode()
+
         self.update()
+
+    def set_source_labels(self, labels: list[str]) -> None:
+        self.source_labels = labels
+
+    def set_sequence_index(self, index: int) -> None:
+        self.sequence_index = index
 
     def set_pixel_aspect_ratio(self, par: float):
         if par <= 0.0:
             par = 1.0
         self.pixel_aspect_ratio = par
-        if self.zoom_mode != "fit":
+        if self.compare_mode != COMPARE_TILE and self.zoom_mode != "fit":
             self._apply_zoom_mode()
         self.update()
 
     def set_compare_mode(self, mode: int):
+        if mode == COMPARE_TILE and self.compare_mode != COMPARE_TILE:
+            self.zoom_mode = "fit"
+            self.pan_offset = QPoint(0, 0)
+            self.zoom = 1.0
+            self.zoom_mode_changed.emit("fit")
         self.compare_mode = mode
         self.update()
 
@@ -175,13 +218,32 @@ class Viewport(QRhiWidget):
         self.hud_visible = not self.hud_visible
         self.update()
 
+    def _primary_slot(self) -> ViewportFrameSlot | None:
+        if not self.frame_slots:
+            return None
+        if self.compare_mode == COMPARE_SEQUENCE:
+            if 0 <= self.sequence_index < len(self.frame_slots):
+                return self.frame_slots[self.sequence_index]
+            return self.frame_slots[0]
+        if self.compare_mode in (COMPARE_WIPE, COMPARE_DIFFERENCE):
+            return self.frame_slots[0]
+        return self.frame_slots[0]
+
     def _fit_scales(self):
         widget_w, widget_h = self.width(), self.height()
-        if widget_w <= 0 or widget_h <= 0 or self.width_a <= 0 or self.height_a <= 0:
+        if widget_w <= 0 or widget_h <= 0:
             return 1.0, 1.0
 
+        if self.compare_mode == COMPARE_TILE:
+            return 1.0, 1.0
+
+        primary = self._primary_slot()
+        if primary is None or primary.width <= 0 or primary.height <= 0:
+            return 1.0, 1.0
+
+        par = primary.pixel_aspect_ratio if primary.pixel_aspect_ratio > 0 else self.pixel_aspect_ratio
         aspect_widget = widget_w / widget_h
-        aspect_frame = (self.width_a * self.pixel_aspect_ratio) / self.height_a
+        aspect_frame = (primary.width * par) / primary.height
         scale_x = 1.0
         scale_y = 1.0
         if aspect_widget > aspect_frame:
@@ -193,11 +255,17 @@ class Viewport(QRhiWidget):
     def _actual_size_zoom(self):
         scale_x, _ = self._fit_scales()
         widget_w = self.width()
-        if widget_w <= 0 or scale_x <= 0.0 or self.width_a <= 0:
+        primary = self._primary_slot()
+        if widget_w <= 0 or scale_x <= 0.0 or primary is None or primary.width <= 0:
             return 1.0
-        return (self.width_a * self.pixel_aspect_ratio) / (widget_w * scale_x)
+        par = primary.pixel_aspect_ratio if primary.pixel_aspect_ratio > 0 else self.pixel_aspect_ratio
+        return (primary.width * par) / (widget_w * scale_x)
 
     def _apply_zoom_mode(self):
+        if self.compare_mode == COMPARE_TILE:
+            self.zoom = 1.0
+            self.zoom_mode_changed.emit(self.zoom_mode)
+            return
         if self.zoom_mode == "fit":
             self.zoom = 1.0
         elif isinstance(self.zoom_mode, int):
@@ -211,6 +279,8 @@ class Viewport(QRhiWidget):
         self.update()
 
     def set_zoom_percent(self, percent: int):
+        if self.compare_mode == COMPARE_TILE:
+            return
         self.zoom_mode = percent
         self.pan_offset = QPoint(0, 0)
         self._apply_zoom_mode()
@@ -267,11 +337,63 @@ class Viewport(QRhiWidget):
         if not self._ocio_pipeline_ready:
             QTimer.singleShot(0, self._schedule_ocio_pipeline_update)
 
+    def _build_render_slots(self) -> list[FrameRenderSlot]:
+        slots: list[FrameRenderSlot] = []
+        for frame_slot in self.frame_slots:
+            data = None
+            if frame_slot.data is not None:
+                data = (
+                    frame_slot.data
+                    if frame_slot.data.flags["C_CONTIGUOUS"]
+                    else np.ascontiguousarray(frame_slot.data)
+                )
+            slots.append(
+                FrameRenderSlot(
+                    data=data,
+                    width=frame_slot.width,
+                    height=frame_slot.height,
+                    channels=frame_slot.channels,
+                    upload_token=frame_slot.upload_token,
+                    upload_buffer=frame_slot.upload_buffer,
+                    frame_index=frame_slot.local_frame,
+                )
+            )
+        return slots
+
+    def _build_tile_draws(self) -> list[TileDrawParams]:
+        sizes = []
+        aspects = []
+        for slot in self.frame_slots:
+            if slot.data is None or slot.width <= 0 or slot.height <= 0:
+                sizes.append((0, 0))
+                aspects.append(1.0)
+            else:
+                sizes.append((slot.width, slot.height))
+                aspects.append(slot.pixel_aspect_ratio if slot.pixel_aspect_ratio > 0 else 1.0)
+
+        layouts = compute_tile_layouts(sizes, aspects, self.width(), self.height())
+        return [
+            TileDrawParams(
+                source_index=layout.source_index,
+                scale_x=layout.scale_x,
+                scale_y=layout.scale_y,
+                offset_x=layout.offset_x,
+                offset_y=layout.offset_y,
+            )
+            for layout in layouts
+        ]
+
+    def _has_visible_frame(self) -> bool:
+        if self.compare_mode == COMPARE_TILE:
+            return any(slot.data is not None for slot in self.frame_slots)
+        primary = self._primary_slot()
+        return primary is not None and primary.data is not None
+
     def render(self, cb):
         if self.rhi() is None:
             return
 
-        if self.frame_data_a is None:
+        if not self._has_visible_frame():
             batch = self.rhi().nextResourceUpdateBatch()
             cb.beginPass(
                 self.renderTarget(),
@@ -286,62 +408,46 @@ class Viewport(QRhiWidget):
         widget_w, widget_h = self.width(), self.height()
         pan_x = (self.pan_offset.x() / widget_w) * 2.0 if widget_w > 0 else 0.0
         pan_y = -(self.pan_offset.y() / widget_h) * 2.0 if widget_h > 0 else 0.0
+        zoom = 1.0 if self.compare_mode == COMPARE_TILE else self.zoom
 
-        data_a = (
-            self.frame_data_a
-            if self.frame_data_a.flags["C_CONTIGUOUS"]
-            else np.ascontiguousarray(self.frame_data_a)
-        )
-        data_b = None
-        if self.frame_data_b is not None:
-            data_b = (
-                self.frame_data_b
-                if self.frame_data_b.flags["C_CONTIGUOUS"]
-                else np.ascontiguousarray(self.frame_data_b)
-            )
+        tile_draws = self._build_tile_draws() if self.compare_mode == COMPARE_TILE else None
 
         self.native_renderer.render(
             cb,
             self.renderTarget(),
-            data_a,
-            self.width_a,
-            self.height_a,
-            self.channels_a,
-            self._upload_token_a,
-            data_b,
-            self.width_b,
-            self.height_b,
-            self.channels_b,
-            self._upload_token_b,
+            self._build_render_slots(),
             self.compare_mode,
+            self.sequence_index,
             self.wipe_pos,
             self.channel_mask,
-            scale_x * self.zoom,
-            scale_y * self.zoom,
+            scale_x * zoom,
+            scale_y * zoom,
             pan_x,
             pan_y,
-            upload_buffer_a=self._upload_buffer_a,
-            upload_buffer_b=self._upload_buffer_b,
-            frame_index_a=self.current_frame,
-            frame_index_b=self.current_frame,
+            tile_draws=tile_draws,
         )
+
+    def _wipe_label(self) -> str:
+        if len(self.source_labels) >= 2:
+            return f"{self.source_labels[0]} | {self.source_labels[1]}"
+        return "1 | 2"
 
     def _draw_hud(self, painter: QPainter):
         painter.setRenderHint(QPainter.Antialiasing)
         metrics_rect = self.rect()
 
-        if self.compare_mode == 1:
+        if self.compare_mode == COMPARE_WIPE:
             wipe_x = int(self.wipe_pos * metrics_rect.width())
             painter.setPen(QPen(QColor(255, 165, 0, 180), 2, Qt.DashLine))
             painter.drawLine(wipe_x, 0, wipe_x, metrics_rect.height())
             painter.setPen(QPen(QColor(255, 165, 0, 220), 1))
             font = mono_font(10, QFont.Weight.Bold)
             painter.setFont(font)
-            painter.drawText(wipe_x + 5, metrics_rect.height() // 2, "A | B")
+            painter.drawText(wipe_x + 5, metrics_rect.height() // 2, self._wipe_label())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.zoom_mode != "fit":
+        if self.zoom_mode != "fit" and self.compare_mode != COMPARE_TILE:
             self._apply_zoom_mode()
             self.update()
 
@@ -359,7 +465,7 @@ class Viewport(QRhiWidget):
             return
 
         if event.button() == Qt.LeftButton:
-            if self.compare_mode == 1:
+            if self.compare_mode == COMPARE_WIPE:
                 click_x_ratio = event.position().x() / self.width()
                 if abs(click_x_ratio - self.wipe_pos) < 0.02:
                     self.dragging_wipe = True
@@ -368,7 +474,10 @@ class Viewport(QRhiWidget):
             self.left_press_pos = event.position()
             self.left_drag_started = False
             self.scrub_start_x = event.position().x()
-            self.scrub_start_frame = self.current_frame
+            if self.main_window:
+                self.scrub_start_frame = self.main_window.current_frame
+            else:
+                self.scrub_start_frame = self.current_frame
         elif event.button() == Qt.MiddleButton:
             self.panning = True
             self.last_mouse_pos = event.position().toPoint()
@@ -412,17 +521,21 @@ class Viewport(QRhiWidget):
             ):
                 self.left_drag_started = True
                 self.scrubbing_frames = True
+                if self.main_window and self.main_window.playing:
+                    self.main_window.stop_playback()
                 self.setCursor(Qt.SizeHorCursor)
             if self.scrubbing_frames:
                 frame_offset = int((event.position().x() - self.scrub_start_x) / self.scrub_sensitivity)
                 target_frame = self.scrub_start_frame + frame_offset
                 self.frame_scrubbed.emit(target_frame)
         elif self.panning:
+            if self.compare_mode == COMPARE_TILE:
+                return
             delta = event.position().toPoint() - self.last_mouse_pos
             self.pan_offset += delta
             self.last_mouse_pos = event.position().toPoint()
             self.update()
-        elif self.compare_mode == 1:
+        elif self.compare_mode == COMPARE_WIPE:
             hover_x_ratio = event.position().x() / self.width()
             if abs(hover_x_ratio - self.wipe_pos) < 0.02:
                 self.setCursor(Qt.SizeHorCursor)
@@ -440,7 +553,13 @@ class Viewport(QRhiWidget):
             return
 
         if event.button() == Qt.LeftButton and self.left_press_pos is not None:
-            if not self.left_drag_started and not self.dragging_wipe and self.main_window:
+            if self.scrubbing_frames and self.main_window:
+                frame_offset = int(
+                    (event.position().x() - self.scrub_start_x) / self.scrub_sensitivity
+                )
+                target_frame = self.scrub_start_frame + frame_offset
+                self.frame_scrubbed.emit(target_frame)
+            elif not self.left_drag_started and not self.dragging_wipe and self.main_window:
                 self.main_window.toggle_playback()
 
         self.dragging_wipe = False
@@ -451,6 +570,8 @@ class Viewport(QRhiWidget):
         self.setCursor(Qt.ArrowCursor)
 
     def wheelEvent(self, event):
+        if self.compare_mode == COMPARE_TILE:
+            return
         zoom_factor = 1.1 if event.angleDelta().y() > 0 else 0.9
         self.zoom = max(0.1, min(20.0, self.zoom * zoom_factor))
         if self.zoom_mode is not None:
@@ -465,12 +586,9 @@ class Viewport(QRhiWidget):
         self._ocio_pipeline_ready = False
 
     def clear_frames(self):
-        self.frame_data_a = None
-        self.frame_data_b = None
-        self._upload_buffer_a = None
-        self._upload_buffer_b = None
-        self._upload_token_a = 0
-        self._upload_token_b = 0
+        self.frame_slots.clear()
+        self.source_labels.clear()
+        self.sequence_index = 0
         self.pixel_aspect_ratio = 1.0
         self.native_renderer.reset_frame_textures()
         self.update()

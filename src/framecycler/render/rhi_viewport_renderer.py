@@ -82,6 +82,26 @@ class _TextureUploadState:
 
 
 @dataclass
+class FrameRenderSlot:
+    data: np.ndarray | None = None
+    width: int = 0
+    height: int = 0
+    channels: int = 4
+    upload_token: int = 0
+    upload_buffer: QByteArray | None = None
+    frame_index: int = -1
+
+
+@dataclass
+class TileDrawParams:
+    source_index: int
+    scale_x: float
+    scale_y: float
+    offset_x: float
+    offset_y: float
+
+
+@dataclass
 class _OcioLut3D:
     texture: QRhiTexture | None = None
     size: int = 0
@@ -172,6 +192,7 @@ class RhiViewportRenderer:
 
         self._tex_a_state = _TextureUploadState()
         self._tex_b_state = _TextureUploadState()
+        self._texture_states: list[_TextureUploadState] = []
         self._ocio_luts_3d: list[_OcioLut3D] = []
 
         self._vertex_shader: QShader | None = None
@@ -311,36 +332,51 @@ class RhiViewportRenderer:
     def reset_frame_textures(self) -> None:
         self._release_texture_state(self._tex_a_state)
         self._release_texture_state(self._tex_b_state)
+        for state in self._texture_states:
+            self._release_texture_state(state)
+        self._texture_states.clear()
         self._invalidate_pipeline()
+
+    def ensure_texture_pool(self, count: int) -> None:
+        while len(self._texture_states) < count:
+            self._texture_states.append(_TextureUploadState())
+        while len(self._texture_states) > count:
+            state = self._texture_states.pop()
+            self._release_texture_state(state)
 
     def render(
         self,
         cb: QRhiCommandBuffer,
         render_target: QRhiRenderTarget,
-        data_a: np.ndarray,
-        width_a: int,
-        height_a: int,
-        channels_a: int,
-        upload_token_a: int,
-        data_b: np.ndarray | None,
-        width_b: int,
-        height_b: int,
-        channels_b: int,
-        upload_token_b: int,
+        sources: list[FrameRenderSlot],
         compare_mode: int,
+        sequence_index: int,
         wipe_pos: float,
         channel_mask: int,
         scale_x: float,
         scale_y: float,
         pan_x: float,
         pan_y: float,
-        upload_buffer_a: QByteArray | None = None,
-        upload_buffer_b: QByteArray | None = None,
-        frame_index_a: int = -1,
-        frame_index_b: int = -1,
+        tile_draws: list[TileDrawParams] | None = None,
     ) -> None:
-        if not self._initialized or self._rhi is None or cb is None or render_target is None or data_a is None:
+        if not self._initialized or self._rhi is None or cb is None or render_target is None:
             return
+
+        if compare_mode == 3:
+            self._render_tile_mode(
+                cb,
+                render_target,
+                sources,
+                channel_mask,
+                tile_draws or [],
+            )
+            return
+
+        primary = self._select_primary_slot(sources, compare_mode, sequence_index)
+        if primary is None or primary.data is None:
+            return
+
+        secondary = sources[1] if len(sources) > 1 and compare_mode in (1, 2) else None
 
         self._ensure_static_resources_created()
         if not self._vertex_shader or not self._fragment_shader:
@@ -355,26 +391,26 @@ class RhiViewportRenderer:
         self._upload_static_resources(batch)
         self._upload_texture(
             self._tex_a_state,
-            width_a,
-            height_a,
-            channels_a,
-            data_a,
-            upload_token_a,
+            primary.width,
+            primary.height,
+            primary.channels,
+            primary.data,
+            primary.upload_token,
             batch,
-            pre_baked_buffer=upload_buffer_a,
-            frame_index=frame_index_a,
+            pre_baked_buffer=primary.upload_buffer,
+            frame_index=primary.frame_index,
         )
-        if data_b is not None:
+        if secondary is not None and secondary.data is not None:
             self._upload_texture(
                 self._tex_b_state,
-                width_b,
-                height_b,
-                channels_b,
-                data_b,
-                upload_token_b,
+                secondary.width,
+                secondary.height,
+                secondary.channels,
+                secondary.data,
+                secondary.upload_token,
                 batch,
-                pre_baked_buffer=upload_buffer_b,
-                frame_index=frame_index_b,
+                pre_baked_buffer=secondary.upload_buffer,
+                frame_index=secondary.frame_index,
             )
 
         for lut in self._ocio_luts_3d:
@@ -421,6 +457,108 @@ class RhiViewportRenderer:
         cb.draw(4)
         cb.endPass()
 
+    def _select_primary_slot(
+        self,
+        sources: list[FrameRenderSlot],
+        compare_mode: int,
+        sequence_index: int,
+    ) -> FrameRenderSlot | None:
+        if not sources:
+            return None
+        if compare_mode == 0:
+            if 0 <= sequence_index < len(sources):
+                return sources[sequence_index]
+            return sources[0]
+        return sources[0]
+
+    def _render_tile_mode(
+        self,
+        cb: QRhiCommandBuffer,
+        render_target: QRhiRenderTarget,
+        sources: list[FrameRenderSlot],
+        channel_mask: int,
+        tile_draws: list[TileDrawParams],
+    ) -> None:
+        if not tile_draws:
+            return
+
+        self._ensure_static_resources_created()
+        if not self._vertex_shader or not self._fragment_shader:
+            return
+
+        self.ensure_texture_pool(len(sources))
+        batch = self._rhi.nextResourceUpdateBatch()
+        self._upload_static_resources(batch)
+
+        for index, slot in enumerate(sources):
+            if slot.data is None or index >= len(self._texture_states):
+                continue
+            self._upload_texture(
+                self._texture_states[index],
+                slot.width,
+                slot.height,
+                slot.channels,
+                slot.data,
+                slot.upload_token,
+                batch,
+                pre_baked_buffer=slot.upload_buffer,
+                frame_index=slot.frame_index,
+            )
+
+        for lut in self._ocio_luts_3d:
+            if lut.dirty and lut.texture is not None and lut.rgba_data is not None:
+                _upload_texture_3d(batch, lut.texture, lut.rgba_data)
+                lut.dirty = False
+
+        cb.beginPass(render_target, QColor(0, 0, 0), DEFAULT_DEPTH_STENCIL_CLEAR, batch)
+        output_size = render_target.pixelSize()
+
+        for tile in tile_draws:
+            if tile.source_index < 0 or tile.source_index >= len(self._texture_states):
+                continue
+            tex_state = self._texture_states[tile.source_index]
+            if tex_state.texture is None:
+                continue
+
+            self._tex_a_state.texture = tex_state.texture
+            self._tex_a_state.last_upload_token = tex_state.last_upload_token
+            self._tex_a_state.last_w = tex_state.last_w
+            self._tex_a_state.last_h = tex_state.last_h
+            self._tex_a_state.last_channels = tex_state.last_channels
+            self._ensure_pipeline(render_target, force_rebuild=True)
+            if not self._pipeline:
+                continue
+
+            per_frame = struct.pack(
+                "<ffffifii",
+                tile.scale_x,
+                tile.scale_y,
+                tile.offset_x,
+                tile.offset_y,
+                0,
+                0.5,
+                channel_mask,
+                0,
+            )
+            batch = self._rhi.nextResourceUpdateBatch()
+            batch.updateDynamicBuffer(self._per_frame_ubo, 0, PER_FRAME_UBO_SIZE, per_frame)
+            if self._ocio_ubo is not None and self._ocio_ubo_size > 0:
+                batch.updateDynamicBuffer(
+                    self._ocio_ubo,
+                    0,
+                    self._ocio_ubo_size,
+                    self._fill_ocio_ubo(),
+                )
+
+            cb.setGraphicsPipeline(self._pipeline)
+            cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))
+            cb.setShaderResources()
+            cb.setVertexInput(0, [(self._vertex_buffer, 0)])
+            cb.resourceUpdate(batch)
+            cb.draw(4)
+
+        cb.endPass()
+
     def _invalidate_pipeline(self) -> None:
         _destroy_resource(self._pipeline)
         _destroy_resource(self._srb)
@@ -449,6 +587,9 @@ class RhiViewportRenderer:
     def _release_gpu_resources(self) -> None:
         self._release_texture_state(self._tex_a_state)
         self._release_texture_state(self._tex_b_state)
+        for state in self._texture_states:
+            self._release_texture_state(state)
+        self._texture_states.clear()
         self._clear_ocio_luts_internal()
         self._invalidate_pipeline()
         _destroy_resource(self._sampler)
@@ -576,7 +717,7 @@ class RhiViewportRenderer:
             struct.pack_into("<fff", buf, member.offset, value[0], value[1], value[2])
         return bytes(buf)
 
-    def _ensure_pipeline(self, render_target: QRhiRenderTarget) -> None:
+    def _ensure_pipeline(self, render_target: QRhiRenderTarget, *, force_rebuild: bool = False) -> None:
         if (
             self._rhi is None
             or render_target is None
@@ -587,6 +728,8 @@ class RhiViewportRenderer:
 
         render_pass = render_target.renderPassDescriptor()
         if self._pipeline and self._cached_render_pass_desc is not render_pass:
+            self._invalidate_pipeline()
+        if force_rebuild:
             self._invalidate_pipeline()
         if self._pipeline or self._tex_a_state.texture is None:
             return

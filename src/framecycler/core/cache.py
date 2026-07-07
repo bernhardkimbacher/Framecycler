@@ -19,9 +19,10 @@ except ImportError:
 
 
 class CacheEngine:
-    def __init__(self, decoder: BaseDecoder, settings: Settings):
+    def __init__(self, decoder: BaseDecoder, settings: Settings, resolution_scale: float = 1.0):
         self.decoder = decoder
         self.settings = settings
+        self.resolution_scale = Settings.clamp_resolution_scale(resolution_scale)
 
         # Instantiate compiled C++ CacheManager (stores half-float pixels in pre-allocated RAM)
         self.native_cache = framecycler_engine.CacheManager(self.settings.ram_cache_limit_gb)
@@ -168,6 +169,9 @@ class CacheEngine:
         del self._upload_buffers[furthest_frame]
         return True
 
+    def set_resolution_scale(self, scale: float) -> None:
+        self.resolution_scale = Settings.clamp_resolution_scale(scale)
+
     def update_settings(self):
         with self.lock:
             self.native_cache.set_ram_limit(self.settings.ram_cache_limit_gb)
@@ -255,7 +259,7 @@ class CacheEngine:
                 return
 
             frame_data = self.decoder.read_frame(
-                frame_index, resolution_scale=self.settings.resolution_scale
+                frame_index, resolution_scale=self.resolution_scale
             )
             img, channels = self._prepare_cache_image(frame_data["data"])
 
