@@ -47,12 +47,11 @@ jobs:
       - name: Run unit tests
         shell: bash
         run: |
-          mapfile -t modules < <(find tests -maxdepth 1 -name 'test_*.py' \
+          test_modules=()
+          while IFS= read -r module; do
+            test_modules+=("tests.${module}")
+          done < <(find tests -maxdepth 1 -name 'test_*.py' \
             ! -name 'test_image_io.py' \
             ! -name 'test_decoders_oiio.py' \
             -exec basename {} .py \; | sort)
-          test_modules=()
-          for module in "${modules[@]}"; do
-            test_modules+=("tests.${module}")
-          done
           ${{ matrix.python }} -m unittest -v "${test_modules[@]}"
