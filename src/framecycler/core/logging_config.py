@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 from datetime import datetime
+from typing import IO, TextIO
 
 from .version import get_application_version
 
@@ -20,6 +21,33 @@ def get_log_file_path():
         return os.path.join(cache_dir, app_name.lower(), "log", "framecycler.log")
 
 from PySide6.QtCore import qInstallMessageHandler, QtMsgType
+
+def _usable_text_stream(stream: IO[str] | TextIO | None) -> IO[str] | TextIO | None:
+    """Return stream only if it can accept writes (PyInstaller windowed apps often have None)."""
+    if stream is None:
+        return None
+    write = getattr(stream, "write", None)
+    if not callable(write):
+        return None
+    return stream
+
+
+def _safe_print(message: str) -> None:
+    for stream in (sys.__stdout__, sys.stdout):
+        usable = _usable_text_stream(stream)
+        if usable is None:
+            continue
+        try:
+            usable.write(message)
+            if not message.endswith("\n"):
+                usable.write("\n")
+            flush = getattr(usable, "flush", None)
+            if callable(flush):
+                flush()
+            return
+        except OSError:
+            continue
+
 
 class StreamToLogger:
     def __init__(self, logger, log_level):
@@ -69,7 +97,7 @@ def _write_session_separator(log_file: str) -> None:
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(block)
     except OSError as e:
-        print(f"Failed to write session separator to '{log_file}': {e}")
+        _safe_print(f"Failed to write session separator to '{log_file}': {e}")
 
 def setup_logging():
     log_file = get_log_file_path()
@@ -77,12 +105,13 @@ def setup_logging():
     try:
         os.makedirs(log_dir, exist_ok=True)
     except Exception as e:
-        print(f"Failed to create log directory '{log_dir}': {e}")
+        _safe_print(f"Failed to create log directory '{log_dir}': {e}")
         # Fall back to user home directory
         log_file = os.path.expanduser("~/framecycler.log")
 
     # Configure root logger
     logger = logging.getLogger()
+    logger.handlers.clear()
     logger.setLevel(logging.INFO)
 
     # Formatter
@@ -91,24 +120,28 @@ def setup_logging():
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # Save original streams before redirecting to prevent infinite logging loops
-    original_stdout = sys.__stdout__
-    original_stderr = sys.__stderr__
-
-    # Console Handler (use original stdout to prevent recursion loops)
-    console_handler = logging.StreamHandler(original_stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-    # File Handler
+    # File Handler (always preferred for packaged GUI builds)
+    file_handler = None
     try:
         _write_session_separator(log_file)
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-        logging.info(f"Logging initialized. Writing to: {log_file}")
     except Exception as e:
-        print(f"Failed to initialize file logging to '{log_file}': {e}")
+        _safe_print(f"Failed to initialize file logging to '{log_file}': {e}")
+
+    # Console Handler — skip when stdout is unavailable (Windows windowed / PyInstaller).
+    # Use __stdout__ only; sys.stdout may already be redirected to logging.
+    console_stream = _usable_text_stream(sys.__stdout__)
+    if console_stream is not None:
+        console_handler = logging.StreamHandler(console_stream)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+
+    if file_handler is not None:
+        logging.info(f"Logging initialized. Writing to: {log_file}")
+    elif not logger.handlers:
+        logger.addHandler(logging.NullHandler())
 
     # Set up global exception hook
     sys.excepthook = log_uncaught_exception

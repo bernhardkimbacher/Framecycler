@@ -269,24 +269,60 @@ Shader baking at runtime uses `pyside6-qsb` (bundled with PySide6). Pinned depen
 
 ## 8. Keyboard Hotkeys Reference
 
+On macOS, shortcuts written as **Ctrl** use the **Command (⌘)** key (Qt cross-platform convention).
+
+### Playback & timeline
+
 | Key | Action |
 | :--- | :--- |
-| `Space` | Play / Pause |
+| `Space` | Play / pause |
 | `Left` / `Right` | Step backward / forward by 1 frame |
-| `Cmd + Left/Right` (macOS) / `Ctrl + Left/Right` (Win/Linux) | Jump to previous / next clip; sets in/out to that clip and seeks to its first frame |
-| `Shift + Left/Right` | Step backward / forward by 10 frames |
-| `Shift + X` | Clear all loaded media sources |
-| `[` | Set Playback Range **In** Point |
-| `]` | Set Playback Range **Out** Point |
-| `Ctrl + H` | Toggle camera HUD viewfinder overlay |
-| `F` | Reset Viewport Zoom & Pan |
-| `E` | Enter interactive **Exposure** adjustment mode |
-| `Y` | Enter interactive **Gamma** adjustment mode |
-| `O` | Enter interactive **Offset** adjustment mode |
-| `Home` | Reset color grading to defaults |
-| `R` | Toggle **Red** channel isolation |
-| `G` | Toggle **Green** channel isolation |
-| `B` | Toggle **Blue** channel isolation |
-| `A` | Toggle **Alpha** channel isolation |
+| `Shift + Left` / `Shift + Right` | Step backward / forward by 10 frames |
+| `Ctrl + Left` / `Ctrl + Right` | Jump to previous / next clip; sets in/out to that clip and seeks to its first frame |
+| `[` | Set playback range **in** point |
+| `]` | Set playback range **out** point |
+| `T` | Toggle frame number / timecode readout |
 
-The **TC / FR** readout toggle is available from the transport bar button; it is not bound to a keyboard shortcut.
+### File
+
+| Key | Action |
+| :--- | :--- |
+| `Shift + X` | Clear all loaded media sources |
+
+### View
+
+| Key | Action |
+| :--- | :--- |
+| `Ctrl + H` | Toggle HUD overlay |
+| `F` | Fit viewport to screen |
+| `1` | Zoom to actual size (100%) |
+| `2` | Zoom to 200% |
+| `3` | Zoom to 300% |
+| `4` | Zoom to 400% |
+
+### Grading (Tools menu)
+
+| Key | Action |
+| :--- | :--- |
+| `E` | Enter interactive **exposure** adjustment mode (drag horizontally in viewport) |
+| `Y` | Enter interactive **gamma** adjustment mode |
+| `O` | Enter interactive **offset** adjustment mode |
+| `Home` | Reset color grading to defaults |
+
+### Channel isolation
+
+| Key | Action |
+| :--- | :--- |
+| `R` | Toggle **red** channel isolation (press again for RGB) |
+| `G` | Toggle **green** channel isolation |
+| `B` | Toggle **blue** channel isolation |
+| `A` | Toggle **alpha** channel isolation |
+
+### Viewport mouse (no key binding)
+
+| Action | Behavior |
+| :--- | :--- |
+| Click | Toggle play / pause |
+| Horizontal drag | Scrub frames (stops playback; playhead stays on release frame) |
+
+Compare modes (**Sequence**, **Wipe**, **Difference**, **Tile**) and panel visibility (**View → Panels → Media Sources**) are menu-only. Pixel aspect ratio and resolution scale are per-source and adjusted from the **Image** menu.
