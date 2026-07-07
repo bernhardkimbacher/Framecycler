@@ -94,7 +94,7 @@ def build_extension():
             "-S", current_dir,
             "-B", build_dir,
             f"-DPython_EXECUTABLE={python_exe}",
-            "-DCMAKE_BUILD_TYPE=Release"
+            "-DCMAKE_BUILD_TYPE=Release",
         ]
         subprocess.run(configure_cmd, check=True)
         

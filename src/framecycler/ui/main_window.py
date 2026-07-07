@@ -17,7 +17,7 @@ from ..decoders.image_io import ANAMORPHIC_PIXEL_ASPECT, SQUARE_PIXEL_ASPECT
 from ..extensions.ocio_api_tool import OcioApiTool
 
 
-from .viewport import Viewport
+from .viewport import ViewportContainer
 from .timeline import Timeline
 from .theme import get_viewfinder_stylesheet
 from .settings_dialog import SettingsDialog
@@ -100,8 +100,9 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
     def _init_ui(self):
-        # Create Central Viewport
-        self.viewport = Viewport(self.ocio_manager, self)
+        # Create Central Viewport (QRhi surface + HUD overlay as siblings)
+        self.viewport_panel = ViewportContainer(self.ocio_manager, self)
+        self.viewport = self.viewport_panel.viewport
         self.viewport.wipe_changed.connect(self._on_wipe_moved)
         self.viewport.frame_scrubbed.connect(self.seek_to_frame)
         self.viewport.zoom_mode_changed.connect(self._sync_zoom_actions)
@@ -166,7 +167,7 @@ class MainWindow(QMainWindow):
             self.channel_buttons[val] = btn
             
         main_layout.addLayout(header_layout)
-        main_layout.addWidget(self.viewport, stretch=1)
+        main_layout.addWidget(self.viewport_panel, stretch=1)
         
         # Readout row just above the timeline
         readout_widget = QWidget()

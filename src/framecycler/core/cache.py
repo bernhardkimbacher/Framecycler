@@ -56,6 +56,19 @@ class CacheEngine:
             return img
         return np.ascontiguousarray(img.astype(np.float16))
 
+    @staticmethod
+    def _prepare_cache_image(img: np.ndarray) -> tuple[np.ndarray, int]:
+        """Normalize dtype/shape for CacheManager. RGB is expanded to RGBA on decode threads."""
+        img = CacheEngine._to_cache_dtype(img)
+        if img.ndim == 2:
+            img = img[:, :, np.newaxis]
+        channels = int(img.shape[2])
+        if channels == 3:
+            alpha = np.ones((img.shape[0], img.shape[1], 1), dtype=np.float16)
+            img = np.ascontiguousarray(np.concatenate([img, alpha], axis=2))
+            channels = 4
+        return img, channels
+
     def set_playback_range(self, start: int, end: int):
         with self.lock:
             self.playback_range = (start, end)
@@ -78,10 +91,11 @@ class CacheEngine:
         if self.native_cache.has_frame(frame_index):
             data_view = self.native_cache.get_frame_data(frame_index)
             if data_view is not None:
+                cache_channels = data_view.shape[2] if data_view.ndim > 2 else 1
                 meta = self.decoder.get_metadata()
                 return {
                     "data": data_view,
-                    "channels": meta["channels"],
+                    "channels": cache_channels,
                     "frame_index": frame_index,
                     "timecode": Timecode.frame_to_timecode(frame_index, meta["fps"], 0),
                 }
@@ -181,11 +195,9 @@ class CacheEngine:
             frame_data = self.decoder.read_frame(
                 frame_index, resolution_scale=self.settings.resolution_scale
             )
-            img = self._to_cache_dtype(frame_data["data"])
-            h, w = img.shape[:2]
-            channels = img.shape[2] if len(img.shape) > 2 else 1
+            img, channels = self._prepare_cache_image(frame_data["data"])
 
-            self.native_cache.write_frame(frame_index, w, h, channels, img)
+            self.native_cache.write_frame(frame_index, img.shape[1], img.shape[0], channels, img)
 
             with self.lock:
                 self.active_requests.discard(frame_index)

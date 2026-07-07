@@ -163,5 +163,27 @@ class TestOCIOManager(unittest.TestCase):
         self.ocio_mgr.grade_offset = -0.05
 
         shader_text, lut_3d, lut_1d = self.ocio_mgr.get_gpu_shader_glsl()
-        # The compiled shader should contain CDL processing, e.g. slope, power, offset
-        self.assertTrue(any(x in shader_text.lower() for x in ["slope", "power", "offset", "cdl"]))
+        self.assertIn("ocio_exposure_contrast_exposureVal", shader_text)
+        self.assertIn("ocio_grading_primary_brightness", shader_text)
+
+    def test_dynamic_grading_does_not_change_shader_text(self):
+        text_a, _, _ = self.ocio_mgr.get_gpu_shader_glsl()
+        self.ocio_mgr.set_grading_values(exposure=2.0, gamma=0.7, offset=0.2)
+        text_b, _, _ = self.ocio_mgr.get_gpu_shader_glsl()
+        self.assertEqual(text_a, text_b)
+
+    def test_grading_uniform_values(self):
+        self.ocio_mgr.set_grading_values(exposure=1.0, gamma=1.5, offset=-0.1)
+        values = self.ocio_mgr.get_grading_uniform_values()
+        self.assertEqual(values["ocio_exposure_contrast_exposureVal"], 1.0)
+        self.assertEqual(values["ocio_exposure_contrast_gammaVal"], 1.5)
+        self.assertEqual(values["ocio_grading_primary_brightness"], (-0.1, -0.1, -0.1))
+        self.assertEqual(values["ocio_grading_primary_contrast"], (1.0, 1.0, 1.0))
+        self.assertEqual(values["ocio_grading_primary_gamma"], (1.0, 1.0, 1.0))
+        self.assertEqual(values["ocio_grading_primary_saturation"], 1.0)
+        self.assertEqual(values["ocio_grading_primary_localBypass"], 0.0)
+
+    def test_rhi_shader_bundle(self):
+        bundle = self.ocio_mgr.get_rhi_shader_bundle()
+        self.assertIn("layout(binding = 1) uniform sampler2D texA", bundle.fragment_source)
+        self.assertIn("ocio_color_transform", bundle.fragment_source)

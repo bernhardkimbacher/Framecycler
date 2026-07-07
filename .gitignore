@@ -13,6 +13,7 @@ assets/icons/app_icon.iconset/
 build/
 bin/
 lib/
+.qt/
 CMakeCache.txt
 CMakeFiles/
 Makefile
@@ -24,6 +25,7 @@ cmake_install.cmake
 
 # Testing
 tests_config_temp/
+.temp
 
 # macOS system files
 .DS_Store
@@ -33,3 +35,5 @@ tests_config_temp/
 *.so
 *.dylib
 *.dll
+aqtinstall.log
+

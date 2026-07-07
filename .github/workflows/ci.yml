@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            python: python3
+          - os: macos-latest
+            python: python3
+          - os: windows-latest
+            python: python
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0
+
+      - name: Install Python dependencies
+        run: |
+          ${{ matrix.python }} -m pip install --upgrade pip
+          ${{ matrix.python }} -m pip install -r requirements.txt
+
+      - name: Compile native C++ core
+        run: ${{ matrix.python }} build.py
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          mapfile -t modules < <(find tests -maxdepth 1 -name 'test_*.py' \
+            ! -name 'test_image_io.py' \
+            ! -name 'test_decoders_oiio.py' \
+            -exec basename {} .py \; | sort)
+          test_modules=()
+          for module in "${modules[@]}"; do
+            test_modules+=("tests.${module}")
+          done
+          ${{ matrix.python }} -m unittest -v "${test_modules[@]}"

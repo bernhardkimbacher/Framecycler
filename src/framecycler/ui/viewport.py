@@ -1,82 +1,133 @@
 import numpy as np
-from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtCore import Qt, QPoint, QRectF, Signal
-from PySide6.QtGui import QPainter, QColor, QFont, QPen
+from PySide6.QtWidgets import QRhiWidget, QWidget
+from PySide6.QtCore import Qt, QPoint, Signal, QTimer
+from PySide6.QtGui import QPainter, QColor, QFont, QPen, QRhiDepthStencilClearValue
 from ..color.ocio_manager import OCIOManager
+from ..render.rhi_viewport_renderer import RhiViewportRenderer
 from .fonts import mono_font, ui_font
 
-# Import C++ Engine binary extension
-try:
-    from .. import framecycler_engine
-except ImportError:
-    import framecycler_engine
 
-class Viewport(QOpenGLWidget):
+class ViewportHudOverlay(QWidget):
+    """Transparent overlay sibling for HUD compositing.
+
+    Must not be a child of QRhiWidget — that combination segfaults on macOS when
+    the RHI backing texture is composited. Parent should be ViewportContainer.
+    """
+
+    def __init__(self, viewport: "Viewport", parent: QWidget):
+        super().__init__(parent)
+        self._viewport = viewport
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+    def paintEvent(self, event):
+        viewport = self._viewport
+        if not viewport.hud_visible and not viewport.adjustment_mode:
+            return
+
+        painter = QPainter(self)
+        if viewport.hud_visible:
+            viewport._draw_hud(painter)
+        if viewport.adjustment_mode:
+            viewport._draw_adjustment_overlay(painter)
+        painter.end()
+
+
+class ViewportContainer(QWidget):
+    """Hosts the QRhi viewport and a transparent HUD overlay as siblings."""
+
+    def __init__(self, ocio_manager: OCIOManager, main_window=None, parent=None):
+        super().__init__(parent)
+        self.viewport = Viewport(ocio_manager, main_window)
+        self.viewport.setParent(self)
+        self._hud_overlay = ViewportHudOverlay(self.viewport, self)
+        self._hud_overlay.raise_()
+        self._sync_geometry()
+
+        viewport_update = self.viewport.update
+
+        def update_viewport(*args, **kwargs):
+            viewport_update(*args, **kwargs)
+            self._hud_overlay.update()
+
+        self.viewport.update = update_viewport
+
+    def _sync_geometry(self):
+        rect = self.rect()
+        self.viewport.setGeometry(rect)
+        self._hud_overlay.setGeometry(rect)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_geometry()
+
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self._hud_overlay.update()
+
+
+class Viewport(QRhiWidget):
     wipe_changed = Signal(float)
     frame_scrubbed = Signal(int)
     zoom_mode_changed = Signal(object)
-    
+
     def __init__(self, ocio_manager: OCIOManager, parent=None):
         super().__init__(parent)
         self.ocio_manager = ocio_manager
         self.main_window = parent
-        
-        # Instantiate C++ GPU Renderer
-        self.native_renderer = framecycler_engine.GLRenderer()
-        
-        # Keep references to active frame data to prevent Python GC sweeps
+
+        self.native_renderer = RhiViewportRenderer()
+
         self.frame_data_a = None
         self.frame_data_b = None
-        self.width_a, self.height_a, self.channels_a = 0, 0, 3
-        self.width_b, self.height_b, self.channels_b = 0, 0, 3
+        self.width_a, self.height_a, self.channels_a = 0, 0, 4
+        self.width_b, self.height_b, self.channels_b = 0, 0, 4
         self._upload_token_a = 0
         self._upload_token_b = 0
         self.pixel_aspect_ratio = 1.0
-        
-        # Viewport layout and sliders
-        self.compare_mode = 0      # 0 = normal (A only), 1 = split-screen, 2 = difference, 3 = tiling
-        self.channel_mask = 0      # 0 = RGBA, 1 = R, 2 = G, 3 = B, 4 = A, 5 = Lum
+
+        self.compare_mode = 0
+        self.channel_mask = 0
         self.wipe_pos = 0.5
-        
-        # Mouse zoom and drag
+
         self.zoom = 1.0
         self.zoom_mode = "fit"
         self.pan_offset = QPoint(0, 0)
         self.last_mouse_pos = QPoint(0, 0)
-        
-        # State tracking flags
+
         self.panning = False
         self.dragging_wipe = False
         self.scrubbing_frames = False
-        
-        # Interactive grading parameters
+
         self.adjustment_mode = None
         self.adjust_start_x = 0
         self.adjust_start_value = 0.0
         self.scrub_start_x = 0
         self.scrub_start_frame = 0
-        self.scrub_sensitivity = 8.0  # Pixels per frame scroll
+        self.scrub_sensitivity = 8.0
         self.left_press_pos = None
         self.left_drag_started = False
         self.click_threshold = 5
         self.setMouseTracking(True)
-        
-        # Viewfinder HUD info overlays
+
         self.hud_visible = True
         self.current_frame = 0
         self.current_timecode = "01:00:00:00"
         self.fps = 24.0
         self.resolution_str = "0x0"
         self.exr_layer_str = "RGB"
-        
 
+        self._renderer_initialized = False
+        self._last_rhi = None
+        self._ocio_pipeline_ready = False
 
     def set_frame_a(self, data: np.ndarray, channels: list, index: int, timecode: str, fps: float):
         self.frame_data_a = data
         self._upload_token_a += 1
         self.height_a, self.width_a = data.shape[:2]
         self.channels_a = data.shape[2] if len(data.shape) > 2 else 1
-        
+
         self.current_frame = index
         self.current_timecode = timecode
         self.fps = fps
@@ -156,93 +207,109 @@ class Viewport(QOpenGLWidget):
     def reset_view(self):
         self.fit_to_screen()
 
+    def _sync_grading_uniforms(self):
+        self.native_renderer.clear_grading_uniforms()
+        for name, value in self.ocio_manager.get_grading_uniform_values().items():
+            if isinstance(value, tuple):
+                self.native_renderer.set_grading_uniform_vec3(name, value[0], value[1], value[2])
+            else:
+                self.native_renderer.set_grading_uniform(name, float(value))
+
     def update_ocio_pipeline(self):
-        """
-        Compile new OCIO transformations and upload 3D LUT datasets to C++ Core.
-        """
-        self.makeCurrent()
-        # Compile GLSL block from OCIO
-        ocio_shader_code, lut3ds, lut1ds = self.ocio_manager.get_gpu_shader_glsl()
-        
-        # Load shader string into compiled C++ GLRenderer shader program
-        self.native_renderer.set_ocio_shader(ocio_shader_code)
-        
-        # Upload 3D lookup tables directly into compiled texture buffer units in C++
-        for i, lut in enumerate(lut3ds):
+        bundle = self.ocio_manager.get_rhi_shader_bundle()
+        self.native_renderer.clear_ocio_luts()
+        self.native_renderer.set_shader_sources(
+            bundle.pipeline_key,
+            bundle.vertex_source,
+            bundle.fragment_source,
+        )
+        for index, lut in enumerate(bundle.textures_3d):
             lut_data = np.array(lut["data"], dtype=np.float32)
-            self.native_renderer.upload_ocio_lut_3d(i, lut["size"], lut_data)
-            
-        self.doneCurrent()
+            self.native_renderer.upload_ocio_lut_3d(index, lut["size"], lut_data)
+        self._sync_grading_uniforms()
+        self._ocio_pipeline_ready = True
         self.update()
 
-    def initializeGL(self):
-        # Delegate VAO/VBO creation and Extension Loading to C++
-        self.native_renderer.initialize()
-        
-        # Compile default viewport pipelines
+    def _schedule_ocio_pipeline_update(self):
+        if self.rhi() is None:
+            return
         self.update_ocio_pipeline()
 
-    def paintGL(self):
-        if self.frame_data_a is None:
+    def initialize(self, cb):
+        if self.rhi() is None:
             return
-            
-        # Aspect scaling calculations
-        # Note: self.width()/height() return logical pixels; Qt's QOpenGLWidget already
-        # sets glViewport to physical (device-pixel) dimensions before calling paintGL.
-        # We use logical dimensions here for aspect ratio, which only uses ratios so
-        # the result is identical whether logical or physical values are used.
+
+        rhi = self.rhi()
+        rhi_changed = self._last_rhi is not rhi
+        self._last_rhi = rhi
+
+        self.native_renderer.initialize(rhi)
+        self._renderer_initialized = True
+
+        if rhi_changed:
+            self._ocio_pipeline_ready = False
+        if not self._ocio_pipeline_ready:
+            QTimer.singleShot(0, self._schedule_ocio_pipeline_update)
+
+    def render(self, cb):
+        if self.rhi() is None:
+            return
+
+        if self.frame_data_a is None:
+            batch = self.rhi().nextResourceUpdateBatch()
+            cb.beginPass(
+                self.renderTarget(),
+                QColor(0, 0, 0),
+                QRhiDepthStencilClearValue(1.0, 0),
+                batch,
+            )
+            cb.endPass()
+            return
+
+        scale_x, scale_y = self._fit_scales()
         widget_w, widget_h = self.width(), self.height()
-        aspect_widget = widget_w / widget_h
-        aspect_frame = (self.width_a * self.pixel_aspect_ratio) / self.height_a
-        
-        scale_x = 1.0
-        scale_y = 1.0
-        
-        if aspect_widget > aspect_frame:
-            scale_x = aspect_frame / aspect_widget
-        else:
-            scale_y = aspect_widget / aspect_frame
-            
-        # Translate pans to normalized clip coords (-1.0 to 1.0)
-        pan_x = (self.pan_offset.x() / widget_w) * 2.0
-        pan_y = -(self.pan_offset.y() / widget_h) * 2.0
-        
-        # Ensure arrays are C-contiguous for OpenGL upload — only copy when needed.
-        data_a = self.frame_data_a if self.frame_data_a.flags["C_CONTIGUOUS"] else np.ascontiguousarray(self.frame_data_a)
+        pan_x = (self.pan_offset.x() / widget_w) * 2.0 if widget_w > 0 else 0.0
+        pan_y = -(self.pan_offset.y() / widget_h) * 2.0 if widget_h > 0 else 0.0
+
+        data_a = (
+            self.frame_data_a
+            if self.frame_data_a.flags["C_CONTIGUOUS"]
+            else np.ascontiguousarray(self.frame_data_a)
+        )
         data_b = None
         if self.frame_data_b is not None:
-            data_b = self.frame_data_b if self.frame_data_b.flags["C_CONTIGUOUS"] else np.ascontiguousarray(self.frame_data_b)
+            data_b = (
+                self.frame_data_b
+                if self.frame_data_b.flags["C_CONTIGUOUS"]
+                else np.ascontiguousarray(self.frame_data_b)
+            )
 
-        # Qt requires that QPainter be started BEFORE any native OpenGL calls inside
-        # paintGL, and that raw GL calls be wrapped in beginNativePainting() /
-        # endNativePainting(). Doing raw OpenGL then QPainter causes undefined compositing
-        # behavior on macOS (image offset to one quadrant with pixel streaks).
-        painter = QPainter(self)
-        painter.beginNativePainting()
-
-        # Run C++ compiled hardware rendering pass
         self.native_renderer.render(
-            data_a, self.width_a, self.height_a, self.channels_a, self._upload_token_a,
-            data_b, self.width_b, self.height_b, self.channels_b, self._upload_token_b,
-            self.compare_mode, self.wipe_pos, self.channel_mask,
-            scale_x * self.zoom, scale_y * self.zoom, pan_x, pan_y
+            cb,
+            self.renderTarget(),
+            data_a,
+            self.width_a,
+            self.height_a,
+            self.channels_a,
+            self._upload_token_a,
+            data_b,
+            self.width_b,
+            self.height_b,
+            self.channels_b,
+            self._upload_token_b,
+            self.compare_mode,
+            self.wipe_pos,
+            self.channel_mask,
+            scale_x * self.zoom,
+            scale_y * self.zoom,
+            pan_x,
+            pan_y,
         )
-
-        painter.endNativePainting()
-
-        # Draw camera viewfinder vector/text overlays on top of the rendered frame
-        if self.hud_visible:
-            self._draw_hud(painter)
-            
-        if self.adjustment_mode:
-            self._draw_adjustment_overlay(painter)
-
-        painter.end()
 
     def _draw_hud(self, painter: QPainter):
         painter.setRenderHint(QPainter.Antialiasing)
         metrics_rect = self.rect()
-        
+
         if self.compare_mode == 1:
             wipe_x = int(self.wipe_pos * metrics_rect.width())
             painter.setPen(QPen(QColor(255, 165, 0, 180), 2, Qt.DashLine))
@@ -252,22 +319,20 @@ class Viewport(QOpenGLWidget):
             painter.setFont(font)
             painter.drawText(wipe_x + 5, metrics_rect.height() // 2, "A | B")
 
-    def resizeGL(self, w, h):
-        # Qt's QOpenGLWidget already sets glViewport(0, 0, w, h) in physical device pixels
-        # before calling resizeGL. No additional glViewport call is needed here.
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
         if self.zoom_mode != "fit":
             self._apply_zoom_mode()
             self.update()
 
-
-            
-    # Mouse actions
     def mousePressEvent(self, event):
         if self.adjustment_mode and event.button() == Qt.LeftButton:
             self.adjust_start_x = event.position().x()
             self.adjust_start_value = (
-                self.ocio_manager.grade_exposure if self.adjustment_mode == 'exposure'
-                else self.ocio_manager.grade_gamma if self.adjustment_mode == 'gamma'
+                self.ocio_manager.grade_exposure
+                if self.adjustment_mode == "exposure"
+                else self.ocio_manager.grade_gamma
+                if self.adjustment_mode == "gamma"
                 else self.ocio_manager.grade_offset
             )
             self.setCursor(Qt.SizeHorCursor)
@@ -292,21 +357,21 @@ class Viewport(QOpenGLWidget):
     def mouseMoveEvent(self, event):
         if self.adjustment_mode and (event.buttons() & Qt.LeftButton):
             delta_x = event.position().x() - self.adjust_start_x
-            
-            if self.adjustment_mode == 'exposure':
+
+            if self.adjustment_mode == "exposure":
                 new_val = self.adjust_start_value + delta_x * 0.02
                 new_val = max(-5.0, min(5.0, new_val))
-                self.ocio_manager.grade_exposure = new_val
-            elif self.adjustment_mode == 'gamma':
+                self.ocio_manager.set_grading_values(exposure=new_val)
+            elif self.adjustment_mode == "gamma":
                 new_val = self.adjust_start_value + delta_x * 0.003
                 new_val = max(0.1, min(5.0, new_val))
-                self.ocio_manager.grade_gamma = new_val
-            elif self.adjustment_mode == 'offset':
+                self.ocio_manager.set_grading_values(gamma=new_val)
+            elif self.adjustment_mode == "offset":
                 new_val = self.adjust_start_value + delta_x * 0.002
                 new_val = max(-0.5, min(0.5, new_val))
-                self.ocio_manager.grade_offset = new_val
-                
-            self.update_ocio_pipeline()
+                self.ocio_manager.set_grading_values(offset=new_val)
+
+            self._sync_grading_uniforms()
             if self.main_window:
                 self.main_window.statusBar().showMessage(
                     f"Adjusting {self.adjustment_mode.upper()}: {new_val:.2f}"
@@ -314,7 +379,7 @@ class Viewport(QOpenGLWidget):
                 self.main_window._update_ocio_info_label()
             self.update()
             return
-            
+
         if self.dragging_wipe:
             self.wipe_pos = max(0.0, min(1.0, event.position().x() / self.width()))
             self.wipe_changed.emit(self.wipe_pos)
@@ -322,7 +387,9 @@ class Viewport(QOpenGLWidget):
         elif self.left_press_pos is not None and (event.buttons() & Qt.LeftButton):
             delta_x = abs(event.position().x() - self.left_press_pos.x())
             delta_y = abs(event.position().y() - self.left_press_pos.y())
-            if not self.left_drag_started and (delta_x > self.click_threshold or delta_y > self.click_threshold):
+            if not self.left_drag_started and (
+                delta_x > self.click_threshold or delta_y > self.click_threshold
+            ):
                 self.left_drag_started = True
                 self.scrubbing_frames = True
                 self.setCursor(Qt.SizeHorCursor)
@@ -372,9 +439,10 @@ class Viewport(QOpenGLWidget):
         self.update()
 
     def cleanup(self):
-        self.makeCurrent()
         self.native_renderer.cleanup()
-        self.doneCurrent()
+        self._renderer_initialized = False
+        self._last_rhi = None
+        self._ocio_pipeline_ready = False
 
     def clear_frames(self):
         self.frame_data_a = None
@@ -382,42 +450,37 @@ class Viewport(QOpenGLWidget):
         self._upload_token_a = 0
         self._upload_token_b = 0
         self.pixel_aspect_ratio = 1.0
+        self.native_renderer.reset_frame_textures()
         self.update()
 
     def _draw_adjustment_overlay(self, painter: QPainter):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect()
-        
-        # Determine value to display
-        val = 0.0
-        unit = ""
-        if self.adjustment_mode == 'exposure':
+
+        if self.adjustment_mode == "exposure":
             val = self.ocio_manager.grade_exposure
             val_str = f"{val:+.2f}"
             unit = " stops"
-        elif self.adjustment_mode == 'gamma':
+        elif self.adjustment_mode == "gamma":
             val = self.ocio_manager.grade_gamma
             val_str = f"{val:.2f}"
-        elif self.adjustment_mode == 'offset':
+            unit = ""
+        else:
             val = self.ocio_manager.grade_offset
             val_str = f"{val:+.3f}"
-            
+            unit = ""
+
         text = f"{self.adjustment_mode.upper()}: {val_str}{unit}"
-        
-        # Background box dimensions (tight fit)
+
         box_w = 250
         box_h = 36
-        
-        # Bottom-left corner with 20px padding
         box_x = 20
         box_y = rect.height() - box_h - 20
-        
-        # Draw rounded rectangle background (no border)
-        painter.setBrush(QColor(0, 0, 0, 180)) # semi-transparent black
+
+        painter.setBrush(QColor(0, 0, 0, 180))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(box_x, box_y, box_w, box_h, 6.0, 6.0)
-        
-        # Draw text
+
         painter.setPen(QColor(255, 255, 255))
         font = ui_font(13, QFont.Weight.Bold)
         painter.setFont(font)

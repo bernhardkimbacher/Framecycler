@@ -1,9 +1,9 @@
-PySide6>=6.5.0
-PyOpenGL>=3.1.0
+PySide6==6.11.1
 numpy>=1.20.0
 av>=11.0.0
 OpenColorIO>=2.2.0
 OpenImageIO>=3.1.0
 pybind11>=2.10.0
 cmake
+aqtinstall>=3.1.0
 velopack>=1.2.0

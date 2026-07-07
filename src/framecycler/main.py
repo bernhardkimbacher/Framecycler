@@ -1,7 +1,6 @@
 import sys
 import os
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QSurfaceFormat
 from .ui.main_window import MainWindow
 from .core.app_icon import load_app_icon
 from .core.logging_config import setup_logging
@@ -20,18 +19,7 @@ def main():
     # Initialize global logging tool (writing to standard OS paths and console)
     setup_logging()
 
-    # Configure surface format for OpenGL Core profile.
-    # Explicitly use DefaultColorSpace (NOT sRGB) to prevent the macOS GL driver from
-    # automatically linearizing (de-gamma) fragment shader outputs written to the framebuffer.
-    # OCIO owns the full encoding chain; the framebuffer must be a plain pass-through.
-    fmt = QSurfaceFormat()
-    fmt.setVersion(3, 2)
-    fmt.setProfile(QSurfaceFormat.CoreProfile)
-    fmt.setDepthBufferSize(24)
-    fmt.setColorSpace(QSurfaceFormat.DefaultColorSpace)
-    QSurfaceFormat.setDefaultFormat(fmt)
-
-    # Custom dark styling and dropdown color correction
+    # QRhiWidget selects Metal/D3D11/OpenGL per platform; no GL surface format required.
     app.setStyleSheet("""
         QMainWindow {
             background-color: #1a1a1a;
