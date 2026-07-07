@@ -34,7 +34,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0
+          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0
 
       - name: Install Python dependencies
         run: |
@@ -46,6 +46,8 @@ jobs:
 
       - name: Run unit tests
         shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           test_modules=()
           while IFS= read -r module; do

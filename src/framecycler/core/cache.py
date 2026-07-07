@@ -43,7 +43,7 @@ class CacheEngine:
         # Playback states
         meta = self.decoder.get_metadata()
         meta_fps = meta.get("fps", 24.0)
-        self._max_upload_buffers = max(24, int(meta_fps * 3))
+        self._max_upload_buffers = max(24, int(meta_fps))
         start = meta.get("start_frame", 0)
         end = meta.get("end_frame", meta["frame_count"] - 1)
 
@@ -67,8 +67,11 @@ class CacheEngine:
     @staticmethod
     def _prepare_upload_buffer(img: np.ndarray) -> QByteArray:
         """Pack a cache-ready float16 image into a QRhi upload buffer on a worker thread."""
-        pixel_bytes = np.ascontiguousarray(img, dtype=np.float16).tobytes()
-        return QByteArray(pixel_bytes)
+        source = np.ascontiguousarray(img, dtype=np.float16)
+        upload_buffer = QByteArray(source.nbytes, 0)
+        dst = np.frombuffer(memoryview(upload_buffer), dtype=np.float16).reshape(source.shape)
+        np.copyto(dst, source)
+        return upload_buffer
 
     @staticmethod
     def _prepare_cache_image(img: np.ndarray) -> tuple[np.ndarray, int]:
@@ -112,7 +115,7 @@ class CacheEngine:
                     "channels": cache_channels,
                     "frame_index": frame_index,
                     "timecode": Timecode.frame_to_timecode(frame_index, meta["fps"], 0),
-                    "upload_buffer": self._get_upload_buffer(frame_index),
+                    "upload_buffer": self._ensure_upload_buffer(frame_index, data_view),
                 }
 
         self._schedule_frame(frame_index, priority=0)
@@ -125,15 +128,33 @@ class CacheEngine:
         with self.lock:
             return self._upload_buffers.get(frame_index)
 
+    def _ensure_upload_buffer(self, frame_index: int, data_view: np.ndarray) -> QByteArray:
+        upload_buffer = self._get_upload_buffer(frame_index)
+        if upload_buffer is not None and not upload_buffer.isEmpty():
+            return upload_buffer
+
+        upload_buffer = self._prepare_upload_buffer(np.asarray(data_view))
+        self._store_upload_buffer(frame_index, upload_buffer)
+        return upload_buffer
+
     def _store_upload_buffer(self, frame_index: int, upload_buffer: QByteArray) -> None:
         with self.lock:
             self._upload_buffers[frame_index] = upload_buffer
-            if len(self._upload_buffers) > self._max_upload_buffers:
-                self._evict_furthest_upload_buffer()
+            while len(self._upload_buffers) > self._max_upload_buffers:
+                if not self._evict_furthest_upload_buffer(exclude={frame_index}):
+                    break
 
-    def _evict_furthest_upload_buffer(self) -> None:
+    def _evict_furthest_upload_buffer(self, exclude: Set[int] | None = None) -> bool:
         if not self._upload_buffers:
-            return
+            return False
+
+        candidates = [
+            frame_num
+            for frame_num in self._upload_buffers
+            if exclude is None or frame_num not in exclude
+        ]
+        if not candidates:
+            return False
 
         playhead = self.current_playhead
         frame_count = max(1, self.decoder.get_metadata().get("frame_count", 1))
@@ -143,8 +164,9 @@ class CacheEngine:
             wrapped_dist = abs(frame_count - direct_dist)
             return min(direct_dist, wrapped_dist)
 
-        furthest_frame = max(self._upload_buffers.keys(), key=distance)
+        furthest_frame = max(candidates, key=distance)
         del self._upload_buffers[furthest_frame]
+        return True
 
     def update_settings(self):
         with self.lock:
