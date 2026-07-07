@@ -163,7 +163,8 @@ def downsample_pixels(arr: np.ndarray, scale: float) -> np.ndarray:
     src_spec = oiio.ImageSpec(width, height, channels, oiio.HALF)
     src_spec.channelnames = channel_names
     src_buf = oiio.ImageBuf(src_spec)
-    if not src_buf.set_pixels(oiio.HALF, arr):
+    roi = oiio.ROI(0, width, 0, height, 0, 1, 0, channels)
+    if not src_buf.set_pixels(roi, arr):
         raise ValueError(f"Failed to set source pixels: {src_buf.geterror()}")
 
     dst_spec = oiio.ImageSpec(new_w, new_h, channels, oiio.HALF)

@@ -33,13 +33,22 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(new_settings.reader_threads, 12)
         self.assertEqual(new_settings.ram_cache_limit_gb, 16.0)
         self.assertEqual(new_settings.default_fps, 30.0)
-        self.assertEqual(new_settings.resolution_scale, 0.5)
+        self.assertEqual(new_settings.resolution_scale, 1.0)
 
-    def test_resolution_scale_clamped_on_load(self):
-        self.settings.resolution_scale = 2.0
+    def test_resolution_scale_not_persisted(self):
+        self.settings.resolution_scale = 0.5
         self.settings.save()
+        config_path = os.path.join(self.settings.config_dir, "settings.json")
+        with open(config_path, "r", encoding="utf-8") as handle:
+            saved = handle.read()
+        self.assertNotIn("resolution_scale", saved)
+
         new_settings = Settings(config_dir=self.settings.config_dir)
         self.assertEqual(new_settings.resolution_scale, 1.0)
+
+    def test_resolution_scale_clamped_in_session(self):
+        self.settings.resolution_scale = Settings.clamp_resolution_scale(2.0)
+        self.assertEqual(self.settings.resolution_scale, 1.0)
 
 
 if __name__ == "__main__":

@@ -35,9 +35,6 @@ class Settings:
                 self.loop_mode = data.get("loop_mode", self.loop_mode)
                 self.timecode_mode = data.get("timecode_mode", self.timecode_mode)
                 self.recent_files = data.get("recent_files", self.recent_files)
-                self.resolution_scale = self.clamp_resolution_scale(
-                    data.get("resolution_scale", self.resolution_scale)
-                )
         except Exception as e:
             print(f"Error loading settings: {e}")
 
@@ -52,7 +49,6 @@ class Settings:
                 "loop_mode": self.loop_mode,
                 "timecode_mode": self.timecode_mode,
                 "recent_files": self.recent_files,
-                "resolution_scale": self.resolution_scale,
             }
             with open(self.config_path, "w") as f:
                 json.dump(data, f, indent=4)

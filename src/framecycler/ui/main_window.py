@@ -114,7 +114,7 @@ class MainWindow(QMainWindow):
         
         # Create Custom Timeline
         self.timeline = Timeline(self)
-        self.timeline.frame_changed.connect(self.seek_to_frame)
+        self.timeline.frame_changed.connect(self._on_timeline_scrub)
         self.timeline.in_out_changed.connect(self._on_in_out_changed)
         
         # Central layout
@@ -761,6 +761,11 @@ class MainWindow(QMainWindow):
         self.viewport.update()
         self.statusBar().showMessage("Viewer inputs cleared.")
 
+    def _on_timeline_scrub(self, frame: int):
+        if self.playing:
+            self.stop_playback()
+        self.seek_to_frame(frame)
+
     def seek_to_frame(self, frame: int):
         # Clip to range
         frame = max(self.start_frame, min(self.end_frame, frame))
@@ -966,7 +971,6 @@ class MainWindow(QMainWindow):
     def _set_resolution_scale(self, scale: float):
         scale = Settings.clamp_resolution_scale(scale)
         self.settings.resolution_scale = scale
-        self.settings.save()
 
         for cache in self.caches:
             if cache is not None:
