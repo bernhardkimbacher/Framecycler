@@ -2,6 +2,11 @@ name: Package Framecycler
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish to GitHub Releases (only runs when this workflow is started from a v* tag ref, not master)
+        type: boolean
+        default: true
   push:
     tags:
       - 'v*'
@@ -138,7 +143,9 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: build
-    if: github.ref_type == 'tag'
+    if: >-
+      github.ref_type == 'tag' &&
+      (github.event_name != 'workflow_dispatch' || inputs.publish_release)
     runs-on: ubuntu-latest
 
     steps:
@@ -198,3 +205,19 @@ jobs:
               --releaseName "Framecycler ${{ steps.version.outputs.version }}" \
               --token "$GITHUB_TOKEN"
           done
+
+  release-note:
+    name: Release publish skipped
+    needs: build
+    if: >-
+      always() &&
+      needs.build.result == 'success' &&
+      (github.ref_type != 'tag' ||
+        (github.event_name == 'workflow_dispatch' && !inputs.publish_release))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain skipped publish
+        run: |
+          echo "::warning::GitHub Release publish was skipped."
+          echo "Publish only runs for v* tag refs."
+          echo "To release: push a tag (e.g. v0.1.0) or use Run workflow and select the tag ref (not master)."
