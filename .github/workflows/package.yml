@@ -113,6 +113,7 @@ jobs:
             -u com.bernhardkimbacher.framecycler-reboot \
             -v ${{ steps.version.outputs.version }} \
             -p dist/Framecycler.app \
+            -e Framecycler \
             -c osx \
             --bundleId com.bernhardkimbacher.framecycler-reboot \
             --icon assets/icons/app_icon.icns
