@@ -30,6 +30,7 @@ a = Analysis(
     binaries=engine_bins + collect_dynamic_libs("OpenImageIO"),
     datas=[
         (str(root / "src" / "framecycler" / "color" / "studio_config"), "framecycler/color/studio_config"),
+        (str(root / "src" / "framecycler" / "render" / "shaders"), "framecycler/render/shaders"),
         (str(root / "assets" / "icons"), "assets/icons"),
     ],
     hiddenimports=["OpenImageIO"],
@@ -83,7 +84,7 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleDisplayName": "Framecycler Reboot",
             "CFBundleName": "Framecycler Reboot",
-            "CFBundleShortVersionString": "0.2.1",
+            "CFBundleShortVersionString": "0.2.2",
             "NSHighResolutionCapable": True,
         },
     )
