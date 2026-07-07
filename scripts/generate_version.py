@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__file__).resolve().parents[1] / "src" / "framecycler" / "_version.py"
-DEFAULT_VERSION = "0.0.1"
+DEFAULT_VERSION = "0.1.1"
 
 
 def git(*args: str) -> str:

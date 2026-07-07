@@ -83,7 +83,7 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleDisplayName": "Framecycler Reboot",
             "CFBundleName": "Framecycler Reboot",
-            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleShortVersionString": "0.1.1",
             "NSHighResolutionCapable": True,
         },
     )
