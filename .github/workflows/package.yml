@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Build & Package
+    name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -128,24 +128,72 @@ jobs:
             -c linux \
             --icon assets/icons/app_icon_512.png
 
+      - name: Upload Velopack artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: velopack-${{ matrix.vpk_channel }}
+          path: Releases/**
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Derive release version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VERSION"
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk --version 1.2.0
+
+      - name: Download Velopack artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: velopack-*
+          path: artifact-staging
+          merge-multiple: true
+
+      - name: Stage release files
+        run: |
+          mkdir -p Releases
+          if [ -d artifact-staging/Releases ]; then
+            cp -R artifact-staging/Releases/. Releases/
+          else
+            cp -R artifact-staging/. Releases/
+          fi
+          ls -la Releases
+
+      - name: Clear partial release on workflow retry
+        if: github.run_attempt > 1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete "v${{ steps.version.outputs.version }}" --yes || true
+
       - name: Publish Velopack release to GitHub
-        if: github.ref_type == 'tag'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          vpk upload github \
-            --repoUrl https://github.com/bernhardkimbacher/Framecycler \
-            --channel ${{ matrix.vpk_channel }} \
-            --publish \
-            --merge \
-            --tag v${{ steps.version.outputs.version }} \
-            --releaseName "Framecycler ${{ steps.version.outputs.version }}" \
-            --token "$GITHUB_TOKEN"
-
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: Framecycler-Build-${{ matrix.os }}
-          path: |
-            Releases/**
+          for channel in win osx linux; do
+            echo "Uploading channel: $channel"
+            vpk upload github \
+              --repoUrl https://github.com/bernhardkimbacher/Framecycler \
+              --channel "$channel" \
+              --publish \
+              --merge \
+              --tag "v${{ steps.version.outputs.version }}" \
+              --releaseName "Framecycler ${{ steps.version.outputs.version }}" \
+              --token "$GITHUB_TOKEN"
+          done
