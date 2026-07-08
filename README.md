@@ -1,40 +1,77 @@
 # Framecycler Reboot // VFX Review Application Technical Manual
 
-Framecycler Reboot is a high-performance, lightweight Visual Effects Review application designed for Windows, macOS, and Linux. It is built on a **Hybrid Architecture** combining a compiled C++20 core engine (`framecycler_engine`) for frame RAM caching with a Python 3.12+ / PySide6 (Qt 6.11) UI shell for decoding, Qt RHI GPU rendering, and extension scriptability.
+Framecycler Reboot is a high-performance, lightweight Visual Effects Review application designed for Windows, macOS, and Linux. It is built on a **Hybrid Architecture** combining a compiled C++20 core engine (`framecycler_engine`) for per-source frame RAM caching with a Python 3.12+ / PySide6 (Qt 6.11) UI shell for multi-source timeline coordination, decoding, Qt RHI GPU rendering, and extension scriptability.
 
 ---
 
 ## 1. Architectural System Overview
 
-Framecycler Reboot splits execution between native C++ and Python coordinates to bypass Python's Global Interpreter Lock (GIL), avoid garbage collection (GC) stutters during uncompressed 4K playback, and maintain custom Python extension tools.
+Framecycler Reboot splits execution between native C++ and Python coordinates to bypass Python's Global Interpreter Lock (GIL), avoid garbage collection (GC) stutters during uncompressed 4K playback, and maintain custom Python extension tools. The application loads an **ordered list of media sources** (`MediaSource`), each with its own decoder and RAM cache, onto a **single concatenated global timeline** for Sequence playback and multi-source compare modes.
 
 ```mermaid
-graph TD
-    A[PySide6 UI Shell - Python] -->|User Events and Hotkeys| B[MainWindow Coordinator]
-    B -->|seek_to_frame| C[CacheEngine.get_frame]
-    D[Decoder ThreadPool] -->|read_frame| E[NumPy float16 Frame Array]
-    E -->|write_frame| F[C++ CacheManager - framecycler_engine]
-    E -->|pre-bake on worker thread| G[Upload Buffer Side-Cache]
-    F -->|zero-copy float16 view| C
-    G -->|pre-staged QByteArray| C
-    C -->|set_frame| H[QRhiWidget Viewport]
-    H -->|render| I[RhiViewportRenderer - Python]
-    I -->|QRhi GPU pass| J[Screen Display]
-    K[OCIO Manager - Python] -->|GLSL sources and LUTs| I
-    L[ShaderBaker - pyside6-qsb] -->|baked QShader| I
+graph TB
+    subgraph UI["PySide6 UI Shell"]
+        MW[MainWindow Coordinator]
+        SLP[SourceListPanel]
+        TL[Timeline]
+        VP[Viewport QRhiWidget]
+        HUD[ViewportHudOverlay]
+    end
+
+    subgraph Sources["Per MediaSource × N"]
+        MS[MediaSource]
+        DEC[Decoder EXR / DPX / QT]
+        CE[CacheEngine Python]
+        CM[C++ CacheManager]
+        MS --> DEC
+        MS --> CE
+        CE --> CM
+        CE -->|ThreadPool prefetch| DEC
+    end
+
+    subgraph Render["Python QRhi Pipeline"]
+        RVR[RhiViewportRenderer]
+        OCIO[OCIOManager]
+        SP[ShaderPipeline + quad.glsl]
+        SB[ShaderBaker pyside6-qsb]
+    end
+
+    MW --> SLP
+    MW --> TL
+    MW -->|seek_to_frame global| CE
+    DEC -->|float16 ndarray| CE
+    CE -->|zero-copy view + QByteArray| VP
+    MW -->|set_frame per source index| VP
+    VP --> RVR
+    OCIO --> SP --> SB --> RVR
+    HUD -.->|Wipe divider| VP
+    RVR -->|QRhi GPU pass| Screen[Display]
 ```
 
 ### Key Subsystem Division
-* **Python Layer**: Handles UI layouts, transport timer loops, background decode prefetch (`CacheEngine`), OCIO shader bundling, **Qt RHI viewport rendering** (`RhiViewportRenderer`), and custom extension modules. Decoders load EXR/DPX via OpenImageIO and QuickTime via PyAV.
-* **C++ Core Module (`framecycler_engine`)**: Written in C++20. Manages contiguous half-float frame cache blocks, playhead-aware eviction, and zero-copy NumPy views into cached pixel memory. GPU rendering was moved to Python to avoid dual-Qt linking instability on macOS.
+* **Python Layer**: Handles UI layouts, transport timer loops, **multi-source timeline coordination** (`media_source.py`), per-source background decode prefetch (`CacheEngine` per `MediaSource`), OCIO shader bundling, **Qt RHI viewport rendering** (`RhiViewportRenderer`), and custom extension modules. Decoders load EXR/DPX via OpenImageIO and QuickTime via PyAV.
+* **C++ Core Module (`framecycler_engine`)**: Written in C++20. Manages contiguous half-float frame cache blocks, playhead-aware eviction, and zero-copy NumPy views into cached pixel memory. Each `MediaSource` owns its own `CacheManager` instance. GPU rendering was moved to Python to avoid dual-Qt linking instability on macOS.
 
-Legacy OpenGL rendering (`GLRenderer`, `gl_loader.h`) and the C++ `RhiRenderer` were removed in the Qt RHI migration. The viewport now renders entirely through PySide6 `QRhiWidget` and `RhiViewportRenderer`.
+Legacy OpenGL rendering (`GLRenderer`, `gl_loader.h`) and the C++ `RhiRenderer` were removed in the Qt RHI migration. The viewport now renders entirely through PySide6 `QRhiWidget` and `RhiViewportRenderer`. The older fixed **Slot A / Slot B** dual-decoder model was replaced in v0.2.4 by the ordered `sources` list and concatenated timeline described in §2.A.
 
 ---
 
 ## 2. Core Engine Subsystems
 
-### A. C++ Frame Cache (`CacheManager`)
+### A. Multi-Source Media Model (`MediaSource`)
+
+Located in `src/framecycler/core/media_source.py`. Each loaded clip or sequence is wrapped as a `MediaSource` dataclass with its own `BaseDecoder`, `CacheEngine`, dimensions, FPS, and per-source display settings (`pixel_aspect_ratio`, `resolution_scale`).
+
+* **Ordered source list**: `MainWindow.sources` holds sources in playback/compare order. **File → Add Media** appends; drag-and-drop **Replace** (left zone) clears and reloads, **Add** (right zone) appends.
+* **Concatenated global timeline**: `rebuild_timeline_offsets()` assigns each source a `timeline_offset`. Global frames run `0 … total_frame_count−1` across all clips back-to-back. `global_to_local()` maps the playhead to `(source_index, local_frame)` for Sequence mode.
+* **Decoder frame mapping**: Decoders use absolute frame numbers (sparse sequence indices, QuickTime timecode offsets). `decoder_frame_for_source()` and `local_index_to_decoder_frame()` translate between global timeline position and per-decoder frame requests.
+* **Seek orchestration**: `seek_to_frame()` updates every source's cache playhead, requests frames at the mapped decoder frame for each source, and pushes results into indexed `Viewport.frame_slots` via `set_frame(source_index, …)`.
+* **Two source indices**:
+  * **`sequence_index`** — derived from the global playhead; drives Sequence mode display, transport readout FPS/resolution sync, and sidebar highlight during playback.
+  * **`active_source_index`** — user selection in the **Media Sources** panel; drives EXR layer UI, cache-overlay scope, and per-source Image menu targets (resolution scale, pixel aspect).
+* **Compare frame sync**: In Wipe, Difference, and Tile modes, all sources are sampled at the same global playhead. Frames outside a source's segment clamp to that clip's first or last frame so comparisons stay time-aligned.
+
+### B. C++ Frame Cache (`CacheManager`)
 
 Located in `src/cpp/engine/` and compiled as a dynamic module (`.pyd` on Windows, `.so` on POSIX). Exposed to Python via PyBind11 in `src/cpp/bindings/python_bindings.cpp`.
 
@@ -45,9 +82,9 @@ Located in `src/cpp/engine/` and compiled as a dynamic module (`.pyd` on Windows
 * **Half-Float Storage**: Cached frames are stored as `float16` (`RGBA16F` or `R16F` channel layouts). Decoders copy pixels into reused cache slots via `std::copy`.
 * **Concurrent Access**: `has_frame`, `get_frame_data`, and `get_cached_frames` use shared locks; `write_frame` and eviction use exclusive locks (`std::shared_mutex`) so playback reads are not blocked for the full duration of large frame writes.
 
-### B. Python Cache Orchestration (`CacheEngine`)
+### C. Python Cache Orchestration (`CacheEngine`)
 
-Located in `src/framecycler/core/cache.py`. Wraps `CacheManager` with decode prefetch and upload staging.
+Located in `src/framecycler/core/cache.py`. One `CacheEngine` wraps one `CacheManager` per `MediaSource`, adding decode prefetch and upload staging.
 
 * **Background Prefetch**: A manager thread schedules up to 100 frames ahead of the playhead on a `ThreadPoolExecutor` (size configurable via **Settings → Reader Threads**).
 * **Non-Blocking Playback**: `get_frame()` returns a zero-copy NumPy view on cache hit. On miss, it schedules a high-priority decode and returns `None` without blocking the GUI thread (the viewport holds the previous frame until the decode completes).
@@ -55,9 +92,9 @@ Located in `src/framecycler/core/cache.py`. Wraps `CacheManager` with decode pre
 * **Bounded Upload Side-Cache**: Pre-staged buffers are kept in a separate Python-side cache sized to ~3 seconds of frames (independent of the RAM cache limit) and evicted by playhead distance, avoiding unbounded memory growth.
 * **Timeline Cache Indicator**: During playback, the timeline's cached-frame overlay refreshes on a 250ms timer instead of every `seek_to_frame` tick, reducing mutex contention from `get_cached_frames()` on the GUI thread.
 
-### C. Python Qt RHI Viewport Renderer (`RhiViewportRenderer`)
+### D. Python Qt RHI Viewport Renderer (`RhiViewportRenderer`)
 
-Located in `src/framecycler/render/rhi_viewport_renderer.py`. Called from `Viewport` (`QRhiWidget` subclass in `src/framecycler/ui/viewport.py`).
+Located in `src/framecycler/render/rhi_viewport_renderer.py`. Called from `Viewport` (`QRhiWidget` subclass in `src/framecycler/ui/viewport.py`). The viewport maintains a dynamic pool of `frame_slots` (one per loaded source) and passes indexed texture state to the renderer.
 
 * **Why Python, not C++**: Rendering uses the same PySide6 `QRhi*` instance as the widget, avoiding dual-Qt SDK linking crashes that occurred when a C++ module compiled against one Qt build was loaded alongside PySide6 at runtime (especially on macOS).
 * **Backend selection**: `QRhiWidget` selects Metal (macOS), D3D11/12 (Windows), Vulkan, or OpenGL ES per platform. The active backend is logged once at viewport initialization (e.g. `Viewport: QRhi backend = Metal`).
@@ -65,7 +102,13 @@ Located in `src/framecycler/render/rhi_viewport_renderer.py`. Called from `Viewp
 * **Texture uploads**: Frame buffers are uploaded as `RGBA16F` or `R16F` QRhi textures. During playback, pre-staged `QByteArray` buffers from `CacheEngine` are passed directly to `uploadTexture`. Upload-token deduplication skips redundant GPU transfers when the playhead holds on a frame.
 * **Fallback logging**: If a frame is displayed before its upload buffer is ready (e.g. scrub to an uncached frame), the renderer falls back to synchronous main-thread packing and emits a rate-limited warning. Shader bake failures, missing pipelines, decode errors, and EXR nearest-frame fallbacks are also logged explicitly.
 * **Color Processing (OCIO)**: OCIO-generated GLSL is injected into the fragment template (`ocio_color_transform`). 3D LUT grids are uploaded slice-by-slice to QRhi 3D textures (required on Metal/Vulkan). Interactive grading (exposure / gamma / offset) updates a dynamic uniform buffer without rebaking shaders.
-* **Comparisons & Masks**: Performs frame comparisons (vertical wipe, difference blending `abs(A - B)`, side-by-side tiling) and channel isolations (RGBA, R, G, B, A, Luminance) in the fragment shader.
+* **Compare modes** (Tools → Compare):
+  * **Sequence** — shows the source whose timeline segment contains the global playhead (`sequence_index`).
+  * **Wipe** — vertical split between sources `[0]` (left) and `[1]` (right); divider dragged via HUD overlay.
+  * **Difference** — `abs(A − B)` RGB blend between sources `[0]` and `[1]`.
+  * **Tile** — all N sources in an aspect-preserving grid (`tile_layout.py`); each cell is a separate QRhi draw with per-tile transform uniforms (not the legacy fragment-shader side-by-side branch).
+  Wipe and Difference always use list order `[0]` vs `[1]`, independent of the panel's active source selection.
+* **Channel isolations**: RGBA, R, G, B, A, and Luminance masks run in the fragment shader.
 
 ---
 
@@ -88,7 +131,7 @@ return py::array(
     self   // keeps CacheManager alive
 );
 ```
-The viewport references this zero-copy view for dimensions and metadata. GPU upload uses a separately pre-staged `QByteArray` built on decode worker threads (see §2.B).
+The viewport references this zero-copy view for dimensions and metadata. GPU upload uses a separately pre-staged `QByteArray` built on decode worker threads (see §2.C).
 
 ---
 
@@ -102,9 +145,15 @@ Supported formats: **EXR** (`exr_decoder.py`, OpenImageIO), **DPX** (`dpx_decode
 When a single file is opened or dropped onto the application, `_find_sequence_from_single_file` inside `base.py` automatically parses its index pattern (e.g., `MOC_CAS_0010.0993.exr` $\rightarrow$ `MOC_CAS_0010.####.exr`), locates the directory, filters files matching that sequence name, and loads the sequence as a contiguous timeline starting at its absolute frame index.
 * **Missing Frame Fallback**: If a frame is missing in a sequence (e.g. frame `0995` is deleted), the decoder identifies the closest available frame index and loads that instead, preventing decoding crashes. A warning is logged naming the requested and served frame indices.
 
-### B. Timecode-to-Frame Translations
-* **Image Sequences**: Enforces actual frame numbering extracted from file names, initializing the global playback ranges to these absolute limits.
-* **QuickTime Movies**: Parses the file's start timecode metadata and translates it to absolute timeline frame numbers (e.g. `08:00:00:00` $\rightarrow$ absolute start frame `691200` at 24fps) so sequences and movie clips align correctly on the master timeline.
+### B. Concatenated Multi-Source Timeline
+
+When multiple sources are loaded, `rebuild_timeline_offsets()` builds one global playback range across all clips. Transport, looping, in/out points, and the timeline scrubber operate on this concatenated frame space. `Ctrl + Left/Right` jumps between clip boundaries on the global timeline.
+
+Each source retains its own decoder frame numbering internally; timeline helpers in `media_source.py` map global positions to the correct decoder frame per source. The timeline cache overlay reflects cached decoder frames for the **selected** source in the Media Sources panel, mapped back to global coordinates.
+
+### C. Timecode-to-Frame Translations
+* **Image Sequences**: Enforces actual frame numbering extracted from file names, initializing each source's decoder range to these absolute limits.
+* **QuickTime Movies**: Parses the file's start timecode metadata and translates it to absolute timeline frame numbers (e.g. `08:00:00:00` $\rightarrow$ absolute start frame `691200` at 24fps) so sequences and movie clips can be compared on the same global timeline.
 
 ---
 
@@ -200,8 +249,10 @@ Shader templates live in `src/framecycler/render/shaders/`; Python-side bundling
 
 Located in `src/framecycler/ui/`.
 
-* **Compare Modes** (Tools → Compare): **Sequence** (default, plays sources back-to-back on a concatenated timeline), **Wipe** and **Difference** (first two sources), **Tile** (all sources in an aspect-preserving grid).
+* **Media Sources panel** (`source_list_panel.py`): Ordered list of loaded clips with remove, drag-reorder, and source selection. Toggle via **View → Panels → Media Sources**. The highlighted row follows the playhead clip during playback (`sequence_index`); clicking a row sets the **active source** for metadata, cache overlay, and per-source Image menu controls.
+* **Compare Modes** (Tools → Compare): **Sequence** (default — shows the source at the global playhead), **Wipe** and **Difference** (sources `[0]` vs `[1]` at the same global frame), **Tile** (all sources in an aspect-preserving grid). Switching to Tile resets zoom to fit.
 * **File → Add Media**: Append a new source to the list. Drag-and-drop shows a **Replace Media** / **Add Media** overlay (left replaces all, right appends).
+* **Image menu (per-source)**: **Resolution Scale** and **Pixel Aspect Ratio** apply to the active source in the Media Sources panel. During Sequence playback, transport readout resolution/FPS follow the clip under the playhead.
 * **Viewfinder Overlay (HUD)**: Keeps the Wipe compare divider line inside the image container when Wipe mode is active.
 * **Timeline Status Row**: Positioned directly above the timeline slider. Displays `FR`, `FPS`, and `TC` in a clean, larger `Segoe UI` font that matches the timeline theme.
 * **Centered Transport Controls**: The playback buttons and loop mode dropdown are centered in the bottom transport bar, with `TC / FR` toggle aligned on the far right.
@@ -259,7 +310,7 @@ Shader baking at runtime uses `pyside6-qsb` (bundled with PySide6). Pinned depen
    ```
 
 ### Packaging & In-App Updates
-* **Release builds** are produced by the GitHub Actions workflow [`.github/workflows/package.yml`](.github/workflows/package.yml) when a version tag such as `v1.0.0` is pushed. Each platform job builds with PyInstaller, packages via [Velopack](https://velopack.io), and publishes merged assets to GitHub Releases.
+* **Release builds** are produced by the GitHub Actions workflow [`.github/workflows/package.yml`](.github/workflows/package.yml) when a version tag such as `v0.2.5` is pushed. Each platform job builds with PyInstaller, packages via [Velopack](https://velopack.io), and publishes merged assets to GitHub Releases.
 * **First install**: download the Velopack installer/portable bundle for your OS from the GitHub Release page (Windows Setup/portable zip, macOS installer, Linux AppImage).
 * **Manual update check**: in a packaged build, use **Help → Check for Updates…** to fetch and apply the latest release from GitHub. Updates are not available when running from source (`python -m src.framecycler`).
 * **Unsigned builds (current)**: releases are not code-signed or notarized yet. macOS Gatekeeper and Windows SmartScreen may warn on first launch and again after an update; use the same right-click → Open workaround as with the current zip/installer builds.
