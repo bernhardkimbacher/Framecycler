@@ -34,7 +34,26 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0
+          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 libopenimageio-dev
+
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install openimageio
+
+      - name: Cache vcpkg (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
+            ${{ env.VCPKG_INSTALLATION_ROOT }}/downloads
+          key: ${{ runner.os }}-vcpkg-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-vcpkg-
+
+      - name: Install system dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        run: vcpkg install openimageio:x64-windows
 
       - name: Install Python dependencies
         run: |
@@ -53,7 +72,5 @@ jobs:
           while IFS= read -r module; do
             test_modules+=("tests.${module}")
           done < <(find tests -maxdepth 1 -name 'test_*.py' \
-            ! -name 'test_image_io.py' \
-            ! -name 'test_decoders_oiio.py' \
             -exec basename {} .py \; | sort)
           ${{ matrix.python }} -m unittest -v "${test_modules[@]}"

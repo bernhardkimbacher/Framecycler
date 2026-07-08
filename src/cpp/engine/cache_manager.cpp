@@ -1,4 +1,5 @@
 #include "cache_manager.h"
+#include "native_decoder.h"
 #include <cmath>
 #include <algorithm>
 #include <iostream>
@@ -12,6 +13,14 @@ CacheManager::CacheManager(double ram_limit_gb)
 void CacheManager::set_ram_limit(double ram_limit_gb) {
     std::unique_lock<std::shared_mutex> lock(_mutex);
     _ram_limit_gb = ram_limit_gb;
+    if (ram_limit_gb <= 0.0) {
+        _max_bytes = 0;
+        _slots.clear();
+        _frame_to_slot.clear();
+        _slot_to_frame.clear();
+        _allocated_bytes = 0;
+        return;
+    }
     _max_bytes = static_cast<size_t>(ram_limit_gb * 1024.0 * 1024.0 * 1024.0);
 }
 
@@ -30,6 +39,26 @@ bool CacheManager::has_frame(int frame_index) {
 
 void CacheManager::write_frame(int frame_index, int width, int height, int channels, const uint16_t* pixel_data, size_t data_size) {
     std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    if (_max_bytes == 0) {
+        _slots.clear();
+        _frame_to_slot.clear();
+        _slot_to_frame.clear();
+        _allocated_bytes = 0;
+
+        FrameBuffer transient;
+        transient.data.resize(data_size);
+        std::copy(pixel_data, pixel_data + data_size, transient.data.begin());
+        transient.width = width;
+        transient.height = height;
+        transient.channels = channels;
+        transient.active = true;
+        _slots.push_back(transient);
+        _frame_to_slot[frame_index] = 0;
+        _slot_to_frame[0] = frame_index;
+        _allocated_bytes = data_size * sizeof(uint16_t);
+        return;
+    }
 
     auto it = _frame_to_slot.find(frame_index);
     if (it != _frame_to_slot.end()) {
@@ -92,6 +121,16 @@ void CacheManager::write_frame(int frame_index, int width, int height, int chann
         _slot_to_frame[target_slot_idx] = frame_index;
         _allocated_bytes += slot.data.size() * sizeof(uint16_t);
     }
+}
+
+bool CacheManager::decode_and_cache_frame(int frame_index, const std::string& file_path, float resolution_scale)
+{
+    if (has_frame(frame_index)) {
+        return true;
+    }
+    auto res = NativeDecoder::decode_frame(file_path, resolution_scale);
+    write_frame(frame_index, res.width, res.height, res.channels, res.pixel_data.data(), res.pixel_data.size());
+    return res.success;
 }
 
 const uint16_t* CacheManager::get_frame_data(int frame_index, int& width, int& height, int& channels) {

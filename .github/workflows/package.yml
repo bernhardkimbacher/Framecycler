@@ -65,7 +65,26 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0
+          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0 libopenimageio-dev
+
+      - name: Install System Dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install openimageio
+
+      - name: Cache vcpkg (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
+            ${{ env.VCPKG_INSTALLATION_ROOT }}/downloads
+          key: ${{ runner.os }}-vcpkg-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-vcpkg-
+
+      - name: Install System Dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        run: vcpkg install openimageio:x64-windows
 
       - name: Install Python Dependencies
         run: |

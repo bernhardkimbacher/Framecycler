@@ -13,17 +13,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .drag_drop_overlay import DropTargetMixin
 from .fonts import ui_font
 
 
-class SourceListPanel(QWidget):
+class SourceListPanel(DropTargetMixin, QWidget):
     source_selected = Signal(int)
     source_removed = Signal(int)
     order_changed = Signal(list)
     hide_requested = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, main_window=None, parent=None):
         super().__init__(parent)
+        self._main_window = main_window
         self._updating = False
 
         layout = QVBoxLayout(self)
@@ -61,6 +63,7 @@ class SourceListPanel(QWidget):
 
         self.setMinimumWidth(180)
         self.setMaximumWidth(280)
+        self.setAcceptDrops(True)
 
     def set_sources(self, sources: list) -> None:
         self._updating = True

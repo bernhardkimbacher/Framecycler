@@ -1,35 +1,72 @@
 import os
 import json
 
+from .system_memory import clamp_cache_limits, get_platform_cache_limits
+
+
 class Settings:
     def __init__(self, config_dir=None):
         self.config_dir = config_dir or os.path.expanduser("~/.framecycler")
         self.config_path = os.path.join(self.config_dir, "settings.json")
-        
+
+        limits = get_platform_cache_limits()
+        default_decode = min(8.0, limits.decode_max_gb)
+        default_display = min(2.0, limits.display_max_gb)
+        if limits.coupled:
+            default_decode, default_display = clamp_cache_limits(default_decode, default_display, limits)
+
         # Default settings values
         self.reader_threads = max(1, min(32, os.cpu_count() or 4))
-        self.ram_cache_limit_gb = 8.0
+        self.decode_cache_limit_gb = default_decode
+        self.display_cache_limit_gb = default_display
         self.default_fps = 24.0
         self.ocio_config_path = ""
         self.loop_mode = "loop"  # loop, bounce, once
         self.timecode_mode = False  # True = Timecode mode, False = Frame mode
         self.recent_files = []
         self.resolution_scale = 1.0
-        
+
         self.load()
+
+    @property
+    def ram_cache_limit_gb(self) -> float:
+        """Deprecated alias for decode_cache_limit_gb."""
+        return self.decode_cache_limit_gb
+
+    @ram_cache_limit_gb.setter
+    def ram_cache_limit_gb(self, value: float) -> None:
+        self.decode_cache_limit_gb = value
 
     @staticmethod
     def clamp_resolution_scale(scale: float) -> float:
         return max(0.01, min(1.0, float(scale)))
 
+    def clamp_cache_limits_to_platform(self) -> None:
+        limits = get_platform_cache_limits()
+        decode, display = clamp_cache_limits(
+            self.decode_cache_limit_gb,
+            self.display_cache_limit_gb,
+            limits,
+        )
+        self.decode_cache_limit_gb = decode
+        self.display_cache_limit_gb = display
+
     def load(self):
         if not os.path.exists(self.config_path):
+            self.clamp_cache_limits_to_platform()
             return
         try:
             with open(self.config_path, "r") as f:
                 data = json.load(f)
                 self.reader_threads = data.get("reader_threads", self.reader_threads)
-                self.ram_cache_limit_gb = data.get("ram_cache_limit_gb", self.ram_cache_limit_gb)
+                self.decode_cache_limit_gb = data.get(
+                    "decode_cache_limit_gb",
+                    data.get("ram_cache_limit_gb", self.decode_cache_limit_gb),
+                )
+                self.display_cache_limit_gb = data.get(
+                    "display_cache_limit_gb",
+                    self.display_cache_limit_gb,
+                )
                 self.default_fps = data.get("default_fps", self.default_fps)
                 self.ocio_config_path = data.get("ocio_config_path", self.ocio_config_path)
                 self.loop_mode = data.get("loop_mode", self.loop_mode)
@@ -37,13 +74,15 @@ class Settings:
                 self.recent_files = data.get("recent_files", self.recent_files)
         except Exception as e:
             print(f"Error loading settings: {e}")
+        self.clamp_cache_limits_to_platform()
 
     def save(self):
         try:
             os.makedirs(self.config_dir, exist_ok=True)
             data = {
                 "reader_threads": self.reader_threads,
-                "ram_cache_limit_gb": self.ram_cache_limit_gb,
+                "decode_cache_limit_gb": self.decode_cache_limit_gb,
+                "display_cache_limit_gb": self.display_cache_limit_gb,
                 "default_fps": self.default_fps,
                 "ocio_config_path": self.ocio_config_path,
                 "loop_mode": self.loop_mode,

@@ -24,7 +24,7 @@ class TestVersion(unittest.TestCase):
 
     def test_about_text_includes_copyright_and_license(self):
         text = get_about_text()
-        self.assertIn(__version__, text)
+        self.assertIn(get_build_info()["version"], text)
         self.assertIn("Copyright", text)
         self.assertIn("PolyForm Small Business License", text)
         self.assertIn("fewer than 10 total individuals", text)

@@ -41,7 +41,7 @@ class TestCacheRgbaExpansion(unittest.TestCase):
 
     def test_cache_worker_stores_rgba_for_rgb_decoder(self):
         settings = Settings()
-        settings.ram_cache_limit_gb = 0.1
+        settings.decode_cache_limit_gb = 0.1
         engine = CacheEngine(_FakeDecoder(channels=3), settings)
         try:
             engine._read_and_cache_worker(0)
@@ -52,37 +52,6 @@ class TestCacheRgbaExpansion(unittest.TestCase):
             hit = engine.get_frame(0)
             self.assertIsNotNone(hit)
             self.assertEqual(hit["channels"], 4)
-            self.assertIsNotNone(hit.get("upload_buffer"))
-            self.assertFalse(hit["upload_buffer"].isEmpty())
-        finally:
-            engine.close()
-
-    def test_prepare_upload_buffer_matches_cache_image_bytes(self):
-        rgb = np.zeros((4, 4, 3), dtype=np.float16)
-        img, _channels = CacheEngine._prepare_cache_image(rgb)
-        upload_buffer = CacheEngine._prepare_upload_buffer(img)
-        self.assertFalse(upload_buffer.isEmpty())
-        self.assertEqual(upload_buffer.size(), img.nbytes)
-        packed = bytes(upload_buffer)
-        self.assertEqual(packed, img.tobytes())
-
-    def test_get_frame_repacks_upload_buffer_after_side_cache_eviction(self):
-        settings = Settings()
-        settings.ram_cache_limit_gb = 0.1
-        engine = CacheEngine(_FakeDecoder(channels=3), settings)
-        try:
-            engine._read_and_cache_worker(0)
-            self.assertTrue(engine.native_cache.has_frame(0))
-            self.assertIsNotNone(engine._get_upload_buffer(0))
-
-            with engine.lock:
-                del engine._upload_buffers[0]
-
-            hit = engine.get_frame(0)
-            self.assertIsNotNone(hit)
-            self.assertIsNotNone(hit.get("upload_buffer"))
-            self.assertFalse(hit["upload_buffer"].isEmpty())
-            self.assertIsNotNone(engine._get_upload_buffer(0))
         finally:
             engine.close()
 

@@ -1,11 +1,12 @@
 import unittest
 import os
 import shutil
+import json
 from src.framecycler.core.settings import Settings
+
 
 class TestSettings(unittest.TestCase):
     def setUp(self):
-        # Override config dir to use a temporary tests location
         self.test_dir = os.path.abspath("./tests_config_temp")
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
@@ -16,24 +17,44 @@ class TestSettings(unittest.TestCase):
             shutil.rmtree(self.settings.config_dir)
 
     def test_default_values(self):
-        self.assertEqual(self.settings.ram_cache_limit_gb, 8.0)
+        self.assertGreaterEqual(self.settings.decode_cache_limit_gb, 0.0)
+        self.assertGreaterEqual(self.settings.display_cache_limit_gb, 0.0)
         self.assertEqual(self.settings.default_fps, 24.0)
+        self.assertEqual(self.settings.ram_cache_limit_gb, self.settings.decode_cache_limit_gb)
 
     def test_save_and_load(self):
         self.settings.reader_threads = 12
-        self.settings.ram_cache_limit_gb = 16.0
+        self.settings.decode_cache_limit_gb = 16.0
+        self.settings.display_cache_limit_gb = 4.0
         self.settings.default_fps = 30.0
         self.settings.resolution_scale = 0.5
         self.settings.save()
 
-        # Load into new instance
         new_settings = Settings(config_dir=self.settings.config_dir)
         new_settings.load()
 
         self.assertEqual(new_settings.reader_threads, 12)
-        self.assertEqual(new_settings.ram_cache_limit_gb, 16.0)
+        self.assertEqual(new_settings.decode_cache_limit_gb, 16.0)
+        self.assertEqual(new_settings.display_cache_limit_gb, 4.0)
         self.assertEqual(new_settings.default_fps, 30.0)
         self.assertEqual(new_settings.resolution_scale, 1.0)
+
+    def test_legacy_ram_key_migration(self):
+        config_path = os.path.join(self.settings.config_dir, "settings.json")
+        os.makedirs(self.settings.config_dir, exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as handle:
+            json.dump({"ram_cache_limit_gb": 6.5}, handle)
+
+        migrated = Settings(config_dir=self.settings.config_dir)
+        self.assertEqual(migrated.decode_cache_limit_gb, 6.5)
+
+    def test_zero_cache_limits_allowed(self):
+        self.settings.decode_cache_limit_gb = 0.0
+        self.settings.display_cache_limit_gb = 0.0
+        self.settings.save()
+        reloaded = Settings(config_dir=self.settings.config_dir)
+        self.assertEqual(reloaded.decode_cache_limit_gb, 0.0)
+        self.assertEqual(reloaded.display_cache_limit_gb, 0.0)
 
     def test_resolution_scale_not_persisted(self):
         self.settings.resolution_scale = 0.5

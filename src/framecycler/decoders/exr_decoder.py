@@ -123,5 +123,8 @@ class EXRDecoder(BaseDecoder):
             "timecode": tc
         }
 
+    def get_file_path(self, frame_index: int) -> str | None:
+        return self.frame_map.get(frame_index)
+
     def close(self):
         pass

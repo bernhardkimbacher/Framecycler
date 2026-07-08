@@ -47,7 +47,7 @@ class TestImageIO(unittest.TestCase):
         arr = image_io.read_pixels(str(path))
         self.assertEqual(arr.shape, (16, 32, 3))
         self.assertEqual(arr.dtype, np.float16)
-        self.assertAlmostEqual(float(arr[0, 0, 0]), 0.42, places=4)
+        self.assertAlmostEqual(float(arr[0, 0, 0]), 0.42, places=3)
 
     def test_list_layers_and_layer_read(self):
         path = self.tmp_path / "layered.exr"

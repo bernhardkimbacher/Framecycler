@@ -73,6 +73,13 @@ class BaseDecoder(ABC):
         """
         pass
 
+    def get_file_path(self, frame_index: int) -> str | None:
+        """
+        Returns the absolute file path of the frame at the specified index,
+        or None if not a discrete image sequence file.
+        """
+        return None
+
     @abstractmethod
     def close(self):
         """

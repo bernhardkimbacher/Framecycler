@@ -25,11 +25,8 @@ class CacheEngine:
         self.resolution_scale = Settings.clamp_resolution_scale(resolution_scale)
 
         # Instantiate compiled C++ CacheManager (stores half-float pixels in pre-allocated RAM)
-        self.native_cache = framecycler_engine.CacheManager(self.settings.ram_cache_limit_gb)
+        self.native_cache = framecycler_engine.CacheManager(self.settings.decode_cache_limit_gb)
         self.lock = threading.Lock()
-
-        # Pre-baked GPU upload buffers (built on decode worker threads, bounded separately from RAM cache)
-        self._upload_buffers: Dict[int, QByteArray] = {}
 
         # Priority decode queue: (priority, sequence, frame_index) — lower priority value = sooner
         self._decode_heap: List[Tuple[int, int, int]] = []
@@ -44,7 +41,6 @@ class CacheEngine:
         # Playback states
         meta = self.decoder.get_metadata()
         meta_fps = meta.get("fps", 24.0)
-        self._max_upload_buffers = max(24, int(meta_fps))
         start = meta.get("start_frame", 0)
         end = meta.get("end_frame", meta["frame_count"] - 1)
 
@@ -64,15 +60,6 @@ class CacheEngine:
         if img.dtype == np.float16:
             return img
         return np.ascontiguousarray(img.astype(np.float16))
-
-    @staticmethod
-    def _prepare_upload_buffer(img: np.ndarray) -> QByteArray:
-        """Pack a cache-ready float16 image into a QRhi upload buffer on a worker thread."""
-        source = np.ascontiguousarray(img, dtype=np.float16)
-        upload_buffer = QByteArray(source.nbytes, 0)
-        dst = np.frombuffer(memoryview(upload_buffer), dtype=np.float16).reshape(source.shape)
-        np.copyto(dst, source)
-        return upload_buffer
 
     @staticmethod
     def _prepare_cache_image(img: np.ndarray) -> tuple[np.ndarray, int]:
@@ -101,22 +88,17 @@ class CacheEngine:
         self.trigger_prefetch()
 
     def get_frame(self, frame_index: int) -> Dict[str, Any] | None:
-        """
-        Returns a zero-copy NumPy view of the C++ cache buffer on hit.
-        On miss, schedules a high-priority background decode and returns None
-        without blocking the caller.
-        """
         if self.native_cache.has_frame(frame_index):
             data_view = self.native_cache.get_frame_data(frame_index)
             if data_view is not None:
                 cache_channels = data_view.shape[2] if data_view.ndim > 2 else 1
                 meta = self.decoder.get_metadata()
                 return {
-                    "data": data_view,
+                    "width": data_view.shape[1],
+                    "height": data_view.shape[0],
                     "channels": cache_channels,
                     "frame_index": frame_index,
                     "timecode": Timecode.frame_to_timecode(frame_index, meta["fps"], 0),
-                    "upload_buffer": self._ensure_upload_buffer(frame_index, data_view),
                 }
 
         self._schedule_frame(frame_index, priority=0)
@@ -125,56 +107,12 @@ class CacheEngine:
     def get_cached_frames(self) -> Set[int]:
         return set(self.native_cache.get_cached_frames())
 
-    def _get_upload_buffer(self, frame_index: int) -> QByteArray | None:
-        with self.lock:
-            return self._upload_buffers.get(frame_index)
-
-    def _ensure_upload_buffer(self, frame_index: int, data_view: np.ndarray) -> QByteArray:
-        upload_buffer = self._get_upload_buffer(frame_index)
-        if upload_buffer is not None and not upload_buffer.isEmpty():
-            return upload_buffer
-
-        upload_buffer = self._prepare_upload_buffer(np.asarray(data_view))
-        self._store_upload_buffer(frame_index, upload_buffer)
-        return upload_buffer
-
-    def _store_upload_buffer(self, frame_index: int, upload_buffer: QByteArray) -> None:
-        with self.lock:
-            self._upload_buffers[frame_index] = upload_buffer
-            while len(self._upload_buffers) > self._max_upload_buffers:
-                if not self._evict_furthest_upload_buffer(exclude={frame_index}):
-                    break
-
-    def _evict_furthest_upload_buffer(self, exclude: Set[int] | None = None) -> bool:
-        if not self._upload_buffers:
-            return False
-
-        candidates = [
-            frame_num
-            for frame_num in self._upload_buffers
-            if exclude is None or frame_num not in exclude
-        ]
-        if not candidates:
-            return False
-
-        playhead = self.current_playhead
-        frame_count = max(1, self.decoder.get_metadata().get("frame_count", 1))
-
-        def distance(frame_num: int) -> int:
-            direct_dist = abs(frame_num - playhead)
-            wrapped_dist = abs(frame_count - direct_dist)
-            return min(direct_dist, wrapped_dist)
-
-        furthest_frame = max(candidates, key=distance)
-        del self._upload_buffers[furthest_frame]
-        return True
-
     def set_resolution_scale(self, scale: float) -> None:
         self.resolution_scale = Settings.clamp_resolution_scale(scale)
 
     def update_settings(self):
         with self.lock:
-            self.native_cache.set_ram_limit(self.settings.ram_cache_limit_gb)
+            self.native_cache.set_ram_limit(self.settings.decode_cache_limit_gb)
 
             new_threads = self.settings.reader_threads
             if self.executor._max_workers != new_threads:
@@ -214,6 +152,9 @@ class CacheEngine:
             self._process_decode_queue()
 
     def _fill_cache_requests(self):
+        if self.settings.decode_cache_limit_gb <= 0.0:
+            return
+
         with self.lock:
             playhead = self.current_playhead
             direction = self.play_direction
@@ -258,14 +199,16 @@ class CacheEngine:
                     self.active_requests.discard(frame_index)
                 return
 
-            frame_data = self.decoder.read_frame(
-                frame_index, resolution_scale=self.resolution_scale
-            )
-            img, channels = self._prepare_cache_image(frame_data["data"])
-
-            self.native_cache.write_frame(frame_index, img.shape[1], img.shape[0], channels, img)
-            upload_buffer = self._prepare_upload_buffer(img)
-            self._store_upload_buffer(frame_index, upload_buffer)
+            get_path = getattr(self.decoder, "get_file_path", None)
+            path = get_path(frame_index) if get_path is not None else None
+            if path is not None:
+                self.native_cache.decode_and_cache_frame(frame_index, path, self.resolution_scale)
+            else:
+                frame_data = self.decoder.read_frame(
+                    frame_index, resolution_scale=self.resolution_scale
+                )
+                img, channels = self._prepare_cache_image(frame_data["data"])
+                self.native_cache.write_frame(frame_index, img.shape[1], img.shape[0], channels, img)
 
             with self.lock:
                 self.active_requests.discard(frame_index)
@@ -280,7 +223,6 @@ class CacheEngine:
         with self.lock:
             self.active_requests.clear()
             self._decode_heap.clear()
-            self._upload_buffers.clear()
 
     def close(self):
         self.running = False

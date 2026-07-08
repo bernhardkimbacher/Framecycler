@@ -5,6 +5,74 @@ from PySide6.QtWidgets import QWidget
 from .fonts import ui_font
 
 
+class DropTargetMixin:
+    """Shared file drag-and-drop forwarding to a MainWindow.
+
+    Any including widget must set ``self._main_window`` and call
+    ``self.setAcceptDrops(True)``. Widgets need this instead of relying on
+    propagation up to MainWindow because Qt's window-container widget (used
+    to embed the native QRhi/Metal render surface) does not support drag and
+    drop at all (documented Qt limitation), so a real, non-native Qt widget
+    layered in front of that surface (e.g. the transparent HUD overlay) must
+    claim the drop explicitly.
+    """
+
+    def _dnd_target_pos(self, event_pos):
+        main_window = getattr(self, "_main_window", None)
+        if main_window is None:
+            return event_pos
+        return main_window.mapFromGlobal(self.mapToGlobal(event_pos.toPoint()))
+
+    def dragEnterEvent(self, event):
+        main_window = getattr(self, "_main_window", None)
+        if main_window is None or not event.mimeData().hasUrls():
+            event.ignore()
+            return
+        main_window._drag_enter_count += 1
+        main_window._drag_overlay.setGeometry(main_window.rect())
+        main_window._drag_overlay.show()
+        main_window._drag_overlay.raise_()
+        event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        main_window = getattr(self, "_main_window", None)
+        if main_window is None or not event.mimeData().hasUrls():
+            event.ignore()
+            return
+        pos = self._dnd_target_pos(event.position())
+        zone = (
+            DragDropOverlay.ZONE_REPLACE
+            if pos.x() < main_window.width() * 0.5
+            else DragDropOverlay.ZONE_ADD
+        )
+        main_window._drag_drop_zone = zone
+        main_window._drag_overlay.set_active_zone(zone)
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        main_window = getattr(self, "_main_window", None)
+        if main_window is None:
+            event.ignore()
+            return
+        main_window._drag_enter_count = max(0, main_window._drag_enter_count - 1)
+        if main_window._drag_enter_count == 0:
+            main_window._drag_overlay.hide()
+        event.accept()
+
+    def dropEvent(self, event):
+        main_window = getattr(self, "_main_window", None)
+        if main_window is None or not event.mimeData().hasUrls():
+            event.ignore()
+            return
+        main_window._drag_enter_count = 0
+        main_window._drag_overlay.hide()
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
+        if paths:
+            replace = main_window._drag_drop_zone == DragDropOverlay.ZONE_REPLACE
+            main_window._add_media(paths, replace=replace)
+        event.acceptProposedAction()
+
+
 class DragDropOverlay(QWidget):
     zone_changed = Signal(str)
 

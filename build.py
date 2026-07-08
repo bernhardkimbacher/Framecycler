@@ -70,12 +70,34 @@ def build_extension():
     python_exe = sys.executable
     print(f"Targeting Python: {python_exe}")
     
+    # Resolve Qt SDK and PySide6 Qt lib paths
+    sys.path.insert(0, current_dir)
+    from scripts import qt_sdk
+    try:
+        qt_sdk_path_str = str(qt_sdk.ensure_qt_sdk(install=True))
+        pyside_qt_lib_path_str = str(qt_sdk.pyside6_qt_lib())
+        print(f"Using Qt SDK path: {qt_sdk_path_str}")
+        print(f"Using PySide6 Qt lib path: {pyside_qt_lib_path_str}")
+    except Exception as exc:
+        print(f"Warning: Failed to resolve Qt SDK or PySide6 Qt lib: {exc}")
+        qt_sdk_path_str = ""
+        pyside_qt_lib_path_str = ""
+    
+    vcpkg_toolchain = ""
+    vcpkg_root = os.environ.get("VCPKG_INSTALLATION_ROOT")
+    if vcpkg_root:
+        toolchain_path = os.path.join(vcpkg_root, "scripts", "buildsystems", "vcpkg.cmake")
+        if os.path.exists(toolchain_path):
+            vcpkg_toolchain = toolchain_path
+
     # On Windows, compile with NMake inside the vcvars64.bat shell
     if sys.platform == "win32" and vcvars_path:
+        toolchain_arg = f'-DCMAKE_TOOLCHAIN_FILE="{vcpkg_toolchain}"' if vcpkg_toolchain else ""
         configure_cmd = (
             f'"{vcvars_path}" amd64 && '
             f'"{cmake_path}" -G "NMake Makefiles" -S "{current_dir}" -B "{build_dir}" '
-            f'-DPython_EXECUTABLE="{python_exe}" -DCMAKE_BUILD_TYPE=Release'
+            f'-DPython_EXECUTABLE="{python_exe}" -DCMAKE_BUILD_TYPE=Release '
+            f'-DQT_SDK_PATH="{qt_sdk_path_str}" -DPYSIDE6_QT_LIB="{pyside_qt_lib_path_str}" {toolchain_arg}'
         )
         build_cmd = (
             f'"{vcvars_path}" amd64 && '
@@ -96,6 +118,10 @@ def build_extension():
             f"-DPython_EXECUTABLE={python_exe}",
             "-DCMAKE_BUILD_TYPE=Release",
         ]
+        if qt_sdk_path_str:
+            configure_cmd.append(f"-DQT_SDK_PATH={qt_sdk_path_str}")
+        if pyside_qt_lib_path_str:
+            configure_cmd.append(f"-DPYSIDE6_QT_LIB={pyside_qt_lib_path_str}")
         subprocess.run(configure_cmd, check=True)
         
         build_cmd = [

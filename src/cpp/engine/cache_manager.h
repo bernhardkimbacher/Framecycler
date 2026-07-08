@@ -22,6 +22,7 @@ public:
     bool has_frame(int frame_index);
 
     void write_frame(int frame_index, int width, int height, int channels, const uint16_t* pixel_data, size_t data_size);
+    bool decode_and_cache_frame(int frame_index, const std::string& file_path, float resolution_scale);
 
     const uint16_t* get_frame_data(int frame_index, int& width, int& height, int& channels);
 

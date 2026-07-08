@@ -3,7 +3,7 @@ import sys
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QFileDialog, QMenuBar, QMenu, QPushButton, 
                              QComboBox, QLabel, QDockWidget, QSlider, QInputDialog, QSplitter)
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QFont
 
 from ..core.settings import Settings
@@ -55,6 +55,12 @@ PRESET_RESOLUTION_SCALES = [
 ]
 
 class MainWindow(QMainWindow):
+    # Emitted from CacheEngine worker threads when a decoded frame becomes available.
+    # Qt automatically marshals this across threads to the GUI thread via a queued
+    # connection, since a plain QTimer.singleShot() called from a non-Qt worker
+    # thread never fires (that thread has no running event loop).
+    _frame_ready_signal = Signal(int, int)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Framecycler Reboot")
@@ -112,6 +118,10 @@ class MainWindow(QMainWindow):
         # Apply hotkeys
         self._setup_hotkeys()
         
+        # Cross-thread bridge: CacheEngine worker threads emit through this signal
+        # so Qt can safely queue the update onto the GUI thread.
+        self._frame_ready_signal.connect(self._on_cache_frame_ready)
+
         # Enable Drag and Drop
         self.setAcceptDrops(True)
         self._drag_overlay = DragDropOverlay(self)
@@ -123,6 +133,7 @@ class MainWindow(QMainWindow):
         # Create Central Viewport (QRhi surface + HUD overlay as siblings)
         self.viewport_panel = ViewportContainer(self.ocio_manager, self)
         self.viewport = self.viewport_panel.viewport
+        self._apply_renderer_cache_settings()
         self.viewport.wipe_changed.connect(self._on_wipe_moved)
         self.viewport.frame_scrubbed.connect(self._on_timeline_scrub)
         self.viewport.zoom_mode_changed.connect(self._sync_zoom_actions)
@@ -188,7 +199,7 @@ class MainWindow(QMainWindow):
             
         main_layout.addLayout(header_layout)
 
-        self.source_panel = SourceListPanel()
+        self.source_panel = SourceListPanel(self)
         self.source_panel.source_selected.connect(self._on_source_selected)
         self.source_panel.source_removed.connect(self._remove_source)
         self.source_panel.order_changed.connect(self._on_source_order_changed)
@@ -764,7 +775,7 @@ class MainWindow(QMainWindow):
                 source = self._load_source(path)
                 source_index = len(self.sources)
                 source.cache.add_frame_ready_callback(
-                    lambda frame_index, s=source_index: self._on_cache_frame_ready(s, frame_index)
+                    lambda frame_index, s=source_index: self._frame_ready_signal.emit(s, frame_index)
                 )
                 self.sources.append(source)
                 loaded += 1
@@ -790,8 +801,13 @@ class MainWindow(QMainWindow):
 
     def _after_sources_changed(self, *, reset_timeline: bool = False):
         total_frames = rebuild_timeline_offsets(self.sources)
+        self.viewport.native_renderer.clear_display_cache()
         self.viewport.set_source_count(len(self.sources))
         self.viewport.set_source_labels([source.display_name for source in self.sources])
+        
+        for index, source in enumerate(self.sources):
+            self.viewport.native_renderer.register_cache(index, source.cache.native_cache)
+            
         self.source_panel.set_sources(self.sources)
 
         if reset_timeline:
@@ -976,37 +992,38 @@ class MainWindow(QMainWindow):
             return
 
         sequence_index, _ = global_to_local(self.sources, frame)
+        needs_update = False
         for index, source in enumerate(self.sources):
             local_frame = local_frame_for_source(self.sources, index, frame)
             decoder_frame = decoder_frame_for_source(self.sources, index, frame)
             frame_dict = source.cache.get_frame(decoder_frame)
             if not frame_dict:
+                if index < len(self.viewport.frame_slots):
+                    self.viewport.frame_slots[index].cached = False
+                needs_update = True
                 continue
             tc = frame_dict["timecode"] or Timecode.frame_to_timecode(decoder_frame, source.fps, 0)
             self.viewport.set_frame(
                 index,
-                frame_dict["data"],
-                frame_dict.get("channels"),
+                frame_dict["width"],
+                frame_dict["height"],
+                frame_dict["channels"],
                 local_frame=local_frame,
+                decoder_frame=decoder_frame,
                 timecode=tc,
                 fps=source.fps,
-                upload_buffer=frame_dict.get("upload_buffer"),
                 pixel_aspect_ratio=source.pixel_aspect_ratio,
                 is_primary=(index == sequence_index),
+                upload_token=frame_dict.get("upload_token", frame_dict["frame_index"]),
             )
+        if needs_update:
+            self.viewport.update()
 
     def _on_cache_frame_ready(self, source_index: int, frame_index: int):
+        # Runs on the GUI thread: this slot is only ever invoked via
+        # _frame_ready_signal, which Qt queues across threads automatically.
         if not self.sources:
             return
-        decoder_at_playhead = decoder_frame_for_source(self.sources, source_index, self.current_frame)
-        if frame_index != decoder_at_playhead:
-            return
-        QTimer.singleShot(
-            0,
-            lambda s=source_index, f=frame_index: self._apply_cache_frame_on_main_thread(s, f),
-        )
-
-    def _apply_cache_frame_on_main_thread(self, source_index: int, frame_index: int):
         decoder_at_playhead = decoder_frame_for_source(self.sources, source_index, self.current_frame)
         if frame_index != decoder_at_playhead:
             return
@@ -1403,6 +1420,12 @@ class MainWindow(QMainWindow):
                 btn.setChecked(val == active_mask)
 
     # Settings and helper dialogs
+    def _apply_renderer_cache_settings(self):
+        renderer = self.viewport.native_renderer
+        renderer.set_display_cache_limit_gb(self.settings.display_cache_limit_gb)
+        if self.settings.display_cache_limit_gb <= 0.0:
+            renderer.clear_display_cache()
+
     def _open_settings_dialog(self):
         dialog = SettingsDialog(self.settings, self)
         if dialog.exec():
@@ -1411,6 +1434,7 @@ class MainWindow(QMainWindow):
             # Update cache worker thread sizes
             for source in self.sources:
                 source.cache.update_settings()
+            self._apply_renderer_cache_settings()
             # Reload OCIO if path changed
             self.ocio_manager.load_config(self.settings.ocio_config_path)
             self.viewport.update_ocio_pipeline()

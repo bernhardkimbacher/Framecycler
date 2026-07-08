@@ -1,13 +1,20 @@
+import sys
 import numpy as np
 from dataclasses import dataclass
-from PySide6.QtWidgets import QRhiWidget, QWidget
-from PySide6.QtCore import Qt, QPoint, Signal, QTimer, QByteArray
-from PySide6.QtGui import QPainter, QColor, QFont, QPen, QRhiDepthStencilClearValue
+import shiboken6
+from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtCore import Qt, QPoint, Signal, QTimer, QByteArray, QEvent
+from PySide6.QtGui import QPainter, QColor, QFont, QPen, QWindow, QExposeEvent, QResizeEvent
 from ..color.ocio_manager import OCIOManager
 from ..core.tile_layout import TileLayout, compute_tile_layouts
-from ..render.rhi_viewport_renderer import FrameRenderSlot, RhiViewportRenderer, TileDrawParams
+from ..core.media_source import decoder_frame_for_source, local_playback_range
 from .fonts import mono_font, ui_font
+from .drag_drop_overlay import DragDropOverlay, DropTargetMixin
 
+try:
+    from .. import framecycler_engine
+except ImportError:
+    import framecycler_engine
 
 COMPARE_SEQUENCE = 0
 COMPARE_WIPE = 1
@@ -16,23 +23,64 @@ COMPARE_TILE = 3
 
 
 @dataclass
+class TileDrawParams:
+    source_index: int
+    scale_x: float
+    scale_y: float
+    offset_x: float
+    offset_y: float
+
+
+class RhiViewportWindow(QWindow):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        if sys.platform == "darwin":
+            self.setSurfaceType(QWindow.MetalSurface)
+        elif sys.platform == "win32":
+            self.setSurfaceType(QWindow.OpenGLSurface)
+        else:
+            self.setSurfaceType(QWindow.VulkanSurface)
+        self._renderer = None
+
+    def set_renderer(self, renderer):
+        self._renderer = renderer
+
+    def exposeEvent(self, event: QExposeEvent):
+        if self._renderer:
+            exposed = self.isExposed()
+            self._renderer.set_exposed(exposed)
+            if exposed:
+                self._renderer.sync_and_render()
+            self.requestUpdate()
+
+    def resizeEvent(self, event: QResizeEvent):
+        if self._renderer:
+            sz = event.size()
+            self._renderer.set_pending_size(sz.width(), sz.height())
+
+
+@dataclass
 class ViewportFrameSlot:
-    data: np.ndarray | None = None
-    upload_buffer: QByteArray | None = None
-    upload_token: int = 0
     width: int = 0
     height: int = 0
     channels: int = 4
     pixel_aspect_ratio: float = 1.0
     timecode: str = "01:00:00:00"
     local_frame: int = 0
+    decoder_frame: int = 0
+    upload_token: int = 0
+    cached: bool = False
 
 
 class ViewportHudOverlay(QWidget):
     """Transparent overlay sibling for HUD compositing.
 
-    Must not be a child of QRhiWidget — that combination segfaults on macOS when
-    the RHI backing texture is composited. Parent should be ViewportContainer.
+    Must not be a child of QWindow container — that combination segfaults on macOS.
+    Parent should be ViewportContainer.
+
+    Uses WA_TransparentForMouseEvents so viewport mouse interactions reach the
+    embedded render surface via the Viewport event filter. File drag-and-drop is
+    handled by ViewportContainer instead (this widget must stay mouse-transparent).
     """
 
     def __init__(self, viewport: "Viewport", parent: QWidget):
@@ -55,11 +103,13 @@ class ViewportHudOverlay(QWidget):
         painter.end()
 
 
-class ViewportContainer(QWidget):
+class ViewportContainer(DropTargetMixin, QWidget):
     """Hosts the QRhi viewport and a transparent HUD overlay as siblings."""
 
     def __init__(self, ocio_manager: OCIOManager, main_window=None, parent=None):
         super().__init__(parent)
+        self._main_window = main_window
+        self.setAcceptDrops(True)
         self.viewport = Viewport(ocio_manager, main_window)
         self.viewport.setParent(self)
         self._hud_overlay = ViewportHudOverlay(self.viewport, self)
@@ -88,7 +138,7 @@ class ViewportContainer(QWidget):
         self._hud_overlay.update()
 
 
-class Viewport(QRhiWidget):
+class Viewport(QWidget):
     wipe_changed = Signal(float)
     frame_scrubbed = Signal(int)
     zoom_mode_changed = Signal(object)
@@ -98,7 +148,24 @@ class Viewport(QRhiWidget):
         self.ocio_manager = ocio_manager
         self.main_window = parent
 
-        self.native_renderer = RhiViewportRenderer()
+        # Setup native window and C++ renderer
+        self.viewport_window = RhiViewportWindow()
+        self.native_renderer = framecycler_engine.RhiRenderer()
+        
+        ptr = shiboken6.getCppPointer(self.viewport_window)[0]
+        self.native_renderer.initialize(int(ptr))
+        self.viewport_window.set_renderer(self.native_renderer)
+
+        # Setup container layout
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.container = QWidget.createWindowContainer(self.viewport_window, self)
+        layout.addWidget(self.container)
+
+        # Mirror inputs via event filter; enable drops so DragEnter/Drop reach the filter
+        self.container.setAcceptDrops(True)
+        self.container.installEventFilter(self)
+        self.setFocusProxy(self.container)
 
         self.frame_slots: list[ViewportFrameSlot] = []
         self.sequence_index = 0
@@ -137,42 +204,105 @@ class Viewport(QRhiWidget):
         self.resolution_str = "0x0"
         self.exr_layer_str = "RGB"
 
-        self._renderer_initialized = False
-        self._last_rhi = None
+        self._renderer_initialized = True
         self._ocio_pipeline_ready = False
+
+    def eventFilter(self, obj, event):
+        if obj == self.container:
+            et = event.type()
+            if et in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease,
+                      QEvent.MouseMove, QEvent.Wheel, QEvent.KeyPress, QEvent.KeyRelease):
+                if et == QEvent.MouseButtonPress:
+                    self.mousePressEvent(event)
+                elif et == QEvent.MouseButtonRelease:
+                    self.mouseReleaseEvent(event)
+                elif et == QEvent.MouseMove:
+                    self.mouseMoveEvent(event)
+                elif et == QEvent.Wheel:
+                    self.wheelEvent(event)
+                elif et == QEvent.KeyPress:
+                    self.keyPressEvent(event)
+                elif et == QEvent.KeyRelease:
+                    self.keyReleaseEvent(event)
+            elif et in (QEvent.DragEnter, QEvent.DragMove, QEvent.DragLeave, QEvent.Drop):
+                target = self.main_window if self.main_window is not None else self.parent()
+                if target is None:
+                    return super().eventFilter(obj, event)
+                if et == QEvent.DragEnter and event.mimeData().hasUrls():
+                    target._drag_enter_count += 1
+                    target._drag_overlay.setGeometry(target.rect())
+                    target._drag_overlay.show()
+                    target._drag_overlay.raise_()
+                    event.acceptProposedAction()
+                    return True
+                if et == QEvent.DragMove and event.mimeData().hasUrls():
+                    pos = target.mapFromGlobal(
+                        self.container.mapToGlobal(event.position().toPoint())
+                    )
+                    zone = (
+                        DragDropOverlay.ZONE_REPLACE
+                        if pos.x() < target.width() * 0.5
+                        else DragDropOverlay.ZONE_ADD
+                    )
+                    target._drag_drop_zone = zone
+                    target._drag_overlay.set_active_zone(zone)
+                    event.acceptProposedAction()
+                    return True
+                if et == QEvent.DragLeave:
+                    target._drag_enter_count = max(0, target._drag_enter_count - 1)
+                    if target._drag_enter_count == 0:
+                        target._drag_overlay.hide()
+                    event.accept()
+                    return True
+                if et == QEvent.Drop:
+                    target._drag_enter_count = 0
+                    target._drag_overlay.hide()
+                    paths = []
+                    for url in event.mimeData().urls():
+                        path = url.toLocalFile()
+                        if path:
+                            paths.append(path)
+                    if paths:
+                        replace = target._drag_drop_zone == DragDropOverlay.ZONE_REPLACE
+                        target._add_media(paths, replace=replace)
+                    event.acceptProposedAction()
+                    return True
+        return super().eventFilter(obj, event)
 
     def set_source_count(self, count: int) -> None:
         while len(self.frame_slots) < count:
             self.frame_slots.append(ViewportFrameSlot())
         while len(self.frame_slots) > count:
             self.frame_slots.pop()
-        self.native_renderer.ensure_texture_pool(count)
 
     def set_frame(
         self,
         index: int,
-        data: np.ndarray | None,
-        channels: list | None = None,
+        width: int,
+        height: int,
+        channels: int,
         *,
         local_frame: int = 0,
+        decoder_frame: int | None = None,
         timecode: str = "01:00:00:00",
         fps: float | None = None,
-        upload_buffer: QByteArray | None = None,
         pixel_aspect_ratio: float | None = None,
         is_primary: bool = False,
+        upload_token: int = 0,
+        cached: bool = True,
     ):
         self.set_source_count(max(len(self.frame_slots), index + 1))
         slot = self.frame_slots[index]
-        slot.data = data
-        slot.upload_buffer = upload_buffer
-        if data is not None:
-            slot.upload_token += 1
-            slot.height, slot.width = data.shape[:2]
-            slot.channels = data.shape[2] if len(data.shape) > 2 else 1
+        slot.width = width
+        slot.height = height
+        slot.channels = channels
         if pixel_aspect_ratio is not None:
             slot.pixel_aspect_ratio = pixel_aspect_ratio
         slot.local_frame = local_frame
+        slot.decoder_frame = decoder_frame if decoder_frame is not None else upload_token
         slot.timecode = timecode
+        slot.upload_token = upload_token
+        slot.cached = cached
 
         if is_primary:
             self.sequence_index = index
@@ -180,9 +310,8 @@ class Viewport(QRhiWidget):
                 self.fps = fps
             self.current_frame = local_frame
             self.current_timecode = timecode
-            if data is not None:
-                self.resolution_str = f"{slot.width}x{slot.height}"
-                self.pixel_aspect_ratio = slot.pixel_aspect_ratio
+            self.resolution_str = f"{slot.width}x{slot.height}"
+            self.pixel_aspect_ratio = slot.pixel_aspect_ratio
             self._apply_zoom_mode()
 
         self.update()
@@ -307,64 +436,25 @@ class Viewport(QRhiWidget):
         )
         for index, lut in enumerate(bundle.textures_3d):
             lut_data = np.array(lut["data"], dtype=np.float32)
-            self.native_renderer.upload_ocio_lut_3d(index, lut["size"], lut_data)
+            self.native_renderer.upload_ocio_lut_3d(index, lut["size"], lut_data.flatten().tolist())
         self._sync_grading_uniforms()
         self._ocio_pipeline_ready = True
+        self.native_renderer.request_redraw()
         self.update()
 
-    def _schedule_ocio_pipeline_update(self):
-        if self.rhi() is None:
-            return
-        self.update_ocio_pipeline()
-
-    def initialize(self, cb):
-        if self.rhi() is None:
-            return
-
-        rhi = self.rhi()
-        rhi_changed = self._last_rhi is not rhi
-        self._last_rhi = rhi
-
-        if rhi_changed:
-            backend_name = rhi.backendName() if hasattr(rhi, "backendName") else str(rhi.backend())
-            print(f"Viewport: QRhi backend = {backend_name}")
-
-        self.native_renderer.initialize(rhi)
-        self._renderer_initialized = True
-
-        if rhi_changed:
-            self._ocio_pipeline_ready = False
+    def showEvent(self, event):
+        super().showEvent(event)
         if not self._ocio_pipeline_ready:
-            QTimer.singleShot(0, self._schedule_ocio_pipeline_update)
-
-    def _build_render_slots(self) -> list[FrameRenderSlot]:
-        slots: list[FrameRenderSlot] = []
-        for frame_slot in self.frame_slots:
-            data = None
-            if frame_slot.data is not None:
-                data = (
-                    frame_slot.data
-                    if frame_slot.data.flags["C_CONTIGUOUS"]
-                    else np.ascontiguousarray(frame_slot.data)
-                )
-            slots.append(
-                FrameRenderSlot(
-                    data=data,
-                    width=frame_slot.width,
-                    height=frame_slot.height,
-                    channels=frame_slot.channels,
-                    upload_token=frame_slot.upload_token,
-                    upload_buffer=frame_slot.upload_buffer,
-                    frame_index=frame_slot.local_frame,
-                )
-            )
-        return slots
+            QTimer.singleShot(0, self.update_ocio_pipeline)
+        elif self.viewport_window.isExposed():
+            self.native_renderer.set_exposed(True)
+            self.native_renderer.sync_and_render()
 
     def _build_tile_draws(self) -> list[TileDrawParams]:
         sizes = []
         aspects = []
         for slot in self.frame_slots:
-            if slot.data is None or slot.width <= 0 or slot.height <= 0:
+            if not slot.cached or slot.width <= 0 or slot.height <= 0:
                 sizes.append((0, 0))
                 aspects.append(1.0)
             else:
@@ -385,47 +475,78 @@ class Viewport(QRhiWidget):
 
     def _has_visible_frame(self) -> bool:
         if self.compare_mode == COMPARE_TILE:
-            return any(slot.data is not None for slot in self.frame_slots)
+            return any(slot.cached for slot in self.frame_slots)
         primary = self._primary_slot()
-        return primary is not None and primary.data is not None
+        return primary is not None and primary.cached
 
-    def render(self, cb):
-        if self.rhi() is None:
+    def _sync_display_cache_playheads(self) -> None:
+        main_window = self.main_window
+        if main_window is None or not main_window.sources:
             return
-
-        if not self._has_visible_frame():
-            batch = self.rhi().nextResourceUpdateBatch()
-            cb.beginPass(
-                self.renderTarget(),
-                QColor(0, 0, 0),
-                QRhiDepthStencilClearValue(1.0, 0),
-                batch,
+        direction = main_window.playback_direction if main_window.playing else 0
+        for index, source in enumerate(main_window.sources):
+            if index < len(self.frame_slots) and self.frame_slots[index].cached:
+                decoder_frame = self.frame_slots[index].decoder_frame
+            else:
+                decoder_frame = decoder_frame_for_source(
+                    main_window.sources, index, main_window.current_frame
+                )
+            local_in, local_out = local_playback_range(
+                main_window.sources, index, main_window.in_point, main_window.out_point
             )
-            cb.endPass()
-            return
+            self.native_renderer.set_source_playhead(
+                index, decoder_frame, direction, local_in, local_out
+            )
 
-        scale_x, scale_y = self._fit_scales()
-        widget_w, widget_h = self.width(), self.height()
-        pan_x = (self.pan_offset.x() / widget_w) * 2.0 if widget_w > 0 else 0.0
-        pan_y = -(self.pan_offset.y() / widget_h) * 2.0 if widget_h > 0 else 0.0
-        zoom = 1.0 if self.compare_mode == COMPARE_TILE else self.zoom
+    def update(self, *args, **kwargs):
+        if hasattr(self, "native_renderer") and self.native_renderer is not None:
+            self._sync_display_cache_playheads()
+            params = framecycler_engine.RenderParams()
+            params.compare_mode = self.compare_mode
+            params.sequence_index = self.sequence_index
+            params.wipe_pos = self.wipe_pos
+            params.channel_mask = self.channel_mask
 
-        tile_draws = self._build_tile_draws() if self.compare_mode == COMPARE_TILE else None
+            scale_x, scale_y = self._fit_scales()
+            widget_w, widget_h = self.width(), self.height()
+            pan_x = (self.pan_offset.x() / widget_w) * 2.0 if widget_w > 0 else 0.0
+            pan_y = -(self.pan_offset.y() / widget_h) * 2.0 if widget_h > 0 else 0.0
+            zoom = 1.0 if self.compare_mode == COMPARE_TILE else self.zoom
 
-        self.native_renderer.render(
-            cb,
-            self.renderTarget(),
-            self._build_render_slots(),
-            self.compare_mode,
-            self.sequence_index,
-            self.wipe_pos,
-            self.channel_mask,
-            scale_x * zoom,
-            scale_y * zoom,
-            pan_x,
-            pan_y,
-            tile_draws=tile_draws,
-        )
+            params.scale_x = scale_x * zoom
+            params.scale_y = scale_y * zoom
+            params.pan_x = pan_x
+            params.pan_y = pan_y
+
+            # Build slots
+            slots = []
+            for source_idx, slot in enumerate(self.frame_slots):
+                if slot.cached:
+                    spec = framecycler_engine.FrameSlotSpec()
+                    spec.source_index = source_idx
+                    spec.frame_index = slot.decoder_frame
+                    spec.upload_token = slot.upload_token
+                    slots.append(spec)
+            params.slots = slots
+
+            # Build tiles
+            if self.compare_mode == COMPARE_TILE:
+                tiles = []
+                for tile_draw in self._build_tile_draws():
+                    t = framecycler_engine.TileSpec()
+                    t.source_index = tile_draw.source_index
+                    t.scale_x = tile_draw.scale_x
+                    t.scale_y = tile_draw.scale_y
+                    t.offset_x = tile_draw.offset_x
+                    t.offset_y = tile_draw.offset_y
+                    tiles.append(t)
+                params.tiles = tiles
+
+            self.native_renderer.update_render_params(params)
+            self.native_renderer.sync_and_render()
+            self.viewport_window.requestUpdate()
+
+        super().update(*args, **kwargs)
 
     def _wipe_label(self) -> str:
         if len(self.source_labels) >= 2:
@@ -580,9 +701,9 @@ class Viewport(QRhiWidget):
         self.update()
 
     def cleanup(self):
-        self.native_renderer.cleanup()
+        if hasattr(self, "native_renderer") and self.native_renderer is not None:
+            self.native_renderer.shutdown()
         self._renderer_initialized = False
-        self._last_rhi = None
         self._ocio_pipeline_ready = False
 
     def clear_frames(self):
@@ -590,7 +711,6 @@ class Viewport(QRhiWidget):
         self.source_labels.clear()
         self.sequence_index = 0
         self.pixel_aspect_ratio = 1.0
-        self.native_renderer.reset_frame_textures()
         self.update()
 
     def _draw_adjustment_overlay(self, painter: QPainter):
