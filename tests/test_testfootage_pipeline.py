@@ -115,6 +115,36 @@ class TestTestFootagePipeline(unittest.TestCase):
         self.assertTrue(accepted)
         self.assertEqual(len(window.sources), 1)
 
+    def test_drop_on_viewport_window_loads_testfootage(self):
+        window = MainWindow()
+        self.addCleanup(window.close)
+        self.app.processEvents()
+
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(TEST_EXR)])
+        viewport_window = window.viewport.viewport_window
+        enter = QDragEnterEvent(
+            QPointF(200, 200).toPoint(),
+            Qt.CopyAction,
+            mime,
+            Qt.LeftButton,
+            Qt.NoModifier,
+        )
+        self.app.sendEvent(viewport_window, enter)
+        drop = QDropEvent(
+            QPointF(200, 200),
+            Qt.CopyAction,
+            mime,
+            Qt.LeftButton,
+            Qt.NoModifier,
+        )
+        accepted = self.app.sendEvent(viewport_window, drop)
+        self.app.processEvents()
+
+        self.assertTrue(enter.isAccepted())
+        self.assertTrue(accepted)
+        self.assertEqual(len(window.sources), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

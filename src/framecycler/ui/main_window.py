@@ -33,7 +33,6 @@ from .settings_dialog import SettingsDialog
 from .widgets import WideComboBox, add_menu_section
 from .fonts import ui_font
 from .source_list_panel import SourceListPanel
-from .drag_drop_overlay import DragDropOverlay
 
 PRESET_FRAME_RATES = [
     ("23.976", 23.976),
@@ -121,13 +120,6 @@ class MainWindow(QMainWindow):
         # Cross-thread bridge: CacheEngine worker threads emit through this signal
         # so Qt can safely queue the update onto the GUI thread.
         self._frame_ready_signal.connect(self._on_cache_frame_ready)
-
-        # Enable Drag and Drop
-        self.setAcceptDrops(True)
-        self._drag_overlay = DragDropOverlay(self)
-        self._drag_overlay.setGeometry(self.rect())
-        self._drag_drop_zone = DragDropOverlay.ZONE_REPLACE
-        self._drag_enter_count = 0
 
     def _init_ui(self):
         # Create Central Viewport (QRhi surface + HUD overlay as siblings)
@@ -719,9 +711,6 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "_drag_overlay"):
-            self._drag_overlay.setGeometry(self.rect())
-            self._drag_overlay.raise_()
 
     def _open_file_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1444,45 +1433,6 @@ class MainWindow(QMainWindow):
     def _update_ui_states(self):
         self._populate_look_combo()
         self._build_ocio_submenu()
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            self._drag_enter_count += 1
-            self._drag_overlay.setGeometry(self.rect())
-            self._drag_overlay.show()
-            self._drag_overlay.raise_()
-            event.acceptProposedAction()
-
-    def dragMoveEvent(self, event):
-        if not event.mimeData().hasUrls():
-            return
-        zone = (
-            DragDropOverlay.ZONE_REPLACE
-            if event.position().x() < self.width() * 0.5
-            else DragDropOverlay.ZONE_ADD
-        )
-        self._drag_drop_zone = zone
-        self._drag_overlay.set_active_zone(zone)
-        event.acceptProposedAction()
-
-    def dragLeaveEvent(self, event):
-        self._drag_enter_count = max(0, self._drag_enter_count - 1)
-        if self._drag_enter_count == 0:
-            self._drag_overlay.hide()
-        event.accept()
-
-    def dropEvent(self, event):
-        self._drag_enter_count = 0
-        self._drag_overlay.hide()
-        paths = []
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if os.path.exists(path):
-                paths.append(path)
-        if paths:
-            replace = self._drag_drop_zone == DragDropOverlay.ZONE_REPLACE
-            self._add_media(paths, replace=replace)
-        event.acceptProposedAction()
 
     def closeEvent(self, event):
         self.timer.stop()

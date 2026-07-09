@@ -47,6 +47,9 @@ class TestViewportQrhiIntegration(unittest.TestCase):
             def update_render_params(self, params):
                 captured["params"] = params
 
+            def sync_and_render(self):
+                pass
+
             def clear_grading_uniforms(self):
                 pass
 

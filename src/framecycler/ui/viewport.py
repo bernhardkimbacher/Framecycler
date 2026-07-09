@@ -3,13 +3,13 @@ import numpy as np
 from dataclasses import dataclass
 import shiboken6
 from PySide6.QtWidgets import QWidget, QVBoxLayout
-from PySide6.QtCore import Qt, QPoint, Signal, QTimer, QByteArray, QEvent
+from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QByteArray, QEvent
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QWindow, QExposeEvent, QResizeEvent
 from ..color.ocio_manager import OCIOManager
 from ..core.tile_layout import TileLayout, compute_tile_layouts
 from ..core.media_source import decoder_frame_for_source, local_playback_range
 from .fonts import mono_font, ui_font
-from .drag_drop_overlay import DragDropOverlay, DropTargetMixin
+from .drag_drop_overlay import DragDropOverlay
 
 try:
     from .. import framecycler_engine
@@ -41,6 +41,33 @@ class RhiViewportWindow(QWindow):
         else:
             self.setSurfaceType(QWindow.VulkanSurface)
         self._renderer = None
+        self.viewport_widget = None
+
+    def mousePressEvent(self, event):
+        self.setMouseGrabEnabled(True)
+        if self.viewport_widget:
+            self.viewport_widget.mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.viewport_widget:
+            self.viewport_widget.mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.setMouseGrabEnabled(False)
+        if self.viewport_widget:
+            self.viewport_widget.mouseReleaseEvent(event)
+
+    def wheelEvent(self, event):
+        if self.viewport_widget:
+            self.viewport_widget.wheelEvent(event)
+
+    def keyPressEvent(self, event):
+        if self.viewport_widget:
+            self.viewport_widget.keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if self.viewport_widget:
+            self.viewport_widget.keyReleaseEvent(event)
 
     def set_renderer(self, renderer):
         self._renderer = renderer
@@ -79,8 +106,9 @@ class ViewportHudOverlay(QWidget):
     Parent should be ViewportContainer.
 
     Uses WA_TransparentForMouseEvents so viewport mouse interactions reach the
-    embedded render surface via the Viewport event filter. File drag-and-drop is
-    handled by ViewportContainer instead (this widget must stay mouse-transparent).
+    embedded render surface. File drag-and-drop over the native render surface
+    is handled via an event filter on RhiViewportWindow (QWindow) plus a
+    floating drag overlay window (this widget must stay mouse-transparent).
     """
 
     def __init__(self, viewport: "Viewport", parent: QWidget):
@@ -103,16 +131,18 @@ class ViewportHudOverlay(QWidget):
         painter.end()
 
 
-class ViewportContainer(DropTargetMixin, QWidget):
-    """Hosts the QRhi viewport and a transparent HUD overlay as siblings."""
+class ViewportContainer(QWidget):
+    """Hosts the QRhi viewport and transparent HUD overlay; drag overlay is a floating window."""
 
     def __init__(self, ocio_manager: OCIOManager, main_window=None, parent=None):
         super().__init__(parent)
         self._main_window = main_window
+        self._drag_enter_count = 0
+        self._drag_drop_zone = DragDropOverlay.ZONE_REPLACE
         self.setAcceptDrops(True)
-        self.viewport = Viewport(ocio_manager, main_window)
-        self.viewport.setParent(self)
+        self.viewport = Viewport(ocio_manager, main_window, self)
         self._hud_overlay = ViewportHudOverlay(self.viewport, self)
+        self._drag_overlay = DragDropOverlay(main_window, main_window=main_window, floating=True)
         self._hud_overlay.raise_()
         self._sync_geometry()
 
@@ -128,6 +158,69 @@ class ViewportContainer(DropTargetMixin, QWidget):
         rect = self.rect()
         self.viewport.setGeometry(rect)
         self._hud_overlay.setGeometry(rect)
+        self._position_drag_overlay()
+
+    def _position_drag_overlay(self):
+        if self._main_window is None:
+            return
+        top_left = self.mapToGlobal(QPoint(0, 0))
+        self._drag_overlay.setGeometry(QRect(top_left, self.size()))
+        self._drag_overlay.set_split_x(None)
+
+    def _show_drag_overlay(self) -> None:
+        if self._main_window is None:
+            return
+        self._position_drag_overlay()
+        self._drag_overlay.show()
+        self._drag_overlay.raise_()
+
+    def _hide_drag_overlay(self) -> None:
+        self._drag_overlay.hide()
+
+    def _update_drag_zone(self, viewer_pos: QPoint) -> None:
+        zone = (
+            DragDropOverlay.ZONE_REPLACE
+            if viewer_pos.x() < self.width() * 0.5
+            else DragDropOverlay.ZONE_ADD
+        )
+        self._drag_drop_zone = zone
+        self._drag_overlay.set_active_zone(zone)
+
+    def dragEnterEvent(self, event):
+        if self._main_window is None or not event.mimeData().hasUrls():
+            event.ignore()
+            return
+        self._drag_enter_count += 1
+        self._show_drag_overlay()
+        event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if self._main_window is None or not event.mimeData().hasUrls():
+            event.ignore()
+            return
+        self._update_drag_zone(event.position().toPoint())
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        if self._main_window is None:
+            event.ignore()
+            return
+        self._drag_enter_count = max(0, self._drag_enter_count - 1)
+        if self._drag_enter_count == 0:
+            self._hide_drag_overlay()
+        event.accept()
+
+    def dropEvent(self, event):
+        if self._main_window is None or not event.mimeData().hasUrls():
+            event.ignore()
+            return
+        self._drag_enter_count = 0
+        self._hide_drag_overlay()
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
+        if paths:
+            replace = self._drag_drop_zone == DragDropOverlay.ZONE_REPLACE
+            self._main_window._add_media(paths, replace=replace)
+        event.acceptProposedAction()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -143,13 +236,15 @@ class Viewport(QWidget):
     frame_scrubbed = Signal(int)
     zoom_mode_changed = Signal(object)
 
-    def __init__(self, ocio_manager: OCIOManager, parent=None):
-        super().__init__(parent)
+    def __init__(self, ocio_manager: OCIOManager, parent=None, container=None):
+        super().__init__(container)
         self.ocio_manager = ocio_manager
         self.main_window = parent
+        self.viewport_container = container
 
         # Setup native window and C++ renderer
         self.viewport_window = RhiViewportWindow()
+        self.viewport_window.viewport_widget = self
         self.native_renderer = framecycler_engine.RhiRenderer()
         
         ptr = shiboken6.getCppPointer(self.viewport_window)[0]
@@ -162,9 +257,7 @@ class Viewport(QWidget):
         self.container = QWidget.createWindowContainer(self.viewport_window, self)
         layout.addWidget(self.container)
 
-        # Mirror inputs via event filter; enable drops so DragEnter/Drop reach the filter
-        self.container.setAcceptDrops(True)
-        self.container.installEventFilter(self)
+        self.viewport_window.installEventFilter(self)
         self.setFocusProxy(self.container)
 
         self.frame_slots: list[ViewportFrameSlot] = []
@@ -208,66 +301,45 @@ class Viewport(QWidget):
         self._ocio_pipeline_ready = False
 
     def eventFilter(self, obj, event):
-        if obj == self.container:
+        if obj is self.viewport_window:
             et = event.type()
-            if et in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease,
-                      QEvent.MouseMove, QEvent.Wheel, QEvent.KeyPress, QEvent.KeyRelease):
-                if et == QEvent.MouseButtonPress:
-                    self.mousePressEvent(event)
-                elif et == QEvent.MouseButtonRelease:
-                    self.mouseReleaseEvent(event)
-                elif et == QEvent.MouseMove:
-                    self.mouseMoveEvent(event)
-                elif et == QEvent.Wheel:
-                    self.wheelEvent(event)
-                elif et == QEvent.KeyPress:
-                    self.keyPressEvent(event)
-                elif et == QEvent.KeyRelease:
-                    self.keyReleaseEvent(event)
-            elif et in (QEvent.DragEnter, QEvent.DragMove, QEvent.DragLeave, QEvent.Drop):
-                target = self.main_window if self.main_window is not None else self.parent()
-                if target is None:
-                    return super().eventFilter(obj, event)
-                if et == QEvent.DragEnter and event.mimeData().hasUrls():
-                    target._drag_enter_count += 1
-                    target._drag_overlay.setGeometry(target.rect())
-                    target._drag_overlay.show()
-                    target._drag_overlay.raise_()
-                    event.acceptProposedAction()
-                    return True
-                if et == QEvent.DragMove and event.mimeData().hasUrls():
-                    pos = target.mapFromGlobal(
-                        self.container.mapToGlobal(event.position().toPoint())
-                    )
-                    zone = (
-                        DragDropOverlay.ZONE_REPLACE
-                        if pos.x() < target.width() * 0.5
-                        else DragDropOverlay.ZONE_ADD
-                    )
-                    target._drag_drop_zone = zone
-                    target._drag_overlay.set_active_zone(zone)
-                    event.acceptProposedAction()
-                    return True
-                if et == QEvent.DragLeave:
-                    target._drag_enter_count = max(0, target._drag_enter_count - 1)
-                    if target._drag_enter_count == 0:
-                        target._drag_overlay.hide()
-                    event.accept()
-                    return True
-                if et == QEvent.Drop:
-                    target._drag_enter_count = 0
-                    target._drag_overlay.hide()
-                    paths = []
-                    for url in event.mimeData().urls():
-                        path = url.toLocalFile()
-                        if path:
-                            paths.append(path)
-                    if paths:
-                        replace = target._drag_drop_zone == DragDropOverlay.ZONE_REPLACE
-                        target._add_media(paths, replace=replace)
-                    event.acceptProposedAction()
-                    return True
+            if et in (QEvent.DragEnter, QEvent.DragMove, QEvent.DragLeave, QEvent.Drop):
+                return self._handle_viewport_drag(et, event)
         return super().eventFilter(obj, event)
+
+    def _handle_viewport_drag(self, et, event):
+        container = self.viewport_container
+        target = self.main_window
+        if container is None or target is None:
+            return False
+        if et == QEvent.DragEnter and event.mimeData().hasUrls():
+            container._drag_enter_count += 1
+            container._show_drag_overlay()
+            event.acceptProposedAction()
+            return True
+        if et == QEvent.DragMove and event.mimeData().hasUrls():
+            pos = container.mapFromGlobal(
+                self.viewport_window.mapToGlobal(event.position().toPoint())
+            )
+            container._update_drag_zone(pos)
+            event.acceptProposedAction()
+            return True
+        if et == QEvent.DragLeave:
+            container._drag_enter_count = max(0, container._drag_enter_count - 1)
+            if container._drag_enter_count == 0:
+                container._hide_drag_overlay()
+            event.accept()
+            return True
+        if et == QEvent.Drop:
+            container._drag_enter_count = 0
+            container._hide_drag_overlay()
+            paths = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
+            if paths:
+                replace = container._drag_drop_zone == DragDropOverlay.ZONE_REPLACE
+                target._add_media(paths, replace=replace)
+            event.acceptProposedAction()
+            return True
+        return False
 
     def set_source_count(self, count: int) -> None:
         while len(self.frame_slots) < count:
@@ -480,8 +552,8 @@ class Viewport(QWidget):
         return primary is not None and primary.cached
 
     def _sync_display_cache_playheads(self) -> None:
-        main_window = self.main_window
-        if main_window is None or not main_window.sources:
+        main_window = getattr(self, "main_window", None)
+        if main_window is None or not getattr(main_window, "sources", None):
             return
         direction = main_window.playback_direction if main_window.playing else 0
         for index, source in enumerate(main_window.sources):
@@ -544,7 +616,8 @@ class Viewport(QWidget):
 
             self.native_renderer.update_render_params(params)
             self.native_renderer.sync_and_render()
-            self.viewport_window.requestUpdate()
+            if hasattr(self, "viewport_window") and self.viewport_window is not None:
+                self.viewport_window.requestUpdate()
 
         super().update(*args, **kwargs)
 
