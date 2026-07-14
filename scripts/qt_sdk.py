@@ -27,7 +27,8 @@ def qt_sdk_path(qt_root: Path, qt_version: str) -> Path:
     if sys.platform == "darwin":
         return qt_root / qt_version / "macos"
     if sys.platform == "win32":
-        return qt_root / qt_version / "msvc2019_64"
+        # Qt 6.8+ uses MSVC2022 as its reference Windows compiler.
+        return qt_root / qt_version / "msvc2022_64"
     # aqt uses 'linux_gcc_64' as the arch identifier for the install command,
     # but installs the SDK into a folder named 'gcc_64'.
     return qt_root / qt_version / "gcc_64"
@@ -54,20 +55,12 @@ def sdk_is_complete(sdk: Path) -> bool:
 
 def install_qt_sdk(qt_root: Path, qt_version: str) -> None:
     import time
-    # Install aqtinstall from the PR #1000 branch which fixes Qt 6.11.x repository path
-    # resolution on Windows. PyPI release v3.3.0 has a known bug (miurahr/aqtinstall#1022)
-    # where it fails with "Failed to locate XML data for Qt version '6.11.1'" because Qt
-    # changed its repository directory structure for 6.11+ and the fix is not yet released.
-    subprocess.run(
-        [
-            sys.executable, "-m", "pip", "install", "-q", "--force-reinstall", "--no-cache-dir",
-            "git+https://github.com/miurahr/aqtinstall.git@refs/pull/1000/head",
-        ],
-        check=True,
-    )
+    # Upgrade aqtinstall from PyPI to ensure compatibility with the pinned Qt release.
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "aqtinstall"], check=True)
 
     qt_root.mkdir(parents=True, exist_ok=True)
-    arch = "clang_64" if sys.platform == "darwin" else ("win64_msvc2019_64" if sys.platform == "win32" else "linux_gcc_64")
+    # Qt 6.8+ uses MSVC2022 as its reference Windows compiler; aqt's arch identifier changed accordingly.
+    arch = "clang_64" if sys.platform == "darwin" else ("win64_msvc2022_64" if sys.platform == "win32" else "linux_gcc_64")
     os_name = "mac" if sys.platform == "darwin" else ("windows" if sys.platform == "win32" else "linux")
     cmd = [
         "aqt",
