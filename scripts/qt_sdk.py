@@ -90,7 +90,15 @@ def ensure_qt_sdk(qt_root: Path | None = None, *, install: bool = True) -> Path:
             f"  python scripts/qt_sdk.py --install\n"
             f"or re-run build.py (auto-installs when missing)."
         )
-    install_qt_sdk(root, version)
+    try:
+        install_qt_sdk(root, version)
+    except RuntimeError as exc:
+        print(f"Warning: Failed to install Qt {version}: {exc}. Retrying with fallback stable Qt 6.8.0...", file=sys.stderr)
+        version = "6.8.0"
+        sdk = qt_sdk_path(root, version)
+        if not sdk_is_complete(sdk):
+            install_qt_sdk(root, version)
+
     if not sdk_is_complete(sdk):
         raise FileNotFoundError(f"Qt SDK install finished but headers are still missing at {sdk}")
     return sdk
