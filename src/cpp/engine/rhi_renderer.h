@@ -10,6 +10,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <condition_variable>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -158,7 +159,7 @@ private:
         int binding = -1;
     };
 
-    // Thread Loop (GUI-thread synchronous render; no background thread)
+    // Thread Loop
     void render_frame();
     void update_rhi_resources(QRhiResourceUpdateBatch* batch);
     void build_pipeline(QRhiRenderPassDescriptor* rpDesc, bool force_rebuild = false);
@@ -178,8 +179,21 @@ private:
         bool& pipeline_dirty);
     void _release_gpu_resources();
 
-    // Threading / state sync (params arrive from Python on GUI thread)
+    // Threading / state sync
+    void start_render_thread();
+    void stop_render_thread();
+    void render_thread_loop();
+    bool initialize_rhi_on_thread();
+    void shutdown_rhi_on_thread();
+    void sync_and_render_on_thread(bool resize, const QSize& target_size);
+    void _wake_render_thread();
+
+    std::thread _render_thread;
     std::mutex _mutex;
+    std::condition_variable _render_cond;
+    std::atomic<bool> _run_thread{false};
+    std::atomic<bool> _redraw_needed{false};
+    std::atomic<bool> _clear_cache_pending{false};
     std::atomic<bool> _exposed{false};
     std::atomic<bool> _resize_pending{false};
     QSize _pending_size;
@@ -187,10 +201,17 @@ private:
     DebugStats _debug_stats;
 
     // Double-buffered inputs
+    struct PendingLut3D {
+        int index = 0;
+        int size = 0;
+        std::vector<float> rgba_data;
+    };
     RenderParams _pending_render_params;
     GradingParams _pending_grading_params;
+    std::vector<PendingLut3D> _pending_ocio_luts;
     bool _render_params_dirty = false;
     bool _grading_params_dirty = false;
+    bool _ocio_luts_dirty = false;
     bool _shaders_dirty = false;
     std::string _pending_frag_src_for_layout;
 
@@ -218,7 +239,7 @@ private:
     TextureState _texAState;
     TextureState _texBState;
     std::vector<TextureState> _texturePool;
-    std::vector<OcioLut3D> _ocioLuts3d;
+    std::vector<OcioLut3D> _active_ocio_luts;
 
     // Shader binding layouts
     OcioUboLayout _ocioUboLayout;

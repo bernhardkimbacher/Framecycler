@@ -76,9 +76,6 @@ class RhiViewportWindow(QWindow):
         if self._renderer:
             exposed = self.isExposed()
             self._renderer.set_exposed(exposed)
-            if exposed:
-                self._renderer.sync_and_render()
-            self.requestUpdate()
 
     def resizeEvent(self, event: QResizeEvent):
         if self._renderer:

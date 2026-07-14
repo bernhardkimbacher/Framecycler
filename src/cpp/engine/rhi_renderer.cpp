@@ -40,8 +40,79 @@ bool RhiRenderer::initialize(uintptr_t window_ptr)
         return false;
     }
 
-    if (_rhi) {
-        return true;
+    _pending_size = _window->size();
+    _resize_pending = true;
+
+    start_render_thread();
+    return true;
+}
+
+void RhiRenderer::shutdown()
+{
+    stop_render_thread();
+}
+
+void RhiRenderer::start_render_thread()
+{
+    if (_run_thread) {
+        return;
+    }
+    _run_thread = true;
+    _render_thread = std::thread(&RhiRenderer::render_thread_loop, this);
+}
+
+void RhiRenderer::stop_render_thread()
+{
+    if (!_run_thread) {
+        return;
+    }
+    _run_thread = false;
+    _render_cond.notify_all();
+    if (_render_thread.joinable()) {
+        _render_thread.join();
+    }
+}
+
+void RhiRenderer::render_thread_loop()
+{
+    if (!initialize_rhi_on_thread()) {
+        qWarning() << "RhiRenderer: Failed to initialize QRhi on render thread!";
+        return;
+    }
+
+    while (_run_thread) {
+        bool needs_render = false;
+        bool resize = false;
+        QSize target_size;
+        {
+            std::unique_lock<std::mutex> lock(_mutex);
+            _render_cond.wait(lock, [this]() {
+                return !_run_thread || _resize_pending || _redraw_needed || _clear_cache_pending;
+            });
+
+            if (!_run_thread) {
+                break;
+            }
+
+            needs_render = _redraw_needed || _clear_cache_pending;
+            _redraw_needed = false;
+            resize = _resize_pending.exchange(false);
+            target_size = _pending_size;
+        }
+
+        if (resize || needs_render) {
+            sync_and_render_on_thread(resize, target_size);
+        }
+    }
+
+    _release_gpu_resources();
+    shutdown_rhi_on_thread();
+}
+
+bool RhiRenderer::initialize_rhi_on_thread()
+{
+    if (!_window) {
+        return false;
     }
 
 #if defined(Q_OS_MACOS)
@@ -66,17 +137,13 @@ bool RhiRenderer::initialize(uintptr_t window_ptr)
     _swapChain->setRenderPassDescriptor(_fallbackRpDesc);
 
     _stagingRing.resize(3);
-    _pending_size = _window->size();
-    _resize_pending = true;
     _displayCache.set_rhi(_rhi);
     _debug_stats.rhi_ready = true;
     return true;
 }
 
-void RhiRenderer::shutdown()
+void RhiRenderer::shutdown_rhi_on_thread()
 {
-    _release_gpu_resources();
-
     if (_pipeline) {
         _pipeline->destroy();
         delete _pipeline;
@@ -128,56 +195,41 @@ void RhiRenderer::shutdown()
     _debug_stats = DebugStats{};
 }
 
+void RhiRenderer::_wake_render_thread()
+{
+    _redraw_needed = true;
+    _render_cond.notify_one();
+}
+
 void RhiRenderer::set_display_cache_limit_gb(double limit_gb)
 {
+    std::lock_guard<std::mutex> lock(_mutex);
     _displayCache.set_limit_gb(limit_gb);
 }
 
 void RhiRenderer::clear_display_cache()
 {
-    if (!_displayCache.enabled()) {
-        if (_texAState.texture) {
-            _texAState.texture->destroy();
-            delete _texAState.texture;
-        }
-        if (_texBState.texture) {
-            _texBState.texture->destroy();
-            delete _texBState.texture;
-        }
-    }
-    _displayCache.clear();
-    _texAState.texture = nullptr;
-    _texBState.texture = nullptr;
-    _last_bound_tex_a = nullptr;
-    _last_bound_tex_b = nullptr;
-    for (auto& state : _texturePool) {
-        state.texture = nullptr;
-    }
-    if (_pipeline) {
-        _pipeline->destroy();
-        delete _pipeline;
-        _pipeline = nullptr;
-    }
-    if (_srb) {
-        _srb->destroy();
-        delete _srb;
-        _srb = nullptr;
-    }
+    _clear_cache_pending = true;
+    _wake_render_thread();
 }
 
 void RhiRenderer::set_source_playhead(int source_index, int playhead, int direction, int in_point, int out_point)
 {
+    std::lock_guard<std::mutex> lock(_mutex);
     SourcePlayhead ph;
     ph.playhead = playhead;
     ph.direction = direction;
     ph.in_point = in_point;
     ph.out_point = out_point;
     _displayCache.set_source_playhead(source_index, ph);
+    _wake_render_thread();
 }
 
 void RhiRenderer::invalidate_display_cache_source(int source_index)
 {
+    std::lock_guard<std::mutex> lock(_mutex);
     _displayCache.invalidate_source(source_index);
+    _wake_render_thread();
 }
 
 GpuTextureCache::Stats RhiRenderer::get_display_cache_stats() const
@@ -190,12 +242,12 @@ void RhiRenderer::update_render_params(const RenderParams& params)
     std::lock_guard<std::mutex> lock(_mutex);
     _pending_render_params = params;
     _render_params_dirty = true;
+    _wake_render_thread();
 }
 
 void RhiRenderer::request_redraw()
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    _render_params_dirty = true;
+    _wake_render_thread();
 }
 
 RhiRenderer::DebugStats RhiRenderer::get_debug_stats() const
@@ -204,6 +256,11 @@ RhiRenderer::DebugStats RhiRenderer::get_debug_stats() const
 }
 
 void RhiRenderer::sync_and_render()
+{
+    _wake_render_thread();
+}
+
+void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_size)
 {
     if (!_rhi || !_window) {
         return;
@@ -216,10 +273,42 @@ void RhiRenderer::sync_and_render()
         return;
     }
 
+    if (_clear_cache_pending.exchange(false)) {
+        if (!_displayCache.enabled()) {
+            if (_texAState.texture) {
+                _texAState.texture->destroy();
+                delete _texAState.texture;
+            }
+            if (_texBState.texture) {
+                _texBState.texture->destroy();
+                delete _texBState.texture;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _displayCache.clear();
+        }
+        _texAState.texture = nullptr;
+        _texBState.texture = nullptr;
+        _last_bound_tex_a = nullptr;
+        _last_bound_tex_b = nullptr;
+        for (auto& state : _texturePool) {
+            state.texture = nullptr;
+        }
+        if (_pipeline) {
+            _pipeline->destroy();
+            delete _pipeline;
+            _pipeline = nullptr;
+        }
+        if (_srb) {
+            _srb->destroy();
+            delete _srb;
+            _srb = nullptr;
+        }
+    }
+
     bool shaders_dirty = false;
     std::string frag_src_for_layout;
-    QSize target_size;
-    bool resize = false;
 
     {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -231,13 +320,34 @@ void RhiRenderer::sync_and_render()
             _active_grading_params = _pending_grading_params;
             _grading_params_dirty = false;
         }
+        if (_ocio_luts_dirty) {
+            // Destroy old active textures first (since we are on the render thread!)
+            for (auto& lut : _active_ocio_luts) {
+                if (lut.texture) {
+                    lut.texture->destroy();
+                    delete lut.texture;
+                    lut.texture = nullptr;
+                }
+            }
+            _active_ocio_luts.clear();
+
+            // Build new active LUTs list from pending
+            for (const auto& pending : _pending_ocio_luts) {
+                while (static_cast<int>(_active_ocio_luts.size()) <= pending.index) {
+                    _active_ocio_luts.push_back(OcioLut3D());
+                }
+                auto& lut = _active_ocio_luts[pending.index];
+                lut.size = pending.size;
+                lut.rgba_data = pending.rgba_data;
+                lut.dirty = true;
+            }
+            _ocio_luts_dirty = false;
+        }
         if (_shaders_dirty) {
             shaders_dirty = true;
             frag_src_for_layout = _pending_frag_src_for_layout;
             _shaders_dirty = false;
         }
-        resize = _resize_pending.exchange(false);
-        target_size = _pending_size;
     }
 
     if (shaders_dirty && !frag_src_for_layout.empty()) {
@@ -272,6 +382,7 @@ void RhiRenderer::set_grading_uniform(const std::string& name, float value)
     _pending_grading_params.floats[name] = value;
     _grading_params_dirty = true;
     _render_params_dirty = true;
+    _wake_render_thread();
 }
 
 void RhiRenderer::set_grading_uniform_vec3(const std::string& name, float x, float y, float z)
@@ -280,6 +391,7 @@ void RhiRenderer::set_grading_uniform_vec3(const std::string& name, float x, flo
     _pending_grading_params.vec3s[name] = {x, y, z};
     _grading_params_dirty = true;
     _render_params_dirty = true;
+    _wake_render_thread();
 }
 
 void RhiRenderer::clear_grading_uniforms()
@@ -289,6 +401,7 @@ void RhiRenderer::clear_grading_uniforms()
     _pending_grading_params.vec3s.clear();
     _grading_params_dirty = true;
     _render_params_dirty = true;
+    _wake_render_thread();
 }
 
 void RhiRenderer::register_cache(int source_index, CacheManager* cache)
@@ -311,17 +424,29 @@ void RhiRenderer::set_shader_sources(const std::string& pipeline_key, const std:
         _pending_frag_src_for_layout = frag_src;
         _shaders_dirty = true;
         _render_params_dirty = true;
+        _wake_render_thread();
     }
+}
+
+void RhiRenderer::set_exposed(bool exposed)
+{
+    _exposed = exposed;
+    _wake_render_thread();
+}
+
+void RhiRenderer::set_pending_size(int width, int height)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _pending_size = QSize(width, height);
+    _resize_pending = true;
+    _wake_render_thread();
 }
 
 void RhiRenderer::upload_ocio_lut_3d(int index, int size, const std::vector<float>& data)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    while (static_cast<int>(_ocioLuts3d.size()) <= index) {
-        _ocioLuts3d.push_back(OcioLut3D());
-    }
-
-    auto& lut = _ocioLuts3d[index];
+    PendingLut3D lut;
+    lut.index = index;
     lut.size = size;
     lut.rgba_data.resize(size * size * size * 4);
     
@@ -332,32 +457,22 @@ void RhiRenderer::upload_ocio_lut_3d(int index, int size, const std::vector<floa
         lut.rgba_data[i * 4 + 2] = data[i * 3 + 2];
         lut.rgba_data[i * 4 + 3] = 1.0f;
     }
-    lut.dirty = true;
-    _render_params_dirty = true;
+    _pending_ocio_luts.push_back(lut);
+    _ocio_luts_dirty = true;
+    _shaders_dirty = true;
+    _wake_render_thread();
 }
 
 void RhiRenderer::clear_ocio_luts()
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    for (auto& lut : _ocioLuts3d) {
-        lut.dirty = false;
-        lut.size = 0;
-        lut.rgba_data.clear();
-    }
-    _render_params_dirty = true;
+    _pending_ocio_luts.clear();
+    _ocio_luts_dirty = true;
+    _shaders_dirty = true;
+    _wake_render_thread();
 }
 
-void RhiRenderer::set_exposed(bool exposed)
-{
-    _exposed = exposed;
-}
 
-void RhiRenderer::set_pending_size(int width, int height)
-{
-    std::lock_guard<std::mutex> lock(_mutex);
-    _pending_size = QSize(width, height);
-    _resize_pending = true;
-}
 
 void RhiRenderer::render_frame()
 {
@@ -387,10 +502,17 @@ void RhiRenderer::render_frame()
     const int compare_mode = _active_render_params.compare_mode;
     bool pipeline_dirty = false;
     for (auto slot : _active_render_params.slots) {
-        auto it = _caches.find(slot.source_index);
-        if (it != _caches.end() && it->second) {
+        CacheManager* cpu_cache = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            auto it = _caches.find(slot.source_index);
+            if (it != _caches.end()) {
+                cpu_cache = it->second;
+            }
+        }
+        if (cpu_cache) {
             int w = 0, h = 0, channels = 0;
-            if (it->second->get_frame_dimensions(slot.frame_index, w, h, channels)) {
+            if (cpu_cache->get_frame_dimensions(slot.frame_index, w, h, channels)) {
                 _debug_stats.cache_hits++;
                 slot.width = w;
                 slot.height = h;
@@ -403,7 +525,7 @@ void RhiRenderer::render_frame()
                     }
                     resolve_display_texture(
                         slot.source_index,
-                        it->second,
+                        cpu_cache,
                         slot,
                         _texturePool[slot.source_index],
                         batch,
@@ -412,7 +534,7 @@ void RhiRenderer::render_frame()
                     if (slot.source_index == _active_render_params.sequence_index) {
                         resolve_display_texture(
                             slot.source_index,
-                            it->second,
+                            cpu_cache,
                             slot,
                             _texAState,
                             batch,
@@ -422,7 +544,7 @@ void RhiRenderer::render_frame()
                     if (slot.source_index == 0) {
                         resolve_display_texture(
                             slot.source_index,
-                            it->second,
+                            cpu_cache,
                             slot,
                             _texAState,
                             batch,
@@ -430,7 +552,7 @@ void RhiRenderer::render_frame()
                     } else if (slot.source_index == 1) {
                         resolve_display_texture(
                             slot.source_index,
-                            it->second,
+                            cpu_cache,
                             slot,
                             _texBState,
                             batch,
@@ -465,7 +587,7 @@ void RhiRenderer::render_frame()
     }
 
     // 2. Upload OCIO 3D LUTs
-    for (auto& lut : _ocioLuts3d) {
+    for (auto& lut : _active_ocio_luts) {
         if (lut.dirty && lut.size > 0) {
             upload_texture_3d(lut, batch);
             lut.dirty = false;
@@ -658,7 +780,7 @@ void RhiRenderer::build_pipeline(QRhiRenderPassDescriptor* rpDesc, bool force_re
     }
 
     int lutBinding = 3;
-    for (auto& lut : _ocioLuts3d) {
+    for (auto& lut : _active_ocio_luts) {
         if (lut.texture) {
             bindings.push_back(QRhiShaderResourceBinding::sampledTexture(lutBinding, QRhiShaderResourceBinding::FragmentStage, lut.texture, _lutSampler));
             lutBinding++;
@@ -1010,11 +1132,11 @@ void RhiRenderer::_release_gpu_resources() {
     }
     _texturePool.clear();
 
-    for (auto& lut : _ocioLuts3d) {
+    for (auto& lut : _active_ocio_luts) {
         if (lut.texture) {
             lut.texture->destroy();
             delete lut.texture;
         }
     }
-    _ocioLuts3d.clear();
+    _active_ocio_luts.clear();
 }
