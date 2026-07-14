@@ -78,7 +78,7 @@ jobs:
         run: ${{ matrix.python }} build.py
 
       - name: Debug Qt SDK layout (temporary)
-        if: runner.os == 'Linux'
+        if: always() && runner.os == 'Linux'
         run: find .qt -iname "qrhi.h" -o -iname "qshaderbaker.h" -o -iname "qtshadertools*" || true
 
       - name: Run unit tests
