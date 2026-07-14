@@ -63,17 +63,17 @@ jobs:
           python-version: '3.12'
 
       - name: Install System Dependencies (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0 libopenimageio-dev
 
       - name: Install System Dependencies (macOS)
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-14'
         run: brew install openimageio
 
       - name: Cache vcpkg (Windows)
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-2022'
         uses: actions/cache@v4
         with:
           path: |
@@ -84,8 +84,16 @@ jobs:
             ${{ runner.os }}-vcpkg-
 
       - name: Install System Dependencies (Windows)
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-2022'
         run: vcpkg install openimageio:x64-windows
+
+      - name: Cache Qt SDK
+        uses: actions/cache@v4
+        with:
+          path: .qt
+          key: ${{ runner.os }}-qt-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-qt-
 
       - name: Install Python Dependencies
         run: |

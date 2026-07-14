@@ -68,8 +68,6 @@ def install_qt_sdk(qt_root: Path, qt_version: str) -> None:
         str(qt_root),
         "-m",
         "qtshadertools",
-        "--base",
-        "https://download.qt.io/online/qtsdkrepository/",
     ]
     print(f"Installing Qt {qt_version} via aqtinstall...")
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -90,18 +88,42 @@ def ensure_qt_sdk(qt_root: Path | None = None, *, install: bool = True) -> Path:
             f"  python scripts/qt_sdk.py --install\n"
             f"or re-run build.py (auto-installs when missing)."
         )
+
+    # 1. Attempt primary installation
     try:
         install_qt_sdk(root, version)
-    except RuntimeError as exc:
-        print(f"Warning: Failed to install Qt {version}: {exc}. Retrying with fallback stable Qt 6.8.0...", file=sys.stderr)
-        version = "6.8.0"
-        sdk = qt_sdk_path(root, version)
-        if not sdk_is_complete(sdk):
-            install_qt_sdk(root, version)
+        if sdk_is_complete(sdk):
+            return sdk
+    except RuntimeError as primary_exc:
+        print(f"Warning: Failed to install primary Qt SDK {version}: {primary_exc}", file=sys.stderr)
 
-    if not sdk_is_complete(sdk):
-        raise FileNotFoundError(f"Qt SDK install finished but headers are still missing at {sdk}")
-    return sdk
+    # 2. Loop through stable fallbacks
+    fallbacks = ["6.8.1", "6.8.0", "6.7.3"]
+    for fallback in fallbacks:
+        print(f"Attempting fallback stable Qt SDK {fallback}...", file=sys.stderr)
+        sdk = qt_sdk_path(root, fallback)
+        if sdk_is_complete(sdk):
+            return sdk
+        try:
+            install_qt_sdk(root, fallback)
+            if sdk_is_complete(sdk):
+                return sdk
+        except RuntimeError as fallback_exc:
+            print(f"Warning: Fallback Qt SDK {fallback} install failed: {fallback_exc}", file=sys.stderr)
+
+    # 3. Query available versions from aqt list-qt to assist debugging on final failure
+    arch = "clang_64" if sys.platform == "darwin" else ("win64_msvc2019_64" if sys.platform == "win32" else "gcc_64")
+    os_name = "mac" if sys.platform == "darwin" else ("windows" if sys.platform == "win32" else "linux")
+    try:
+        print("Debugging Qt repository: Querying available versions via 'aqt list-qt'...", file=sys.stderr)
+        avail = subprocess.check_output(["aqt", "list-qt", os_name, "desktop"], text=True)
+        print(f"Available Qt versions for {os_name} desktop:\n{avail}", file=sys.stderr)
+    except Exception as list_exc:
+        print(f"Failed to query available Qt versions: {list_exc}", file=sys.stderr)
+
+    raise RuntimeError(
+        f"Failed to resolve any functional Qt SDK. Checked primary '{version}' and fallbacks {fallbacks}."
+    )
 
 
 def main() -> int:

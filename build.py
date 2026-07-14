@@ -79,9 +79,8 @@ def build_extension():
         print(f"Using Qt SDK path: {qt_sdk_path_str}")
         print(f"Using PySide6 Qt lib path: {pyside_qt_lib_path_str}")
     except Exception as exc:
-        print(f"Warning: Failed to resolve Qt SDK or PySide6 Qt lib: {exc}")
-        qt_sdk_path_str = ""
-        pyside_qt_lib_path_str = ""
+        print(f"Error: Failed to resolve Qt SDK or PySide6 Qt lib: {exc}", file=sys.stderr)
+        sys.exit(1)
     
     vcpkg_toolchain = ""
     vcpkg_root = os.environ.get("VCPKG_INSTALLATION_ROOT")

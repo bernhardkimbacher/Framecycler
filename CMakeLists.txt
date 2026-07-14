@@ -28,9 +28,7 @@ endif()
 
 find_package(pybind11 REQUIRED)
 
-set(QT_NO_PRIVATE_MODULE_WARNING ON)
 find_package(Qt6 REQUIRED COMPONENTS Gui Widgets ShaderTools)
-find_package(Qt6 REQUIRED COMPONENTS GuiPrivate ShaderToolsPrivate)
 
 find_package(OpenImageIO REQUIRED)
 
