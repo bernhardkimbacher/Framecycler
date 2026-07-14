@@ -51,8 +51,8 @@ def sdk_is_complete(sdk: Path) -> bool:
 
 
 def install_qt_sdk(qt_root: Path, qt_version: str) -> None:
-    if shutil.which("aqt") is None:
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "aqtinstall"], check=True)
+    # Always upgrade aqtinstall to ensure compatibility with latest Qt releases
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "aqtinstall"], check=True)
 
     qt_root.mkdir(parents=True, exist_ok=True)
     arch = "clang_64" if sys.platform == "darwin" else ("win64_msvc2019_64" if sys.platform == "win32" else "gcc_64")
@@ -68,6 +68,8 @@ def install_qt_sdk(qt_root: Path, qt_version: str) -> None:
         str(qt_root),
         "-m",
         "qtshadertools",
+        "--base",
+        "https://download.qt.io/online/qtsdkrepository/",
     ]
     print(f"Installing Qt {qt_version} via aqtinstall...")
     result = subprocess.run(cmd, capture_output=True, text=True)

@@ -2,6 +2,8 @@ import unittest
 import os
 import shutil
 import json
+from unittest.mock import patch
+from src.framecycler.core.system_memory import PlatformCacheLimits
 from src.framecycler.core.settings import Settings
 
 
@@ -10,9 +12,23 @@ class TestSettings(unittest.TestCase):
         self.test_dir = os.path.abspath("./tests_config_temp")
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
+        
+        self.mock_limits = PlatformCacheLimits(
+            decode_max_gb=64.0,
+            display_max_gb=16.0,
+            coupled=False,
+            combined_max_gb=80.0,
+            system_memory_gb=64.0,
+            vram_gb=16.0,
+            platform_label="MockPlatform"
+        )
+        self.patcher = patch("src.framecycler.core.settings.get_platform_cache_limits", return_value=self.mock_limits)
+        self.patcher.start()
+        
         self.settings = Settings(config_dir=self.test_dir)
 
     def tearDown(self):
+        self.patcher.stop()
         if os.path.exists(self.settings.config_dir):
             shutil.rmtree(self.settings.config_dir)
 
