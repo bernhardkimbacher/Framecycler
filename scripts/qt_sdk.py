@@ -28,7 +28,9 @@ def qt_sdk_path(qt_root: Path, qt_version: str) -> Path:
         return qt_root / qt_version / "macos"
     if sys.platform == "win32":
         return qt_root / qt_version / "msvc2019_64"
-    return qt_root / qt_version / "linux_gcc_64"
+    # aqt uses 'linux_gcc_64' as the arch identifier for the install command,
+    # but installs the SDK into a folder named 'gcc_64'.
+    return qt_root / qt_version / "gcc_64"
 
 
 def sdk_is_complete(sdk: Path) -> bool:
