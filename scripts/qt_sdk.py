@@ -51,6 +51,7 @@ def sdk_is_complete(sdk: Path) -> bool:
 
 
 def install_qt_sdk(qt_root: Path, qt_version: str) -> None:
+    import time
     # Always upgrade aqtinstall to ensure compatibility with latest Qt releases
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "aqtinstall"], check=True)
 
@@ -71,11 +72,23 @@ def install_qt_sdk(qt_root: Path, qt_version: str) -> None:
         "--archives",
         "qtbase",
     ]
-    print(f"Installing Qt {qt_version} via aqtinstall...")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
+
+    retries = 3
+    delay = 5
+    detail = "aqt install-qt failed"
+    for attempt in range(retries):
+        print(f"Installing Qt {qt_version} via aqtinstall (attempt {attempt + 1}/{retries})...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return
         detail = result.stderr.strip() or result.stdout.strip() or "aqt install-qt failed"
-        raise RuntimeError(detail)
+        print(f"Warning: aqtinstall failed on attempt {attempt + 1}: {detail}", file=sys.stderr)
+        if attempt < retries - 1:
+            print(f"Retrying in {delay} seconds...", file=sys.stderr)
+            time.sleep(delay)
+            delay *= 2
+
+    raise RuntimeError(detail)
 
 
 def ensure_qt_sdk(qt_root: Path | None = None, *, install: bool = True) -> Path:
