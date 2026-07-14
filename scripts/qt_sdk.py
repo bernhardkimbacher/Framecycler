@@ -28,7 +28,7 @@ def qt_sdk_path(qt_root: Path, qt_version: str) -> Path:
         return qt_root / qt_version / "macos"
     if sys.platform == "win32":
         return qt_root / qt_version / "msvc2019_64"
-    return qt_root / qt_version / "gcc_64"
+    return qt_root / qt_version / "linux_gcc_64"
 
 
 def sdk_is_complete(sdk: Path) -> bool:
@@ -55,7 +55,7 @@ def install_qt_sdk(qt_root: Path, qt_version: str) -> None:
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "aqtinstall"], check=True)
 
     qt_root.mkdir(parents=True, exist_ok=True)
-    arch = "clang_64" if sys.platform == "darwin" else ("win64_msvc2019_64" if sys.platform == "win32" else "gcc_64")
+    arch = "clang_64" if sys.platform == "darwin" else ("win64_msvc2019_64" if sys.platform == "win32" else "linux_gcc_64")
     os_name = "mac" if sys.platform == "darwin" else ("windows" if sys.platform == "win32" else "linux")
     cmd = [
         "aqt",
