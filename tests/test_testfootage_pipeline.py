@@ -76,13 +76,13 @@ class TestTestFootagePipeline(unittest.TestCase):
                 break
             time.sleep(0.05)
 
-        window._on_timeline_scrub(2)
+        window._on_timeline_scrub(995)
         self.app.processEvents()
         time.sleep(0.3)
         self.app.processEvents()
 
         slot = window.viewport.frame_slots[0]
-        self.assertEqual(window.current_frame, 2)
+        self.assertEqual(window.current_frame, 995)
         self.assertEqual(slot.decoder_frame, 995)
 
     def test_drop_on_viewport_container_loads_testfootage(self):

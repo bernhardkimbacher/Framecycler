@@ -22,12 +22,20 @@ PYBIND11_MODULE(framecycler_engine, m) {
                 throw std::runtime_error("write_frame expects float16 pixel data");
             }
             const uint16_t* ptr = static_cast<const uint16_t*>(info.ptr);
-            self.write_frame(frame_index, width, height, channels, ptr, info.size);
+            size_t size = info.size;
+            {
+                py::gil_scoped_release release;
+                self.write_frame(frame_index, width, height, channels, ptr, size);
+            }
         })
         .def("get_frame_data", [](py::object self, int frame_index) -> py::object {
             auto& self_cpp = self.cast<CacheManager&>();
             int width = 0, height = 0, channels = 0;
-            const uint16_t* ptr = self_cpp.get_frame_data(frame_index, width, height, channels);
+            const uint16_t* ptr = nullptr;
+            {
+                py::gil_scoped_release release;
+                ptr = self_cpp.get_frame_data(frame_index, width, height, channels);
+            }
             if (!ptr) {
                 return py::none();
             }
@@ -46,7 +54,11 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("get_cached_frames", &CacheManager::get_cached_frames)
         .def("clear", &CacheManager::clear)
         .def("set_ram_limit", &CacheManager::set_ram_limit)
-        .def("decode_and_cache_frame", &CacheManager::decode_and_cache_frame);
+        .def("decode_and_cache_frame", &CacheManager::decode_and_cache_frame,
+             py::arg("frame_index"), py::arg("file_path"), py::arg("resolution_scale"),
+             py::arg("layer") = "", py::arg("fallback_mode") = "Flat Gray",
+             py::arg("placeholder_width") = 0, py::arg("placeholder_height") = 0,
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<FrameSlotSpec>(m, "FrameSlotSpec")
         .def(py::init<>())
@@ -93,7 +105,7 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("set_exposed", &RhiRenderer::set_exposed)
         .def("set_pending_size", &RhiRenderer::set_pending_size)
         .def("request_redraw", &RhiRenderer::request_redraw)
-        .def("sync_and_render", &RhiRenderer::sync_and_render)
+        .def("sync_and_render", &RhiRenderer::sync_and_render, py::call_guard<py::gil_scoped_release>())
         .def("set_display_cache_limit_gb", &RhiRenderer::set_display_cache_limit_gb)
         .def("clear_display_cache", &RhiRenderer::clear_display_cache)
         .def("set_source_playhead", &RhiRenderer::set_source_playhead)

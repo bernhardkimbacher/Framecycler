@@ -62,6 +62,23 @@ class TestOIIODecoders(unittest.TestCase):
         self.assertAlmostEqual(float(beauty.mean()), 0.25, places=3)
         self.assertAlmostEqual(float(depth.mean()), 0.75, places=3)
 
+    def test_exr_decoder_missing_frames_timeline(self):
+        write_float_exr(self.tmp_path / "shot.1001.exr")
+        write_float_exr(self.tmp_path / "shot.1002.exr")
+        write_float_exr(self.tmp_path / "shot.1004.exr")
+        write_float_exr(self.tmp_path / "shot.1005.exr")
+        
+        decoder = EXRDecoder(str(self.tmp_path / "shot.####.exr"))
+        meta = decoder.get_metadata()
+        
+        self.assertEqual(meta["frame_count"], 5)
+        self.assertEqual(decoder.frame_numbers, [1001, 1002, 1003, 1004, 1005])
+        self.assertEqual(decoder.existing_frame_numbers, [1001, 1002, 1004, 1005])
+        
+        self.assertEqual(decoder.get_file_path(1003, fallback_nearest=False), None)
+        nearest = decoder.get_file_path(1003, fallback_nearest=True)
+        self.assertIn(Path(nearest).name, ["shot.1002.exr", "shot.1004.exr"])
+
     def test_dpx_decoder_reads_frame(self):
         path = self.tmp_path / "shot.1001.dpx"
         write_uint16_dpx(path)

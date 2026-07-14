@@ -22,9 +22,11 @@ public:
     bool has_frame(int frame_index);
 
     void write_frame(int frame_index, int width, int height, int channels, const uint16_t* pixel_data, size_t data_size);
-    bool decode_and_cache_frame(int frame_index, const std::string& file_path, float resolution_scale);
+    bool decode_and_cache_frame(int frame_index, const std::string& file_path, float resolution_scale, const std::string& layer = "", const std::string& fallback_mode = "Flat Gray", int placeholder_width = 0, int placeholder_height = 0);
 
     const uint16_t* get_frame_data(int frame_index, int& width, int& height, int& channels);
+    bool get_frame_dimensions(int frame_index, int& width, int& height, int& channels);
+    bool copy_frame_data(int frame_index, uint16_t* dest_ptr, size_t dest_size_elements);
 
     std::vector<int> get_cached_frames();
     void clear();

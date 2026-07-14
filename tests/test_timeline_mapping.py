@@ -80,9 +80,9 @@ class TestTimelineMapping(unittest.TestCase):
         ]
         rebuild_timeline_offsets(sources)
 
-        self.assertEqual(decoder_frame_for_source(sources, 0, 0), 108000)
-        self.assertEqual(decoder_frame_for_source(sources, 0, 2), 108002)
-        self.assertEqual(decoder_frame_for_source(sources, 1, 3), 200)
+        self.assertEqual(decoder_frame_for_source(sources, 0, 108000), 108000)
+        self.assertEqual(decoder_frame_for_source(sources, 0, 108002), 108002)
+        self.assertEqual(decoder_frame_for_source(sources, 1, 108003), 200)
         self.assertEqual(decoder_frame_to_local_index(sources[0], 108001), 1)
         self.assertEqual(local_index_to_decoder_frame(sources[0], 1), 108001)
 
@@ -93,8 +93,8 @@ class TestTimelineMapping(unittest.TestCase):
         ]
         rebuild_timeline_offsets(sources)
 
-        self.assertEqual(local_playback_range(sources, 0, 2, 12), (108002, 108009))
-        self.assertEqual(local_playback_range(sources, 1, 12, 15), (202, 205))
+        self.assertEqual(local_playback_range(sources, 0, 108002, 108012), (108002, 108009))
+        self.assertEqual(local_playback_range(sources, 1, 108012, 108015), (202, 205))
 
 
 if __name__ == "__main__":

@@ -390,13 +390,11 @@ void RhiRenderer::render_frame()
         auto it = _caches.find(slot.source_index);
         if (it != _caches.end() && it->second) {
             int w = 0, h = 0, channels = 0;
-            const uint16_t* ptr = it->second->get_frame_data(slot.frame_index, w, h, channels);
-            if (ptr) {
+            if (it->second->get_frame_dimensions(slot.frame_index, w, h, channels)) {
                 _debug_stats.cache_hits++;
                 slot.width = w;
                 slot.height = h;
                 slot.channels = channels;
-                slot.pixel_data = ptr;
                 slot.data_size = static_cast<size_t>(w * h * channels);
 
                 if (compare_mode == 3) {
@@ -843,13 +841,13 @@ bool RhiRenderer::resolve_display_texture(
     QRhiResourceUpdateBatch* batch,
     bool& pipeline_dirty)
 {
-    if (!spec.pixel_data || spec.width <= 0 || spec.height <= 0) {
+    if (spec.width <= 0 || spec.height <= 0) {
         return false;
     }
 
     if (!_displayCache.enabled()) {
         QRhiTexture* previous = bind_state.texture;
-        upload_texture(bind_state, spec, batch);
+        upload_texture(bind_state, spec, cpu_cache, batch);
         if (bind_state.texture != previous) {
             pipeline_dirty = true;
         }
@@ -876,7 +874,7 @@ bool RhiRenderer::resolve_display_texture(
     }
 
     TextureState upload_state;
-    upload_texture(upload_state, spec, batch);
+    upload_texture(upload_state, spec, cpu_cache, batch);
     if (!upload_state.texture) {
         return false;
     }
@@ -902,9 +900,9 @@ bool RhiRenderer::resolve_display_texture(
     return true;
 }
 
-void RhiRenderer::upload_texture(TextureState& state, const FrameSlotSpec& spec, QRhiResourceUpdateBatch* batch)
+void RhiRenderer::upload_texture(TextureState& state, const FrameSlotSpec& spec, CacheManager* cpu_cache, QRhiResourceUpdateBatch* batch)
 {
-    if (!spec.pixel_data || spec.width <= 0 || spec.height <= 0) {
+    if (spec.width <= 0 || spec.height <= 0) {
         return;
     }
 
@@ -936,7 +934,14 @@ void RhiRenderer::upload_texture(TextureState& state, const FrameSlotSpec& spec,
     if (ringBuf.data.size() < reqElements) {
         ringBuf.data.resize(reqElements);
     }
-    std::copy(spec.pixel_data, spec.pixel_data + reqElements, ringBuf.data.begin());
+    
+    if (cpu_cache) {
+        if (!cpu_cache->copy_frame_data(spec.frame_index, ringBuf.data.data(), reqElements)) {
+            return;
+        }
+    } else {
+        return;
+    }
 
     QByteArray wrappedData(reinterpret_cast<const char*>(ringBuf.data.data()), static_cast<int>(reqElements * sizeof(uint16_t)));
     QRhiTextureSubresourceUploadDescription subres(wrappedData);

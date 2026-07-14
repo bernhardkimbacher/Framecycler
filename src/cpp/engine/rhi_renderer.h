@@ -28,7 +28,6 @@ struct FrameSlotSpec {
     int height = 0;
     int channels = 4;
     int upload_token = 0;
-    const uint16_t* pixel_data = nullptr; // Cache pointer (read under lock)
     size_t data_size = 0;
 };
 
@@ -168,7 +167,7 @@ private:
     std::vector<char> pack_ocio_ubo();
 
     // Texture helpers
-    void upload_texture(TextureState& state, const FrameSlotSpec& spec, QRhiResourceUpdateBatch* batch);
+    void upload_texture(TextureState& state, const FrameSlotSpec& spec, CacheManager* cpu_cache, QRhiResourceUpdateBatch* batch);
     void upload_texture_3d(OcioLut3D& lut, QRhiResourceUpdateBatch* batch);
     bool resolve_display_texture(
         int source_index,

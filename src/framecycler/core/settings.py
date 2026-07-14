@@ -25,6 +25,7 @@ class Settings:
         self.timecode_mode = False  # True = Timecode mode, False = Frame mode
         self.recent_files = []
         self.resolution_scale = 1.0
+        self.missing_frame_mode = "Nearest Frame"
 
         self.load()
 
@@ -72,6 +73,7 @@ class Settings:
                 self.loop_mode = data.get("loop_mode", self.loop_mode)
                 self.timecode_mode = data.get("timecode_mode", self.timecode_mode)
                 self.recent_files = data.get("recent_files", self.recent_files)
+                self.missing_frame_mode = data.get("missing_frame_mode", "Nearest Frame")
         except Exception as e:
             print(f"Error loading settings: {e}")
         self.clamp_cache_limits_to_platform()
@@ -88,6 +90,7 @@ class Settings:
                 "loop_mode": self.loop_mode,
                 "timecode_mode": self.timecode_mode,
                 "recent_files": self.recent_files,
+                "missing_frame_mode": self.missing_frame_mode,
             }
             with open(self.config_path, "w") as f:
                 json.dump(data, f, indent=4)

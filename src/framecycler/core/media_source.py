@@ -64,7 +64,9 @@ def decoder_frame_to_local_index(source: MediaSource, decoder_frame: int) -> int
 
 def rebuild_timeline_offsets(sources: List[MediaSource]) -> int:
     """Recompute timeline offsets and return total concatenated frame count."""
-    offset = 0
+    if not sources:
+        return 0
+    offset = sources[0].decoder_start_frame
     for source in sources:
         source.timeline_offset = offset
         offset += max(0, source.frame_count)

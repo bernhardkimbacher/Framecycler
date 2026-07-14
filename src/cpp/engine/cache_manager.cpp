@@ -123,12 +123,12 @@ void CacheManager::write_frame(int frame_index, int width, int height, int chann
     }
 }
 
-bool CacheManager::decode_and_cache_frame(int frame_index, const std::string& file_path, float resolution_scale)
+bool CacheManager::decode_and_cache_frame(int frame_index, const std::string& file_path, float resolution_scale, const std::string& layer, const std::string& fallback_mode, int placeholder_width, int placeholder_height)
 {
     if (has_frame(frame_index)) {
         return true;
     }
-    auto res = NativeDecoder::decode_frame(file_path, resolution_scale);
+    auto res = NativeDecoder::decode_frame(file_path, resolution_scale, layer, fallback_mode, placeholder_width, placeholder_height);
     write_frame(frame_index, res.width, res.height, res.channels, res.pixel_data.data(), res.pixel_data.size());
     return res.success;
 }
@@ -145,6 +145,42 @@ const uint16_t* CacheManager::get_frame_data(int frame_index, int& width, int& h
     height = slot.height;
     channels = slot.channels;
     return slot.data.data();
+}
+
+bool CacheManager::get_frame_dimensions(int frame_index, int& width, int& height, int& channels) {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    auto it = _frame_to_slot.find(frame_index);
+    if (it == _frame_to_slot.end()) {
+        return false;
+    }
+    size_t idx = it->second;
+    const auto& slot = _slots[idx];
+    if (!slot.active) {
+        return false;
+    }
+    width = slot.width;
+    height = slot.height;
+    channels = slot.channels;
+    return true;
+}
+
+bool CacheManager::copy_frame_data(int frame_index, uint16_t* dest_ptr, size_t dest_size_elements) {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    auto it = _frame_to_slot.find(frame_index);
+    if (it == _frame_to_slot.end()) {
+        return false;
+    }
+    size_t idx = it->second;
+    const auto& slot = _slots[idx];
+    if (!slot.active) {
+        return false;
+    }
+    size_t req_elements = static_cast<size_t>(slot.width * slot.height * slot.channels);
+    if (dest_size_elements < req_elements) {
+        return false;
+    }
+    std::copy(slot.data.begin(), slot.data.begin() + req_elements, dest_ptr);
+    return true;
 }
 
 std::vector<int> CacheManager::get_cached_frames() {

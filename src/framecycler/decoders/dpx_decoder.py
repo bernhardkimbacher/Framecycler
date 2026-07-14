@@ -17,11 +17,11 @@ class DPXDecoder(BaseDecoder):
             raise FileNotFoundError(f"No DPX files found matching: {file_path_pattern}")
             
         self.frame_map = {frame_num: path for frame_num, path in self.resolved_frames}
-        self.frame_numbers = sorted(list(self.frame_map.keys()))
-        self.file_paths = [self.frame_map[fn] for fn in self.frame_numbers]
-        
-        self.start_frame = self.frame_numbers[0]
-        self.end_frame = self.frame_numbers[-1]
+        self.existing_frame_numbers = sorted(list(self.frame_map.keys()))
+        self.start_frame = self.existing_frame_numbers[0]
+        self.end_frame = self.existing_frame_numbers[-1]
+        self.frame_numbers = list(range(self.start_frame, self.end_frame + 1))
+        self.file_paths = [self.frame_map[fn] for fn in self.existing_frame_numbers]
         
         self.metadata = self._read_sequence_metadata()
 
@@ -47,7 +47,7 @@ class DPXDecoder(BaseDecoder):
             return []
             
         regex_pattern = base_name.replace("####", r"(\d+)")
-        regex_pattern = re.sub(r"%\d*d", r"(\d+)", regex_pattern)
+        regex_pattern = re.sub(r"%\d*d", r"(\\d+)", regex_pattern)
         regex_pattern = "^" + regex_pattern.replace(".", r"\.") + "$"
         regex_compiled = re.compile(regex_pattern)
         
@@ -70,7 +70,7 @@ class DPXDecoder(BaseDecoder):
             "height": img_meta.height,
             "pixel_aspect_ratio": img_meta.pixel_aspect_ratio,
             "fps": 24.0,
-            "frame_count": len(self.file_paths),
+            "frame_count": len(self.frame_numbers),
             "start_frame": self.start_frame,
             "end_frame": self.end_frame,
             "timecode_start": Timecode.frame_to_timecode(0, 24.0, self.start_frame),
@@ -89,7 +89,7 @@ class DPXDecoder(BaseDecoder):
         # Get path for the requested frame, or closest available frame if missing
         file_path = self.frame_map.get(frame_index)
         if not file_path:
-            closest_frame = min(self.frame_numbers, key=lambda x: abs(x - frame_index))
+            closest_frame = min(self.existing_frame_numbers, key=lambda x: abs(x - frame_index))
             file_path = self.frame_map[closest_frame]
 
         img = image_io.read_pixels(file_path, resolution_scale=resolution_scale)
@@ -103,7 +103,12 @@ class DPXDecoder(BaseDecoder):
             "timecode": tc
         }
 
-    def get_file_path(self, frame_index: int) -> str | None:
+    def get_file_path(self, frame_index: int, fallback_nearest: bool = False) -> str | None:
+        if fallback_nearest:
+            if not self.existing_frame_numbers:
+                return None
+            closest_frame = min(self.existing_frame_numbers, key=lambda x: abs(x - frame_index))
+            return self.frame_map.get(closest_frame)
         return self.frame_map.get(frame_index)
 
     def close(self):

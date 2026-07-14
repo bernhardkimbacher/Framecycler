@@ -103,6 +103,12 @@ class SettingsDialog(QDialog):
         )
         layout.addWidget(self.fps_combo)
 
+        layout.addWidget(QLabel("Missing Frame Handling:"))
+        self.missing_frame_combo = QComboBox()
+        self.missing_frame_combo.addItems(["Nearest Frame", "Red X", "Flat Gray"])
+        self.missing_frame_combo.setCurrentText(getattr(self.settings, "missing_frame_mode", "Nearest Frame"))
+        layout.addWidget(self.missing_frame_combo)
+
         layout.addWidget(QLabel("Custom OCIO Configuration File (.ocio):"))
         path_layout = QHBoxLayout()
         self.ocio_path_edit = QLineEdit(self.settings.ocio_config_path)
@@ -189,4 +195,5 @@ class SettingsDialog(QDialog):
         self.settings.display_cache_limit_gb = display_gb
         self.settings.default_fps = float(self.fps_combo.currentText())
         self.settings.ocio_config_path = self.ocio_path_edit.text().strip()
+        self.settings.missing_frame_mode = self.missing_frame_combo.currentText()
         self.accept()

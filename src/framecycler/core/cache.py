@@ -200,9 +200,22 @@ class CacheEngine:
                 return
 
             get_path = getattr(self.decoder, "get_file_path", None)
-            path = get_path(frame_index) if get_path is not None else None
-            if path is not None:
-                self.native_cache.decode_and_cache_frame(frame_index, path, self.resolution_scale)
+            if get_path is not None:
+                fallback_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
+                fallback_nearest = (fallback_mode == "Nearest Frame")
+                path = get_path(frame_index, fallback_nearest=fallback_nearest)
+                active_layer = getattr(self.decoder, "active_layer", "") or ""
+                meta = getattr(self.decoder, "metadata", {}) or {}
+                ph_w = meta.get("width", 0)
+                ph_h = meta.get("height", 0)
+                if path is not None:
+                    self.native_cache.decode_and_cache_frame(
+                        frame_index, path, self.resolution_scale, active_layer, fallback_mode, ph_w, ph_h
+                    )
+                else:
+                    self.native_cache.decode_and_cache_frame(
+                        frame_index, "", self.resolution_scale, active_layer, fallback_mode, ph_w, ph_h
+                    )
             else:
                 frame_data = self.decoder.read_frame(
                     frame_index, resolution_scale=self.resolution_scale

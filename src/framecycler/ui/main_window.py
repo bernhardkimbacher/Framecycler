@@ -17,6 +17,7 @@ from ..core.media_source import (
     local_frame_for_source,
     local_playback_range,
     rebuild_timeline_offsets,
+    total_frame_count,
 )
 from ..color.ocio_manager import OCIOManager
 from ..decoders.exr_decoder import EXRDecoder
@@ -800,18 +801,19 @@ class MainWindow(QMainWindow):
         self.source_panel.set_sources(self.sources)
 
         if reset_timeline:
-            self.end_frame = max(0, total_frames - 1)
-            self.current_frame = 0
-            self.start_frame = 0
+            self.start_frame = self.sources[0].decoder_start_frame if self.sources else 0
+            self.end_frame = max(self.start_frame, total_frames - 1)
+            self.current_frame = self.start_frame
             self.in_point = self.start_frame
             self.out_point = self.end_frame
             self.timeline.set_range(self.start_frame, self.end_frame)
             self.timeline.set_in_out(self.in_point, self.out_point)
         elif total_frames > 0:
-            self.end_frame = max(0, total_frames - 1)
-            self.current_frame = min(self.current_frame, self.end_frame)
-            self.out_point = min(self.out_point, self.end_frame)
-            self.in_point = min(self.in_point, self.out_point)
+            self.start_frame = self.sources[0].decoder_start_frame if self.sources else 0
+            self.end_frame = max(self.start_frame, total_frames - 1)
+            self.current_frame = max(self.start_frame, min(self.current_frame, self.end_frame))
+            self.out_point = max(self.start_frame, min(self.out_point, self.end_frame))
+            self.in_point = max(self.start_frame, min(self.in_point, self.out_point))
             self.timeline.set_range(self.start_frame, self.end_frame)
             self.timeline.set_in_out(self.in_point, self.out_point)
 
@@ -1417,11 +1419,15 @@ class MainWindow(QMainWindow):
 
     def _open_settings_dialog(self):
         dialog = SettingsDialog(self.settings, self)
+        old_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
         if dialog.exec():
             # Apply changes
             self.settings.save()
+            new_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
             # Update cache worker thread sizes
             for source in self.sources:
+                if old_mode != new_mode:
+                    source.cache.clear()
                 source.cache.update_settings()
             self._apply_renderer_cache_settings()
             # Reload OCIO if path changed
@@ -1429,6 +1435,8 @@ class MainWindow(QMainWindow):
             self.viewport.update_ocio_pipeline()
             self._populate_look_combo()
             self._build_ocio_submenu()
+            if old_mode != new_mode:
+                self.seek_to_frame(self.current_frame)
 
     def _update_ui_states(self):
         self._populate_look_combo()
