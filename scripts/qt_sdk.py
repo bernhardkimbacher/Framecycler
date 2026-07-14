@@ -54,8 +54,17 @@ def sdk_is_complete(sdk: Path) -> bool:
 
 def install_qt_sdk(qt_root: Path, qt_version: str) -> None:
     import time
-    # Always upgrade aqtinstall to ensure compatibility with latest Qt releases
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "aqtinstall"], check=True)
+    # Install aqtinstall from the PR #1000 branch which fixes Qt 6.11.x repository path
+    # resolution on Windows. PyPI release v3.3.0 has a known bug (miurahr/aqtinstall#1022)
+    # where it fails with "Failed to locate XML data for Qt version '6.11.1'" because Qt
+    # changed its repository directory structure for 6.11+ and the fix is not yet released.
+    subprocess.run(
+        [
+            sys.executable, "-m", "pip", "install", "-q", "--force-reinstall", "--no-cache-dir",
+            "git+https://github.com/miurahr/aqtinstall.git@refs/pull/1000/head",
+        ],
+        check=True,
+    )
 
     qt_root.mkdir(parents=True, exist_ok=True)
     arch = "clang_64" if sys.platform == "darwin" else ("win64_msvc2019_64" if sys.platform == "win32" else "linux_gcc_64")
