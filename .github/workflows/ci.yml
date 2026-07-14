@@ -11,6 +11,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       VCPKG_INSTALLATION_ROOT: C:\vcpkg
+      VCPKG_BUILD_TYPE: release
     strategy:
       fail-fast: false
       matrix:

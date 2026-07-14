@@ -23,6 +23,7 @@ jobs:
       VPK_PACK_TITLE: Framecycler-Reboot
       VPK_BUNDLE_ID: com.bernhardkimbacher.framecycler-reboot
       VCPKG_INSTALLATION_ROOT: C:\vcpkg
+      VCPKG_BUILD_TYPE: release
     strategy:
       fail-fast: true
       matrix:
