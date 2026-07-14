@@ -22,20 +22,21 @@ jobs:
       VPK_PACK_ID: framecycler-reboot
       VPK_PACK_TITLE: Framecycler-Reboot
       VPK_BUNDLE_ID: com.bernhardkimbacher.framecycler-reboot
+      VCPKG_INSTALLATION_ROOT: C:\vcpkg
     strategy:
       fail-fast: true
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-2022, macos-14, ubuntu-22.04]
         include:
-          - os: windows-latest
+          - os: windows-2022
             ext: "pyd"
             python: "python"
             vpk_channel: win
-          - os: macos-latest
+          - os: macos-14
             ext: "so"
             python: "python3"
             vpk_channel: osx
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             ext: "so"
             python: "python3"
             vpk_channel: linux
