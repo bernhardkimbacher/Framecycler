@@ -86,7 +86,10 @@ jobs:
 
       - name: Install System Dependencies (Windows)
         if: runner.os == 'Windows'
-        run: vcpkg install openimageio:x64-windows
+        shell: bash
+        run: |
+          echo "set(VCPKG_BUILD_TYPE release)" >> "$VCPKG_INSTALLATION_ROOT/triplets/x64-windows.cmake"
+          vcpkg install openimageio:x64-windows
 
       - name: Cache Qt SDK
         uses: actions/cache@v4
