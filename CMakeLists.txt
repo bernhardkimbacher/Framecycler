@@ -52,6 +52,11 @@ target_link_libraries(framecycler_engine PRIVATE
     OpenImageIO::OpenImageIO
 )
 
+find_package(Vulkan)
+if(Vulkan_FOUND)
+    target_link_libraries(framecycler_engine PRIVATE Vulkan::Vulkan)
+endif()
+
 target_compile_definitions(framecycler_engine PRIVATE QT_NO_KEYWORDS QT_NO_PRIVATE_MODULE_WARNING)
 
 if(PYSIDE6_QT_LIB)
