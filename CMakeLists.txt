@@ -28,6 +28,8 @@ endif()
 
 find_package(pybind11 REQUIRED)
 
+set(QT_NO_PRIVATE_MODULE_WARNING ON)
+
 find_package(Qt6 REQUIRED COMPONENTS Gui Widgets ShaderTools)
 find_package(Qt6 COMPONENTS GuiPrivate ShaderToolsPrivate)
 
@@ -59,13 +61,16 @@ endif()
 
 target_compile_definitions(framecycler_engine PRIVATE QT_NO_KEYWORDS QT_NO_PRIVATE_MODULE_WARNING)
 
+if(MSVC)
+    target_compile_options(framecycler_engine PRIVATE /wd4996)
+else()
+    target_compile_options(framecycler_engine PRIVATE -Wno-deprecated-declarations)
+endif()
+
 if(PYSIDE6_QT_LIB)
     set_target_properties(framecycler_engine PROPERTIES
         BUILD_RPATH "${PYSIDE6_QT_LIB}"
         INSTALL_RPATH "${PYSIDE6_QT_LIB}"
     )
-    if(APPLE OR UNIX)
-        target_link_options(framecycler_engine PRIVATE "-Wl,-rpath,${PYSIDE6_QT_LIB}")
-    endif()
 endif()
 
