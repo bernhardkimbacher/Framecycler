@@ -23,6 +23,16 @@ class DropTargetMixin:
             return event_pos
         return main_window.mapFromGlobal(self.mapToGlobal(event_pos.toPoint()))
 
+    def _zone_for_x(self, x: int, width: int) -> str:
+        if width <= 0:
+            return DragDropOverlay.ZONE_SEQUENCE
+        third = width / 3.0
+        if x < third:
+            return DragDropOverlay.ZONE_REPLACE
+        if x < 2.0 * third:
+            return DragDropOverlay.ZONE_SEQUENCE
+        return DragDropOverlay.ZONE_STACK
+
     def dragEnterEvent(self, event):
         main_window = getattr(self, "_main_window", None)
         if main_window is None or not event.mimeData().hasUrls():
@@ -41,11 +51,7 @@ class DropTargetMixin:
             event.ignore()
             return
         pos = self._dnd_target_pos(event.position())
-        zone = (
-            DragDropOverlay.ZONE_REPLACE
-            if pos.x() < main_window.width() * 0.5
-            else DragDropOverlay.ZONE_ADD
-        )
+        zone = self._zone_for_x(pos.x(), main_window.width())
         main_window._drag_drop_zone = zone
         self.set_active_zone(zone)
         event.acceptProposedAction()
@@ -71,8 +77,8 @@ class DropTargetMixin:
         self.hide()
         paths = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
         if paths:
-            replace = main_window._drag_drop_zone == DragDropOverlay.ZONE_REPLACE
-            main_window._add_media(paths, replace=replace)
+            mode = main_window._drag_drop_zone or DragDropOverlay.ZONE_SEQUENCE
+            main_window._add_media(paths, mode=mode)
         event.acceptProposedAction()
 
 
@@ -80,7 +86,10 @@ class DragDropOverlay(DropTargetMixin, QWidget):
     zone_changed = Signal(str)
 
     ZONE_REPLACE = "replace"
-    ZONE_ADD = "add"
+    ZONE_SEQUENCE = "sequence"
+    ZONE_STACK = "stack"
+    # Back-compat alias
+    ZONE_ADD = ZONE_SEQUENCE
 
     def __init__(self, parent=None, main_window=None, floating: bool = False):
         if floating:
@@ -98,18 +107,13 @@ class DragDropOverlay(DropTargetMixin, QWidget):
             self.setAcceptDrops(True)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._main_window = main_window if main_window is not None else parent
-        self._active_zone = self.ZONE_REPLACE
-        self._split_x: int | None = None
+        self._active_zone = self.ZONE_SEQUENCE
+        self._split_xs: list[int] | None = None
         self.hide()
 
-    def split_x_for_main_window(self, main_window) -> int:
-        window_mid = main_window.mapToGlobal(QPoint(main_window.width() // 2, 0))
-        return self.mapFromGlobal(window_mid).x()
-
     def set_split_x(self, split_x: int | None) -> None:
-        if self._split_x != split_x:
-            self._split_x = split_x
-            self.update()
+        # Legacy two-zone API — ignored; thirds are computed from width.
+        self.update()
 
     def set_active_zone(self, zone: str) -> None:
         if zone != self._active_zone:
@@ -121,40 +125,48 @@ class DragDropOverlay(DropTargetMixin, QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect()
-        mid_x = self._split_x if self._split_x is not None else rect.width() // 2
-        mid_x = max(0, min(mid_x, rect.width()))
+        w = rect.width()
+        third = w // 3
+        bounds = [
+            (0, third),
+            (third, 2 * third),
+            (2 * third, w),
+        ]
+        zones = [self.ZONE_REPLACE, self.ZONE_SEQUENCE, self.ZONE_STACK]
+        colors = [
+            QColor(40, 90, 160),
+            QColor(40, 140, 90),
+            QColor(140, 90, 40),
+        ]
+        labels = ["Replace All", "Add to Timeline", "Add to Stack"]
+        hints = [
+            "Clear session and\nload dropped files",
+            "Append each file as\na new shot in sequence",
+            "Add as version(s) of\nthe shot under playhead",
+        ]
 
-        replace_active = self._active_zone == self.ZONE_REPLACE
-        add_active = self._active_zone == self.ZONE_ADD
-
-        replace_color = QColor(40, 90, 160, 180 if replace_active else 100)
-        add_color = QColor(40, 140, 90, 180 if add_active else 100)
-
-        painter.fillRect(0, 0, mid_x, rect.height(), replace_color)
-        painter.fillRect(mid_x, 0, rect.width() - mid_x, rect.height(), add_color)
+        for (x0, x1), zone, color, label, hint in zip(bounds, zones, colors, labels, hints):
+            active = self._active_zone == zone
+            fill = QColor(color.red(), color.green(), color.blue(), 180 if active else 100)
+            painter.fillRect(x0, 0, max(0, x1 - x0), rect.height(), fill)
 
         painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
-        painter.drawLine(mid_x, 0, mid_x, rect.height())
+        painter.drawLine(third, 0, third, rect.height())
+        painter.drawLine(2 * third, 0, 2 * third, rect.height())
 
-        font = ui_font(16, QFont.Weight.Bold)
+        font = ui_font(15, QFont.Weight.Bold)
         painter.setFont(font)
         painter.setPen(QColor(255, 255, 255))
-
-        replace_rect = rect.adjusted(0, 0, -rect.width() // 2, 0)
-        add_rect = rect.adjusted(rect.width() // 2, 0, 0, 0)
-        painter.drawText(replace_rect, Qt.AlignmentFlag.AlignCenter, "Replace Media")
-        painter.drawText(add_rect, Qt.AlignmentFlag.AlignCenter, "Add Media")
-
         hint_font = ui_font(11)
-        painter.setFont(hint_font)
-        painter.drawText(
-            replace_rect.adjusted(12, 40, -12, -12),
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-            "Clear existing sources\nand load dropped files",
-        )
-        painter.drawText(
-            add_rect.adjusted(12, 40, -12, -12),
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-            "Append dropped files\nto the source list",
-        )
+
+        for (x0, x1), label, hint in zip(bounds, labels, hints):
+            zone_rect = rect.adjusted(x0, 0, -(w - x1), 0)
+            painter.setFont(font)
+            painter.drawText(zone_rect, Qt.AlignmentFlag.AlignCenter, label)
+            painter.setFont(hint_font)
+            painter.drawText(
+                zone_rect.adjusted(10, 44, -10, -10),
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                hint,
+            )
         painter.end()

@@ -8,21 +8,10 @@ from PySide6.QtGui import QAction, QKeySequence, QFont
 
 from ..core.settings import Settings
 from ..core.timecode import Timecode
-from ..core.cache import CacheEngine
-from ..core.media_source import (
-    MediaSource,
-    decoder_frame_for_source,
-    decoder_frame_to_local_index,
-    global_to_local,
-    local_frame_for_source,
-    local_playback_range,
-    rebuild_timeline_offsets,
-    total_frame_count,
-)
+from ..core.session import Session
+from ..core.media_source import MediaSource, decoder_frame_to_local_index
 from ..color.ocio_manager import OCIOManager
 from ..decoders.exr_decoder import EXRDecoder
-from ..decoders.dpx_decoder import DPXDecoder
-from ..decoders.qt_decoder import QuickTimeDecoder
 from ..decoders.image_io import ANAMORPHIC_PIXEL_ASPECT, SQUARE_PIXEL_ASPECT
 from ..extensions.ocio_api_tool import OcioApiTool
 
@@ -34,6 +23,7 @@ from .settings_dialog import SettingsDialog
 from .widgets import WideComboBox, add_menu_section
 from .fonts import ui_font
 from .source_list_panel import SourceListPanel
+from .drag_drop_overlay import DragDropOverlay
 
 PRESET_FRAME_RATES = [
     ("23.976", 23.976),
@@ -59,7 +49,7 @@ class MainWindow(QMainWindow):
     # Qt automatically marshals this across threads to the GUI thread via a queued
     # connection, since a plain QTimer.singleShot() called from a non-Qt worker
     # thread never fires (that thread has no running event loop).
-    _frame_ready_signal = Signal(int, int)
+    _frame_ready_signal = Signal(str, int)  # media_path, decoder_frame
 
     def __init__(self):
         super().__init__()
@@ -72,11 +62,20 @@ class MainWindow(QMainWindow):
         # Core engines
         self.settings = Settings()
         self.ocio_manager = OCIOManager(self.settings.ocio_config_path)
+        self.session = Session(self.settings)
+        self.session.set_changed_callback(self._on_session_changed)
+        self.session.set_frame_ready_callback(
+            lambda path, frame: self._frame_ready_signal.emit(path, frame)
+        )
         
         # Playback states
-        self.sources: list[MediaSource] = []
-        self.active_source_index = 0
+        self.active_shot_index = 0
+        self.active_version_index = 0
         self._resolution_source_index = 0
+        self._drag_enter_count = 0
+        self._drag_drop_zone = DragDropOverlay.ZONE_SEQUENCE
+        self._suppress_session_refresh = False
+        self._reset_timeline_on_next_change = False
         
         self.playing = False
         self.playback_direction = 1
@@ -124,6 +123,11 @@ class MainWindow(QMainWindow):
         
         # Check renderer initialization status on startup
         QTimer.singleShot(500, self._check_renderer_status)
+
+    @property
+    def sources(self) -> list:
+        """Compatibility: online media sources currently in the pool."""
+        return self.session.all_online_sources()
 
     def _init_ui(self):
         # Create Central Viewport (QRhi surface + HUD overlay as siblings)
@@ -196,9 +200,11 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(header_layout)
 
         self.source_panel = SourceListPanel(self)
-        self.source_panel.source_selected.connect(self._on_source_selected)
-        self.source_panel.source_removed.connect(self._remove_source)
-        self.source_panel.order_changed.connect(self._on_source_order_changed)
+        self.source_panel.shot_selected.connect(self._on_shot_selected)
+        self.source_panel.shot_removed.connect(self._remove_shot)
+        self.source_panel.version_removed.connect(self._remove_version)
+        self.source_panel.active_version_changed.connect(self._on_active_version_changed)
+        self.source_panel.order_changed.connect(self._on_shot_order_changed)
         self.source_panel.hide_requested.connect(lambda: self._set_source_panel_visible(False))
 
         self.viewer_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -299,6 +305,14 @@ class MainWindow(QMainWindow):
         act_open = QAction("Add Media...", self)
         act_open.triggered.connect(self._open_file_dialog)
         file_menu.addAction(act_open)
+
+        act_import = QAction("Import Timeline...", self)
+        act_import.triggered.connect(self._import_timeline)
+        file_menu.addAction(act_import)
+
+        act_export = QAction("Export Timeline...", self)
+        act_export.triggered.connect(self._export_timeline)
+        file_menu.addAction(act_export)
         
         act_clear = QAction("Clear", self)
         act_clear.setShortcut(QKeySequence("Shift+X"))
@@ -324,7 +338,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(act_hud)
 
         add_menu_section(view_menu, "Panels")
-        self.act_media_sources = QAction("Media Sources", self)
+        self.act_media_sources = QAction("Shots", self)
         self.act_media_sources.setCheckable(True)
         self.act_media_sources.setChecked(True)
         self.act_media_sources.triggered.connect(self._toggle_source_panel)
@@ -680,10 +694,9 @@ class MainWindow(QMainWindow):
 
     def _set_pixel_aspect_mode(self, mode: str):
         par = self._pixel_aspect_for_mode(mode)
-        if self.sources:
-            source_index = self._resolution_source_index
-            if 0 <= source_index < len(self.sources):
-                self.sources[source_index].pixel_aspect_ratio = par
+        source = self._selected_source()
+        if source is not None:
+            source.pixel_aspect_ratio = par
 
         self.pixel_aspect_mode = mode
         self.file_pixel_aspect_ratio = par
@@ -693,10 +706,14 @@ class MainWindow(QMainWindow):
                 act.setChecked(m == mode)
         self.seek_to_frame(self.current_frame)
 
-    def _sync_pixel_aspect_ui_for_source(self, source_index: int):
-        if source_index < 0 or source_index >= len(self.sources):
+    def _sync_pixel_aspect_ui_for_source(self, source):
+        if source is None:
             return
-        source = self.sources[source_index]
+        if isinstance(source, int):
+            # Legacy index call — resolve selected source
+            source = self._selected_source()
+            if source is None:
+                return
         par = source.pixel_aspect_ratio if source.pixel_aspect_ratio > 0.0 else SQUARE_PIXEL_ASPECT
         mode = self._pixel_aspect_mode_for_value(par)
         self.pixel_aspect_mode = mode
@@ -709,9 +726,9 @@ class MainWindow(QMainWindow):
                 act.setChecked(m == mode)
                 act.blockSignals(False)
 
-    def _sync_display_ui_for_source(self, source_index: int):
-        self._sync_resolution_ui_for_source(source_index)
-        self._sync_pixel_aspect_ui_for_source(source_index)
+    def _sync_display_ui_for_source(self, source):
+        self._sync_resolution_ui_for_source(source)
+        self._sync_pixel_aspect_ui_for_source(source)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -724,125 +741,177 @@ class MainWindow(QMainWindow):
             "EXR Images (*.exr);;DPX Images (*.dpx);;QuickTimes (*.mov *.mp4);;All Files (*)",
         )
         if path:
-            self._add_media([path], replace=False)
+            self._add_media([path], mode="sequence")
 
-    def _load_source(self, path: str) -> MediaSource:
-        ext = os.path.splitext(path)[1].lower()
-        if ext == ".exr":
-            decoder = EXRDecoder(path)
-        elif ext == ".dpx":
-            decoder = DPXDecoder(path)
-        else:
-            decoder = QuickTimeDecoder(path)
-
-        cache = CacheEngine(decoder, self.settings, resolution_scale=1.0)
-        meta = decoder.get_metadata()
-        frame_count = int(meta.get("frame_count", 0))
-        return MediaSource(
-            path=path,
-            decoder=decoder,
-            cache=cache,
-            frame_count=frame_count,
-            fps=float(meta.get("fps", self.settings.default_fps)),
-            decoder_start_frame=int(meta.get("start_frame", 0)),
-            width=int(meta.get("width", 0)),
-            height=int(meta.get("height", 0)),
-            pixel_aspect_ratio=float(meta.get("pixel_aspect_ratio", SQUARE_PIXEL_ASPECT)),
-            metadata=meta,
+    def _import_timeline(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Timeline",
+            "",
+            "OpenTimelineIO (*.otio *.otiod *.otioz);;All Files (*)",
         )
+        if not path:
+            return
+        try:
+            self.stop_playback()
+            self.viewport.clear_frames()
+            self._reset_timeline_on_next_change = True
+            self.session.import_timeline(path)
+            self.statusBar().showMessage(f"Imported timeline: {os.path.basename(path)}")
+            self._update_ui_states()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Import failed: {exc}")
+            print(f"Import error: {exc}")
 
-    def _add_media(self, paths: list[str], *, replace: bool = False):
+    def _export_timeline(self):
+        if self.session.empty:
+            self.statusBar().showMessage("Nothing to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Timeline",
+            "session.otio",
+            "OpenTimelineIO (*.otio);;All Files (*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".otio"):
+            path += ".otio"
+        try:
+            self.session.export_timeline(path)
+            self.statusBar().showMessage(f"Exported timeline: {os.path.basename(path)}")
+        except Exception as exc:
+            self.statusBar().showMessage(f"Export failed: {exc}")
+            print(f"Export error: {exc}")
+
+    def _add_media(self, paths: list[str], *, mode: str = "sequence", replace: bool | None = None):
+        # Back-compat for older call sites that passed replace=
+        if replace is not None:
+            mode = "replace" if replace else "sequence"
+        if mode not in ("replace", "sequence", "stack"):
+            mode = "sequence"
+
         valid_paths = [path for path in paths if path and os.path.exists(path)]
         if not valid_paths:
             return
 
-        if replace:
-            self._close_all_sources()
+        was_empty = self.session.empty
+        if mode == "replace" or was_empty:
             self.viewport.clear_frames()
+            self._reset_timeline_on_next_change = True
 
-        loaded = 0
-        was_empty = len(self.sources) == 0
-        for path in valid_paths:
-            self.statusBar().showMessage(f"Loading media: {os.path.basename(path)}...")
-            try:
-                source = self._load_source(path)
-                source_index = len(self.sources)
-                source.cache.add_frame_ready_callback(
-                    lambda frame_index, s=source_index: self._frame_ready_signal.emit(s, frame_index)
-                )
-                self.sources.append(source)
-                loaded += 1
-
-                for plugin in self.plugins:
-                    plugin.on_media_loaded(source_index, path, source.metadata)
-
-                self.statusBar().showMessage(f"Added source: {source.display_name}")
-            except Exception as exc:
-                self.statusBar().showMessage(f"Error loading: {exc}")
-                print(f"Error: {exc}")
-
-        if loaded <= 0:
+        self.statusBar().showMessage(f"Loading {len(valid_paths)} media file(s)...")
+        try:
+            loaded = self.session.add_media(
+                valid_paths, mode=mode, playhead_frame=self.current_frame
+            )
+        except Exception as exc:
+            self.statusBar().showMessage(f"Error loading: {exc}")
+            print(f"Error: {exc}")
             return
 
-        self._after_sources_changed(reset_timeline=replace or was_empty)
+        if loaded <= 0:
+            errors = getattr(self.session, "_last_add_errors", [])
+            if errors:
+                self.statusBar().showMessage(f"Error loading: {errors[0]}")
+            return
+
+        for plugin in self.plugins:
+            for path in valid_paths[:loaded]:
+                source = self.session.media_pool.get(path)
+                meta = source.metadata if source else {}
+                plugin.on_media_loaded(0, path, meta)
+
+        self.statusBar().showMessage(f"Added {loaded} media item(s) ({mode})")
         self._update_ui_states()
 
     def _close_all_sources(self):
-        for source in self.sources:
-            source.cache.close()
-        self.sources.clear()
+        self.session.clear()
 
-    def _after_sources_changed(self, *, reset_timeline: bool = False):
-        total_frames = rebuild_timeline_offsets(self.sources)
+    def _on_session_changed(self):
+        if self._suppress_session_refresh:
+            return
+        reset = self._reset_timeline_on_next_change
+        self._reset_timeline_on_next_change = False
+        self._refresh_from_session(reset_timeline=reset)
+
+    def _refresh_from_session(self, *, reset_timeline: bool = False):
+        plan = self.session.plan
         self.viewport.native_renderer.clear_display_cache()
-        self.viewport.set_source_count(len(self.sources))
-        self.viewport.set_source_labels([source.display_name for source in self.sources])
-        
-        for index, source in enumerate(self.sources):
-            self.viewport.native_renderer.register_cache(index, source.cache.native_cache)
-            
-        self.source_panel.set_sources(self.sources)
 
-        if reset_timeline:
-            self.start_frame = self.sources[0].decoder_start_frame if self.sources else 0
-            self.end_frame = max(self.start_frame, total_frames - 1)
-            self.current_frame = self.start_frame
-            self.in_point = self.start_frame
-            self.out_point = self.end_frame
-            self.timeline.set_range(self.start_frame, self.end_frame)
-            self.timeline.set_in_out(self.in_point, self.out_point)
-        elif total_frames > 0:
-            self.start_frame = self.sources[0].decoder_start_frame if self.sources else 0
-            self.end_frame = max(self.start_frame, total_frames - 1)
-            self.current_frame = max(self.start_frame, min(self.current_frame, self.end_frame))
-            self.out_point = max(self.start_frame, min(self.out_point, self.end_frame))
-            self.in_point = max(self.start_frame, min(self.in_point, self.out_point))
-            self.timeline.set_range(self.start_frame, self.end_frame)
-            self.timeline.set_in_out(self.in_point, self.out_point)
+        segment = plan.segment_at(self.current_frame) if not plan.empty else None
+        versions = segment.display_versions() if segment is not None else []
+        self.viewport.set_source_count(len(versions))
+        labels = []
+        for index, version in enumerate(versions):
+            if version.source is not None and version.source.cache is not None and not version.offline:
+                self.viewport.native_renderer.register_cache(index, version.source.cache.native_cache)
+                labels.append(version.source.display_name)
+            else:
+                labels.append(version.clip.name or "offline")
+        self.viewport.set_source_labels(labels)
 
-        if self.sources:
-            if self.active_source_index >= len(self.sources):
-                self.active_source_index = len(self.sources) - 1
-            self.source_panel.set_active_index(self.active_source_index)
-            self._apply_source_metadata(self.active_source_index)
-        else:
-            self.active_source_index = 0
+        self.source_panel.set_plan(
+            plan,
+            selected_shot=self.session.selected_shot_index,
+            selected_version=self.session.selected_version_index,
+        )
+
+        markers = [
+            (seg.global_start, seg.global_end, len(seg.versions))
+            for seg in plan.segments
+        ]
+        self.timeline.set_shot_markers(markers)
+
+        if plan.empty:
+            self.start_frame = 0
+            self.end_frame = 0
+            self.current_frame = 0
+            self.in_point = 0
+            self.out_point = 0
+            self.active_shot_index = 0
+            self.active_version_index = 0
             self.lbl_resolution.setText("")
             self.source_width = 0
             self.source_height = 0
+            self.timeline.set_range(0, 0)
+            self.timeline.set_in_out(0, 0)
+            self.timeline.set_cached_frames(set())
+            return
 
+        self.start_frame = plan.global_start
+        self.end_frame = plan.global_end
+        if reset_timeline:
+            self.current_frame = self.start_frame
+            self.in_point = self.start_frame
+            self.out_point = self.end_frame
+        else:
+            self.current_frame = max(self.start_frame, min(self.current_frame, self.end_frame))
+            self.out_point = max(self.start_frame, min(self.out_point, self.end_frame))
+            self.in_point = max(self.start_frame, min(self.in_point, self.out_point))
+
+        self.timeline.set_range(self.start_frame, self.end_frame)
+        self.timeline.set_in_out(self.in_point, self.out_point)
+
+        self.active_shot_index = self.session.selected_shot_index
+        self.active_version_index = self.session.selected_version_index
+        self._apply_selected_metadata()
         self._sync_all_cache_playback_ranges()
         self.seek_to_frame(self.current_frame)
 
-    def _apply_source_metadata(self, source_index: int):
-        if source_index < 0 or source_index >= len(self.sources):
+    def _selected_source(self) -> MediaSource | None:
+        return self.session.selected_source()
+
+    def _apply_selected_metadata(self):
+        source = self._selected_source()
+        if source is None:
             return
-        source = self.sources[source_index]
         meta = source.metadata
-        self.fps = source.fps
+        self.fps = self.session.effective_fps(self.current_frame)
         self.source_width = source.width
         self.source_height = source.height
-        self._sync_display_ui_for_source(source_index)
+        self._resolution_source_index = 0
+        self._sync_display_ui_for_source(source)
         self.timeline.set_display_options(self.settings.timecode_mode, self.fps)
         self._sync_frame_rate_menu(self.fps)
 
@@ -864,50 +933,58 @@ class MainWindow(QMainWindow):
         else:
             self.exr_layer_combo.addItem("beauty")
 
-        if source_index == 0 or len(self.sources) == 1:
-            detected_cs = self.ocio_manager.detect_input_colorspace(source.path, meta)
-            self.ocio_manager.input_colorspace = detected_cs
-            self.viewport.update_ocio_pipeline()
-            self._build_ocio_submenu()
-
+        detected_cs = self.ocio_manager.detect_input_colorspace(source.path, meta)
+        self.ocio_manager.input_colorspace = detected_cs
+        self.viewport.update_ocio_pipeline()
+        self._build_ocio_submenu()
         self._update_ocio_info_label()
 
-    def _on_source_selected(self, index: int):
-        if index < 0 or index >= len(self.sources):
-            return
-        self.active_source_index = index
-        self._apply_source_metadata(index)
+    def _on_shot_selected(self, shot_index: int, version_index: int):
+        self.session.set_selection(shot_index, version_index)
+        self.active_shot_index = shot_index
+        self.active_version_index = version_index
+        self._apply_selected_metadata()
         self._refresh_timeline_cached_frames()
-        self.statusBar().showMessage(f"Active source: {self.sources[index].display_name}")
+        source = self._selected_source()
+        name = source.display_name if source else f"shot {shot_index}"
+        self.statusBar().showMessage(f"Selected: {name}")
 
-    def _remove_source(self, index: int):
-        if index < 0 or index >= len(self.sources):
-            return
-        source = self.sources.pop(index)
-        source.cache.close()
+    def _on_active_version_changed(self, shot_index: int, version_index: int):
+        self.session.set_active_version(shot_index, version_index)
+        self.statusBar().showMessage(f"Active version set (shot {shot_index}, v{version_index})")
+
+    def _remove_shot(self, shot_index: int):
         self.viewport.clear_frames()
-        self._after_sources_changed()
-        self.statusBar().showMessage(f"Removed source: {source.display_name}")
+        self.session.remove_shot(shot_index)
+        self.statusBar().showMessage(f"Removed shot {shot_index}")
 
-    def _on_source_order_changed(self, paths: list[str]):
-        path_to_source = {source.path: source for source in self.sources}
-        reordered = [path_to_source[path] for path in paths if path in path_to_source]
-        if len(reordered) != len(self.sources):
-            return
-        self.sources = reordered
-        self._after_sources_changed()
+    def _remove_version(self, shot_index: int, version_index: int):
+        self.viewport.clear_frames()
+        self.session.remove_version(shot_index, version_index)
+        self.statusBar().showMessage(f"Removed version {version_index} from shot {shot_index}")
+
+    def _on_shot_order_changed(self, shot_indices: list):
+        self.session.reorder_shots(shot_indices)
 
     def _sync_all_cache_playback_ranges(self):
-        for index, source in enumerate(self.sources):
-            local_in, local_out = local_playback_range(
-                self.sources, index, self.in_point, self.out_point
-            )
-            source.cache.set_playback_range(local_in, local_out)
+        plan = self.session.plan
+        if plan.empty:
+            return
+        for segment in plan.adjacent_segments(self.current_frame):
+            for version in segment.versions:
+                if version.source is None or version.source.cache is None or version.offline:
+                    continue
+                local_in, local_out = plan.playback_range_for_version(
+                    segment, version, self.in_point, self.out_point
+                )
+                version.source.cache.set_playback_range(local_in, local_out)
 
     def clear_media(self):
         self.stop_playback()
         self.viewport.clear_frames()
-        self._close_all_sources()
+        self._suppress_session_refresh = True
+        self.session.clear()
+        self._suppress_session_refresh = False
 
         self.fps = self.settings.default_fps
         self.start_frame = 0
@@ -915,16 +992,18 @@ class MainWindow(QMainWindow):
         self.in_point = 0
         self.out_point = 0
         self.current_frame = 0
-        self.active_source_index = 0
+        self.active_shot_index = 0
+        self.active_version_index = 0
 
         self.timeline.set_range(0, 0)
         self.timeline.set_in_out(0, 0)
         self.timeline.set_current_frame(0)
         self.timeline.set_cached_frames(set())
+        self.timeline.set_shot_markers([])
 
         self.exr_layer_combo.clear()
         self.exr_layer_combo.addItem("beauty")
-        self.source_panel.set_sources([])
+        self.source_panel.set_plan(self.session.plan)
 
         self.lbl_resolution.setText("")
         self.source_width = 0
@@ -935,6 +1014,7 @@ class MainWindow(QMainWindow):
         self._update_readout_display()
 
         self.viewport.resolution_str = "0x0"
+        self.viewport.set_source_count(0)
         self.viewport.set_source_labels([])
         self.viewport.update()
         self.statusBar().showMessage("Viewer inputs cleared.")
@@ -945,7 +1025,8 @@ class MainWindow(QMainWindow):
         self.seek_to_frame(frame)
 
     def seek_to_frame(self, frame: int):
-        if not self.sources:
+        plan = self.session.plan
+        if plan.empty:
             self.current_frame = 0
             self.timeline.set_current_frame(0)
             return
@@ -953,19 +1034,49 @@ class MainWindow(QMainWindow):
         frame = max(self.start_frame, min(self.end_frame, frame))
         self.current_frame = frame
 
-        sequence_index, _ = global_to_local(self.sources, frame)
-        self.viewport.set_sequence_index(sequence_index)
-        self.source_panel.highlight_sequence_index(sequence_index)
+        segment = plan.segment_at(frame)
+        if segment is None:
+            return
 
-        current_source = self.sources[sequence_index]
-        self.fps = current_source.fps
-        self.source_width = current_source.width
-        self.source_height = current_source.height
-        self._sync_display_ui_for_source(sequence_index)
+        # Viewport slots = versions of the current shot stack
+        versions = segment.display_versions()
+        self.viewport.set_source_count(len(versions))
+        labels = []
+        for index, version in enumerate(versions):
+            if version.source is not None and version.source.cache is not None and not version.offline:
+                self.viewport.native_renderer.register_cache(index, version.source.cache.native_cache)
+                labels.append(version.source.display_name)
+            else:
+                labels.append(version.clip.name or "offline")
+        self.viewport.set_source_labels(labels)
 
-        for index, source in enumerate(self.sources):
-            decoder_frame = decoder_frame_for_source(self.sources, index, frame)
-            source.cache.set_playhead(decoder_frame, self.playback_direction)
+        # Sequence mode shows the active version (always slot 0 in display_versions)
+        self.viewport.set_sequence_index(0)
+        self.source_panel.highlight_sequence_index(segment.index)
+
+        active = segment.active
+        current_source = active.source if active is not None else None
+        previous_fps = self.fps
+        override = self.session.playback_rate_override()
+        if override is not None:
+            self.fps = override
+        elif current_source is not None:
+            self.fps = current_source.fps
+        else:
+            self.fps = segment.rate
+
+        if current_source is not None:
+            self.source_width = current_source.width
+            self.source_height = current_source.height
+            self._sync_display_ui_for_source(current_source)
+
+        # Prefetch playheads for current + adjacent shot versions
+        for adj in plan.adjacent_segments(frame):
+            for version in adj.versions:
+                if version.source is None or version.source.cache is None or version.offline:
+                    continue
+                decoder_frame = plan.decoder_frame_for_version(adj, version, frame)
+                version.source.cache.set_playhead(decoder_frame, self.playback_direction)
 
         self._apply_cached_frames(frame)
 
@@ -978,24 +1089,38 @@ class MainWindow(QMainWindow):
             self.lbl_fps.setText(self._format_fps_label(self.fps))
         self._update_readout_display()
 
+        # Restart timer when rate changes mid-playback
+        if self.playing and not self._fps_matches(previous_fps, self.fps):
+            self.timer.start(int(1000.0 / max(1.0, self.fps)))
+
         for plugin in self.plugins:
             plugin.on_frame_changed(frame, self.viewport.current_timecode)
 
     def _apply_cached_frames(self, frame: int):
-        if not self.sources:
+        plan = self.session.plan
+        if plan.empty:
+            return
+        segment = plan.segment_at(frame)
+        if segment is None:
             return
 
-        sequence_index, _ = global_to_local(self.sources, frame)
+        versions = segment.display_versions()
+        local_frame = plan.local_index(segment, frame)
         needs_update = False
-        for index, source in enumerate(self.sources):
-            local_frame = local_frame_for_source(self.sources, index, frame)
-            decoder_frame = decoder_frame_for_source(self.sources, index, frame)
-            frame_dict = source.cache.get_frame(decoder_frame)
+        for index, version in enumerate(versions):
+            if version.source is None or version.source.cache is None or version.offline:
+                if index < len(self.viewport.frame_slots):
+                    self.viewport.frame_slots[index].cached = False
+                needs_update = True
+                continue
+            decoder_frame = plan.decoder_frame_for_version(segment, version, frame)
+            frame_dict = version.source.cache.get_frame(decoder_frame)
             if not frame_dict:
                 if index < len(self.viewport.frame_slots):
                     self.viewport.frame_slots[index].cached = False
                 needs_update = True
                 continue
+            source = version.source
             tc = frame_dict["timecode"] or Timecode.frame_to_timecode(decoder_frame, source.fps, 0)
             self.viewport.set_frame(
                 index,
@@ -1007,38 +1132,62 @@ class MainWindow(QMainWindow):
                 timecode=tc,
                 fps=source.fps,
                 pixel_aspect_ratio=source.pixel_aspect_ratio,
-                is_primary=(index == sequence_index),
+                is_primary=version.is_active,
                 upload_token=frame_dict.get("upload_token", frame_dict["frame_index"]),
             )
         if needs_update:
             self.viewport.update()
 
-    def _on_cache_frame_ready(self, source_index: int, frame_index: int):
-        # Runs on the GUI thread: this slot is only ever invoked via
-        # _frame_ready_signal, which Qt queues across threads automatically.
-        if not self.sources:
+    def _on_cache_frame_ready(self, media_path: str, frame_index: int):
+        # Runs on the GUI thread via _frame_ready_signal.
+        plan = self.session.plan
+        if plan.empty:
             return
-        decoder_at_playhead = decoder_frame_for_source(self.sources, source_index, self.current_frame)
-        if frame_index != decoder_at_playhead:
+        segment = plan.segment_at(self.current_frame)
+        if segment is None:
             return
-        self._apply_cached_frames(self.current_frame)
-        if not self.playing:
-            self._refresh_timeline_cached_frames()
+        for version in segment.display_versions():
+            if version.source is None or version.offline:
+                continue
+            if os.path.abspath(version.source.path) != os.path.abspath(media_path):
+                continue
+            decoder_at_playhead = plan.decoder_frame_for_version(
+                segment, version, self.current_frame
+            )
+            if frame_index != decoder_at_playhead:
+                return
+            self._apply_cached_frames(self.current_frame)
+            if not self.playing:
+                self._refresh_timeline_cached_frames()
+            return
 
     def _refresh_timeline_cached_frames(self):
-        if not self.sources:
+        plan = self.session.plan
+        if plan.empty:
             self.timeline.set_cached_frames(set())
             return
-        cache_index = self.active_source_index
-        if cache_index < 0 or cache_index >= len(self.sources):
-            cache_index = 0
-        active_cache = self.sources[cache_index].cache
-        decoder_frame = decoder_frame_for_source(self.sources, cache_index, self.current_frame)
-        active_cache.set_playhead(decoder_frame, self.playback_direction)
-        cached = active_cache.get_cached_frames()
-        source = self.sources[cache_index]
+        source = self._selected_source()
+        segment = None
+        version = self.session.selected_version()
+        if 0 <= self.session.selected_shot_index < len(plan.segments):
+            segment = plan.segments[self.session.selected_shot_index]
+        if source is None or source.cache is None or segment is None or version is None:
+            # Fall back to active version of playhead segment
+            segment = plan.segment_at(self.current_frame)
+            if segment is None or segment.active is None or segment.active.source is None:
+                self.timeline.set_cached_frames(set())
+                return
+            version = segment.active
+            source = version.source
+        if source is None or source.cache is None:
+            self.timeline.set_cached_frames(set())
+            return
+
+        decoder_frame = plan.decoder_frame_for_version(segment, version, self.current_frame)
+        source.cache.set_playhead(decoder_frame, self.playback_direction)
+        cached = source.cache.get_cached_frames()
         local_cached = {
-            source.timeline_offset + decoder_frame_to_local_index(source, decoder_frame_num)
+            segment.global_start + decoder_frame_to_local_index(source, decoder_frame_num)
             for decoder_frame_num in cached
         }
         self.timeline.set_cached_frames(local_cached)
@@ -1081,7 +1230,7 @@ class MainWindow(QMainWindow):
         self._update_playback_buttons()
 
         # Match rate timer interval (ms)
-        interval_ms = int(1000.0 / self.fps)
+        interval_ms = int(1000.0 / max(1.0, self.fps))
         self.timer.start(interval_ms)
         self._cached_frames_timer.start()
 
@@ -1094,27 +1243,28 @@ class MainWindow(QMainWindow):
 
     # In / Out controls
     def _jump_to_adjacent_clip(self, direction: int):
-        if not self.sources or direction == 0:
+        plan = self.session.plan
+        if plan.empty or direction == 0:
             return
 
         if self.playing:
             self.stop_playback()
 
-        current_index, _ = global_to_local(self.sources, self.current_frame)
-        target_index = current_index + direction
-        if target_index < 0 or target_index >= len(self.sources):
+        current = plan.segment_at(self.current_frame)
+        if current is None:
+            return
+        target_index = current.index + direction
+        if target_index < 0 or target_index >= len(plan.segments):
             return
 
-        source = self.sources[target_index]
-        clip_start = source.timeline_offset
-        clip_end = source.timeline_end
-
-        self.in_point = clip_start
-        self.out_point = clip_end
+        segment = plan.segments[target_index]
+        self.in_point = segment.global_start
+        self.out_point = segment.global_end
         self.timeline.set_in_out(self.in_point, self.out_point)
         self._sync_all_cache_playback_ranges()
-        self.seek_to_frame(clip_start)
-        self.statusBar().showMessage(f"Clip: {source.display_name}")
+        self.seek_to_frame(segment.global_start)
+        name = segment.stack.name or f"Shot {target_index + 1}"
+        self.statusBar().showMessage(f"Clip: {name}")
 
     def _set_in_point_here(self):
         self.in_point = self.current_frame
@@ -1163,18 +1313,19 @@ class MainWindow(QMainWindow):
         return abs(a - b) < tol
 
     def _current_resolution_scale(self) -> float:
-        if not self.sources:
+        source = self._selected_source()
+        if source is None:
             return 1.0
-        index = self._resolution_source_index
-        if index < 0 or index >= len(self.sources):
-            return 1.0
-        return self.sources[index].resolution_scale
+        return source.resolution_scale
 
-    def _sync_resolution_ui_for_source(self, source_index: int):
-        if source_index < 0 or source_index >= len(self.sources):
+    def _sync_resolution_ui_for_source(self, source):
+        if source is None:
             return
-        self._resolution_source_index = source_index
-        scale = self.sources[source_index].resolution_scale
+        if isinstance(source, int):
+            source = self._selected_source()
+            if source is None:
+                return
+        scale = source.resolution_scale
         self._sync_resolution_menu(scale)
         self._update_resolution_label()
 
@@ -1204,14 +1355,10 @@ class MainWindow(QMainWindow):
 
     def _set_resolution_scale(self, scale: float):
         scale = Settings.clamp_resolution_scale(scale)
-        if not self.sources:
+        source = self._selected_source()
+        if source is None or source.cache is None:
             return
 
-        source_index = self._resolution_source_index
-        if source_index < 0 or source_index >= len(self.sources):
-            return
-
-        source = self.sources[source_index]
         if self._scale_matches(source.resolution_scale, scale):
             return
 
@@ -1258,6 +1405,7 @@ class MainWindow(QMainWindow):
     def _set_playback_fps(self, fps: float):
         fps = max(1.0, min(120.0, float(fps)))
         self.fps = fps
+        self.session.set_playback_rate_override(fps)
         self.settings.default_fps = fps
         self.settings.save()
 
@@ -1286,18 +1434,18 @@ class MainWindow(QMainWindow):
             self._set_playback_fps(fps)
 
     def _on_exr_layer_changed(self, index):
-        if self.exr_layer_combo.count() == 0 or not self.sources:
+        if self.exr_layer_combo.count() == 0 or self.session.empty:
             return
         layer = self.exr_layer_combo.currentText()
         self.active_exr_layer = layer
         self.viewport.exr_layer_str = layer
-        source_index = self.active_source_index
-        if source_index < 0 or source_index >= len(self.sources):
-            source_index = 0
-        decoder = self.sources[source_index].decoder
-        if isinstance(decoder, EXRDecoder):
+        source = self._selected_source()
+        if source is None:
+            return
+        decoder = source.decoder
+        if isinstance(decoder, EXRDecoder) and source.cache is not None:
             decoder.active_layer = layer
-            self.sources[source_index].cache.clear()
+            source.cache.clear()
             self.seek_to_frame(self.current_frame)
         else:
             self.viewport.update()
@@ -1428,7 +1576,9 @@ class MainWindow(QMainWindow):
             self.settings.save()
             new_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
             # Update cache worker thread sizes
-            for source in self.sources:
+            for source in self.session.all_online_sources():
+                if source.cache is None:
+                    continue
                 if old_mode != new_mode:
                     source.cache.clear()
                 source.cache.update_settings()

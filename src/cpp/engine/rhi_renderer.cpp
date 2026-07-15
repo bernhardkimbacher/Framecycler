@@ -1105,7 +1105,8 @@ void RhiRenderer::upload_texture_3d(OcioLut3D& lut, QRhiResourceUpdateBatch* bat
         delete lut.texture;
     }
 
-    lut.texture = _rhi->newTexture(QRhiTexture::RGBA32F, lut.size, lut.size, lut.size, QRhiTexture::ThreeDimensional);
+    // depth > 0 implies ThreeDimensional; sampleCount must stay 1 (not the flag value).
+    lut.texture = _rhi->newTexture(QRhiTexture::RGBA32F, lut.size, lut.size, lut.size);
     lut.texture->create();
 
     int rowStride = lut.size * 4 * sizeof(float);

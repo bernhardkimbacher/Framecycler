@@ -7,7 +7,6 @@ from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QByteArray, QEvent
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QWindow, QExposeEvent, QResizeEvent
 from ..color.ocio_manager import OCIOManager
 from ..core.tile_layout import TileLayout, compute_tile_layouts
-from ..core.media_source import decoder_frame_for_source, local_playback_range
 from .fonts import mono_font, ui_font
 from .drag_drop_overlay import DragDropOverlay
 
@@ -135,7 +134,7 @@ class ViewportContainer(QWidget):
         super().__init__(parent)
         self._main_window = main_window
         self._drag_enter_count = 0
-        self._drag_drop_zone = DragDropOverlay.ZONE_REPLACE
+        self._drag_drop_zone = DragDropOverlay.ZONE_SEQUENCE
         self.setAcceptDrops(True)
         self.viewport = Viewport(ocio_manager, main_window, self)
         self._hud_overlay = ViewportHudOverlay(self.viewport, self)
@@ -175,11 +174,18 @@ class ViewportContainer(QWidget):
         self._drag_overlay.hide()
 
     def _update_drag_zone(self, viewer_pos: QPoint) -> None:
-        zone = (
-            DragDropOverlay.ZONE_REPLACE
-            if viewer_pos.x() < self.width() * 0.5
-            else DragDropOverlay.ZONE_ADD
-        )
+        w = self.width()
+        if w <= 0:
+            zone = DragDropOverlay.ZONE_SEQUENCE
+        else:
+            third = w / 3.0
+            x = viewer_pos.x()
+            if x < third:
+                zone = DragDropOverlay.ZONE_REPLACE
+            elif x < 2.0 * third:
+                zone = DragDropOverlay.ZONE_SEQUENCE
+            else:
+                zone = DragDropOverlay.ZONE_STACK
         self._drag_drop_zone = zone
         self._drag_overlay.set_active_zone(zone)
 
@@ -215,8 +221,8 @@ class ViewportContainer(QWidget):
         self._hide_drag_overlay()
         paths = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
         if paths:
-            replace = self._drag_drop_zone == DragDropOverlay.ZONE_REPLACE
-            self._main_window._add_media(paths, replace=replace)
+            mode = self._drag_drop_zone or DragDropOverlay.ZONE_SEQUENCE
+            self._main_window._add_media(paths, mode=mode)
         event.acceptProposedAction()
 
     def resizeEvent(self, event):
@@ -332,8 +338,8 @@ class Viewport(QWidget):
             container._hide_drag_overlay()
             paths = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
             if paths:
-                replace = container._drag_drop_zone == DragDropOverlay.ZONE_REPLACE
-                target._add_media(paths, replace=replace)
+                mode = container._drag_drop_zone or DragDropOverlay.ZONE_SEQUENCE
+                target._add_media(paths, mode=mode)
             event.acceptProposedAction()
             return True
         return False
@@ -550,18 +556,28 @@ class Viewport(QWidget):
 
     def _sync_display_cache_playheads(self) -> None:
         main_window = getattr(self, "main_window", None)
-        if main_window is None or not getattr(main_window, "sources", None):
+        if main_window is None:
+            return
+        session = getattr(main_window, "session", None)
+        if session is None or session.empty:
+            return
+        plan = session.plan
+        segment = plan.segment_at(main_window.current_frame)
+        if segment is None:
             return
         direction = main_window.playback_direction if main_window.playing else 0
-        for index, source in enumerate(main_window.sources):
+        versions = segment.display_versions()
+        for index, version in enumerate(versions):
+            if version.source is None or version.source.cache is None or version.offline:
+                continue
             if index < len(self.frame_slots) and self.frame_slots[index].cached:
                 decoder_frame = self.frame_slots[index].decoder_frame
             else:
-                decoder_frame = decoder_frame_for_source(
-                    main_window.sources, index, main_window.current_frame
+                decoder_frame = plan.decoder_frame_for_version(
+                    segment, version, main_window.current_frame
                 )
-            local_in, local_out = local_playback_range(
-                main_window.sources, index, main_window.in_point, main_window.out_point
+            local_in, local_out = plan.playback_range_for_version(
+                segment, version, main_window.in_point, main_window.out_point
             )
             self.native_renderer.set_source_playhead(
                 index, decoder_frame, direction, local_in, local_out

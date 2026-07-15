@@ -24,6 +24,9 @@ class Timeline(QWidget):
         
         # Caching information
         self.cached_frames = set()
+
+        # Shot segment markers: list of (global_start, global_end, version_count)
+        self.shot_markers: list[tuple[int, int, int]] = []
         
         # Dragging state
         self.scrubbing = False
@@ -53,6 +56,11 @@ class Timeline(QWidget):
 
     def set_cached_frames(self, cached: set):
         self.cached_frames = cached
+        self.update()
+
+    def set_shot_markers(self, markers: list[tuple[int, int, int]]):
+        """markers: [(global_start, global_end, version_count), ...]"""
+        self.shot_markers = list(markers or [])
         self.update()
 
     def _frame_from_x(self, x: int) -> int:
@@ -107,6 +115,20 @@ class Timeline(QWidget):
         
         # Draw track background
         painter.fillRect(track_x, track_y, track_w, track_h, QBrush(QColor(45, 45, 45)))
+
+        # Shot boundaries and multi-version indicators
+        if self.shot_markers and track_w > 0:
+            for i, (seg_start, seg_end, version_count) in enumerate(self.shot_markers):
+                x0 = self._x_from_frame(seg_start)
+                x1 = self._x_from_frame(seg_end + 1)
+                if version_count > 1:
+                    painter.fillRect(
+                        x0, track_y - 3, max(1, x1 - x0), 3,
+                        QBrush(QColor(90, 140, 220, 160)),
+                    )
+                if i > 0:
+                    painter.setPen(QPen(QColor(180, 180, 180, 160), 1))
+                    painter.drawLine(x0, track_y - 4, x0, track_y + track_h + 2)
         
         # Draw Cache status blocks (green cache indicators)
         cache_brush = QBrush(QColor(0, 100, 0, 120))  # Dark forest green for cache blocks

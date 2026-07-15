@@ -37,14 +37,14 @@ class TestFrameReadyThreading(unittest.TestCase):
         observed_threads = []
         done = threading.Event()
 
-        def on_ready(source_index, frame_index):
+        def on_ready(media_path, frame_index):
             observed_threads.append(threading.current_thread().name)
             done.set()
 
         window._frame_ready_signal.connect(on_ready)
 
         def emit_from_worker():
-            window._frame_ready_signal.emit(0, 42)
+            window._frame_ready_signal.emit("/tmp/fake.exr", 42)
 
         worker = threading.Thread(target=emit_from_worker)
         worker.start()
@@ -71,8 +71,12 @@ class TestFrameReadyThreading(unittest.TestCase):
 
         window._apply_cached_frames = traced_apply
 
-        # Simulate a source at frame 0 with decoder_start_frame 0, then notify
-        # "frame 0 ready" from a background thread exactly like CacheEngine does.
+        # Build a minimal one-shot session so the path-based ready handler
+        # can match the playhead version.
+        from src.framecycler.core import otio_model
+        from src.framecycler.core.media_source import MediaSource
+        from src.framecycler.core.playback_plan import PlaybackPlan, Segment, VersionSlot
+
         class _FakeCache:
             def get_frame(self, frame_index):
                 return None
@@ -86,18 +90,43 @@ class TestFrameReadyThreading(unittest.TestCase):
             def close(self):
                 pass
 
-        class _FakeSource:
-            path = "fake.exr"
-            frame_count = 1
-            timeline_offset = 0
-            decoder_start_frame = 0
-            cache = _FakeCache()
-            decoder = type("D", (), {"frame_numbers": []})()
+            def add_frame_ready_callback(self, callback):
+                pass
 
-        window.sources = [_FakeSource()]
+            def set_playback_range(self, local_in, local_out):
+                pass
+
+        fake_path = os.path.abspath("fake.exr")
+        source = MediaSource(
+            path=fake_path,
+            decoder=type("D", (), {"frame_numbers": []})(),
+            cache=_FakeCache(),
+            frame_count=1,
+            fps=24.0,
+            decoder_start_frame=0,
+        )
+        clip = otio_model.clip_from_media(
+            fake_path, {"fps": 24.0, "frame_count": 1, "start_frame": 0}
+        )
+        stack = otio_model.wrap_shot_stack(clip)
+        version = VersionSlot(clip=clip, source=source, is_active=True, is_compare=True)
+        segment = Segment(
+            index=0,
+            global_start=0,
+            global_end=0,
+            stack=stack,
+            versions=[version],
+            rate=24.0,
+        )
+        window.session.plan = PlaybackPlan(segments=[segment], global_start=0, global_end=0)
+        window.session.media_pool._entries[fake_path] = (source, 1)
         window.current_frame = 0
+        window.start_frame = 0
+        window.end_frame = 0
 
-        worker = threading.Thread(target=lambda: window._frame_ready_signal.emit(0, 0))
+        worker = threading.Thread(
+            target=lambda: window._frame_ready_signal.emit(fake_path, 0)
+        )
         worker.start()
         worker.join()
 
