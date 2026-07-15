@@ -10,6 +10,11 @@ if sys.platform == "win32":
     except ImportError:
         pass
 
+    vcpkg_root = os.environ.get("VCPKG_INSTALLATION_ROOT") or "C:\\vcpkg"
+    vcpkg_bin = os.path.join(vcpkg_root, "installed", "x64-windows", "bin")
+    if os.path.isdir(vcpkg_bin):
+        os.add_dll_directory(vcpkg_bin)
+
 
 # Set default shipped OCIO config if not specified by user
 if "OCIO" not in os.environ:

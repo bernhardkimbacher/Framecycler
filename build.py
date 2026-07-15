@@ -125,6 +125,17 @@ def build_extension():
                 
     if not copied:
         raise FileNotFoundError("Could not locate compiled framecycler_engine binary.")
+
+    # On Windows, copy all dependency DLLs from vcpkg alongside the compiled .pyd module
+    # so they are automatically resolved by the Windows dynamic loader.
+    if sys.platform == "win32":
+        vcpkg_root = os.environ.get("VCPKG_INSTALLATION_ROOT") or "C:\\vcpkg"
+        vcpkg_bin = os.path.join(vcpkg_root, "installed", "x64-windows", "bin")
+        if os.path.isdir(vcpkg_bin):
+            print(f"Copying dependency DLLs from {vcpkg_bin} to {dest_dir}...")
+            for file in os.listdir(vcpkg_bin):
+                if file.endswith(".dll"):
+                    shutil.copy2(os.path.join(vcpkg_bin, file), os.path.join(dest_dir, file))
     
     # On macOS, ad-hoc sign the compiled binary to satisfy Gatekeeper.
     # Without this, macOS provenance tracking quarantines freshly compiled .so files
