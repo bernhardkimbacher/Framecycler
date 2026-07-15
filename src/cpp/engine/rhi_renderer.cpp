@@ -2,6 +2,7 @@
 #include "cache_manager.h"
 #include "gpu_texture_cache.h"
 #include <QWindow>
+#include <QGuiApplication>
 #include <QDebug>
 #include <QEvent>
 #include <regex>
@@ -124,8 +125,15 @@ bool RhiRenderer::initialize_rhi_on_thread()
     QRhiD3D11InitParams params;
     _rhi = QRhi::create(QRhi::D3D11, &params);
 #else
-    QRhiVulkanInitParams params;
-    _rhi = QRhi::create(QRhi::Vulkan, &params);
+    if (QGuiApplication::platformName() == QLatin1String("offscreen")) {
+        qWarning() << "RhiRenderer: offscreen platform detected, bypassing Vulkan to use Null backend directly.";
+        QRhiNullInitParams nullParams;
+        _rhi = QRhi::create(QRhi::Null, &nullParams);
+        _is_fallback_null_backend = true;
+    } else {
+        QRhiVulkanInitParams params;
+        _rhi = QRhi::create(QRhi::Vulkan, &params);
+    }
 #endif
 
     if (!_rhi) {
