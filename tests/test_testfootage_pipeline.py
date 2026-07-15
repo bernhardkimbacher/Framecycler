@@ -13,11 +13,21 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtCore import QMimeData, QUrl
 
 from src.framecycler.ui.main_window import MainWindow
-from src.framecycler.core.media_source import decoder_frame_for_source
 
 TEST_EXR = os.path.join(
     REPO_ROOT, ".temp/testFootage/KPO_012_0140_MP_v001.0993.exr"
 )
+
+
+def decoder_frame_at(window: MainWindow, global_frame: int) -> int:
+    plan = window.session.plan
+    segment = plan.segment_at(global_frame)
+    if segment is None:
+        return 0
+    version = segment.active
+    if version is None:
+        return 0
+    return plan.decoder_frame_for_version(segment, version, global_frame)
 
 
 @unittest.skipUnless(os.path.isfile(TEST_EXR), "testFootage EXR not present")
@@ -37,7 +47,7 @@ class TestTestFootagePipeline(unittest.TestCase):
         self.assertEqual(src.decoder_start_frame, 993)
         self.assertEqual(src.frame_count, 4)
 
-        decoder_frame = decoder_frame_for_source(window.sources, 0, 0)
+        decoder_frame = decoder_frame_at(window, 0)
         deadline = time.time() + 15.0
         while time.time() < deadline:
             self.app.processEvents()
