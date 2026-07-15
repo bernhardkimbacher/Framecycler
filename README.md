@@ -1,58 +1,56 @@
 # Framecycler Reboot // VFX Review Application Technical Manual
 
-Framecycler Reboot is a high-performance, lightweight Visual Effects Review application designed for Windows, macOS, and Linux. It is built on a **Hybrid Architecture** combining a compiled C++20 core engine (`framecycler_engine`) for per-source frame RAM caching with a Python 3.12+ / PySide6 (Qt 6.11) UI shell for multi-source timeline coordination, decoding, Qt RHI GPU rendering, and extension scriptability.
+Framecycler Reboot is a high-performance, lightweight Visual Effects Review application designed for Windows, macOS, and Linux. It is built on a **Hybrid Architecture** combining a compiled C++20 core engine (`framecycler_engine`) for per-source frame RAM caching and native Qt RHI GPU rendering with a Python 3.12+ / PySide6 (Qt 6.10+) UI shell for multi-source timeline coordination, UI layouts, and extension scriptability.
 
 ---
 
 ## 1. Architectural System Overview
 
-Framecycler Reboot splits execution between native C++ and Python coordinates to bypass Python's Global Interpreter Lock (GIL), avoid garbage collection (GC) stutters during uncompressed 4K playback, and maintain custom Python extension tools. The application loads an **ordered list of media sources** (`MediaSource`), each with its own decoder and RAM cache, onto a **single concatenated global timeline** for Sequence playback and multi-source compare modes.
+Framecycler Reboot splits execution between native C++ and Python coordinates to bypass Python's Global Interpreter Lock (GIL), avoid garbage collection (GC) stutters during uncompressed 4K playback, and maintain custom Python extension tools. The application loads an **ordered list of media sources** (`MediaSource`), each with its own decoder and C++ RAM cache, onto a **single concatenated global timeline** for Sequence playback and multi-source compare modes.
 
 ```mermaid
 graph TB
-    subgraph UI["PySide6 UI Shell"]
+    subgraph UI["PySide6 UI Shell (Python)"]
         MW[MainWindow Coordinator]
         SLP[SourceListPanel]
         TL[Timeline]
-        VP[Viewport QRhiWidget]
+        VP[Viewport QWidget Container]
         HUD[ViewportHudOverlay]
+        OCIO[OCIOManager]
     end
 
     subgraph Sources["Per MediaSource × N"]
         MS[MediaSource]
         DEC[Decoder EXR / DPX / QT]
         CE[CacheEngine Python]
-        CM[C++ CacheManager]
         MS --> DEC
         MS --> CE
-        CE --> CM
         CE -->|ThreadPool prefetch| DEC
     end
 
-    subgraph Render["Python QRhi Pipeline"]
-        RVR[RhiViewportRenderer]
-        OCIO[OCIOManager]
-        SP[ShaderPipeline + quad.glsl]
-        SB[ShaderBaker pyside6-qsb]
+    subgraph Render["Native C++ Engine (framecycler_engine)"]
+        RR[RhiRenderer]
+        QB[QShaderBaker C++]
+        CM[C++ CacheManager]
+        CE -->|decode_and_cache_frame| CM
     end
 
     MW --> SLP
     MW --> TL
     MW -->|seek_to_frame global| CE
-    DEC -->|float16 ndarray| CE
-    CE -->|zero-copy view + QByteArray| VP
-    MW -->|set_frame per source index| VP
-    VP --> RVR
-    OCIO --> SP --> SB --> RVR
+    DEC -->|filepath / native read| CE
+    VP -->|native QWindow pointer| RR
+    OCIO -->|set_shader_sources GLSL| RR
+    RR --> QB -->|compile standard QShaders| RR
     HUD -.->|Wipe divider| VP
-    RVR -->|QRhi GPU pass| Screen[Display]
+    RR -->|QRhi GPU pass| Screen[Display]
 ```
 
 ### Key Subsystem Division
-* **Python Layer**: Handles UI layouts, transport timer loops, **multi-source timeline coordination** (`media_source.py`), per-source background decode prefetch (`CacheEngine` per `MediaSource`), OCIO shader bundling, **Qt RHI viewport rendering** (`RhiViewportRenderer`), and custom extension modules. Decoders load EXR/DPX via OpenImageIO and QuickTime via PyAV.
-* **C++ Core Module (`framecycler_engine`)**: Written in C++20. Manages contiguous half-float frame cache blocks, playhead-aware eviction, and zero-copy NumPy views into cached pixel memory. Each `MediaSource` owns its own `CacheManager` instance. GPU rendering was moved to Python to avoid dual-Qt linking instability on macOS.
+* **Python Layer**: Handles UI layouts, transport timer loops, **multi-source timeline coordination** (`media_source.py`), per-source background decode prefetch scheduling (`CacheEngine` per `MediaSource`), and custom extension modules. Decoders resolve sequence file structures, reading EXR/DPX via OpenImageIO and QuickTime via PyAV.
+* **C++ Core Module (`framecycler_engine`)**: Written in C++20. Manages contiguous half-float frame cache blocks and playhead-aware eviction (`CacheManager`), and handles **native GPU presentation and rendering** (`RhiRenderer`) on a dedicated render thread. GPU rendering interacts directly with PySide6's Qt RHI context to avoid dual-Qt linking crashes.
 
-Legacy OpenGL rendering (`GLRenderer`, `gl_loader.h`) and the C++ `RhiRenderer` were removed in the Qt RHI migration. The viewport now renders entirely through PySide6 `QRhiWidget` and `RhiViewportRenderer`. The older fixed **Slot A / Slot B** dual-decoder model was replaced in v0.2.4 by the ordered `sources` list and concatenated timeline described in §2.A.
+The viewport renders entirely through the C++ `RhiRenderer` targeting a native `QWindow` container, providing low-overhead, zero-copy texture uploads and parallel execution. The older fixed **Slot A / Slot B** dual-decoder model was replaced in v0.2.4 by the ordered `sources` list and concatenated timeline.
 
 ---
 
@@ -65,7 +63,7 @@ Located in `src/framecycler/core/media_source.py`. Each loaded clip or sequence 
 * **Ordered source list**: `MainWindow.sources` holds sources in playback/compare order. **File → Add Media** appends; drag-and-drop **Replace** (left zone) clears and reloads, **Add** (right zone) appends.
 * **Concatenated global timeline**: `rebuild_timeline_offsets()` assigns each source a `timeline_offset`. Global frames run `0 … total_frame_count−1` across all clips back-to-back. `global_to_local()` maps the playhead to `(source_index, local_frame)` for Sequence mode.
 * **Decoder frame mapping**: Decoders use absolute frame numbers (sparse sequence indices, QuickTime timecode offsets). `decoder_frame_for_source()` and `local_index_to_decoder_frame()` translate between global timeline position and per-decoder frame requests.
-* **Seek orchestration**: `seek_to_frame()` updates every source's cache playhead, requests frames at the mapped decoder frame for each source, and pushes results into indexed `Viewport.frame_slots` via `set_frame(source_index, …)`.
+* **Seek orchestration**: `seek_to_frame()` updates every source's cache playhead, requests frames at the mapped decoder frame for each source, and pushes results into the renderer via `update_render_params()`.
 * **Two source indices**:
   * **`sequence_index`** — derived from the global playhead; drives Sequence mode display, transport readout FPS/resolution sync, and sidebar highlight during playback.
   * **`active_source_index`** — user selection in the **Media Sources** panel; drives EXR layer UI, cache-overlay scope, and per-source Image menu targets (resolution scale, pixel aspect).
@@ -79,45 +77,41 @@ Located in `src/cpp/engine/` and compiled as a dynamic module (`.pyd` on Windows
 * **Eviction Policy**: When memory usage approaches the limit, the C++ manager evicts the buffer slot representing the frame furthest from the playhead:
   $$\text{dist}(f, p) = \min(|f - p|, N - |f - p|)$$
   where $f$ is the slot's frame number, $p$ is the active playhead frame, and $N$ is the loop range length.
-* **Half-Float Storage**: Cached frames are stored as `float16` (`RGBA16F` or `R16F` channel layouts). Decoders copy pixels into reused cache slots via `std::copy`.
+* **Half-Float Storage**: Cached frames are stored as `float16` (`RGBA16F` or `R16F` channel layouts). C++ native decoders compile pixel data directly into reused cache slots via OpenImageIO.
 * **Concurrent Access**: `has_frame`, `get_frame_data`, and `get_cached_frames` use shared locks; `write_frame` and eviction use exclusive locks (`std::shared_mutex`) so playback reads are not blocked for the full duration of large frame writes.
 
 ### C. Python Cache Orchestration (`CacheEngine`)
 
-Located in `src/framecycler/core/cache.py`. One `CacheEngine` wraps one `CacheManager` per `MediaSource`, adding decode prefetch and upload staging.
+Located in `src/framecycler/core/cache.py`. One `CacheEngine` wraps one `CacheManager` per `MediaSource`, managing background prefetch scheduling.
 
 * **Background Prefetch**: A manager thread schedules up to 100 frames ahead of the playhead on a `ThreadPoolExecutor` (size configurable via **Settings → Reader Threads**).
-* **Non-Blocking Playback**: `get_frame()` returns a zero-copy NumPy view on cache hit. On miss, it schedules a high-priority decode and returns `None` without blocking the GUI thread (the viewport holds the previous frame until the decode completes).
-* **Pre-Staged GPU Upload Buffers**: After each frame is decoded and written to the C++ cache, the decode worker pre-packs the pixel data into a `QByteArray` upload buffer on a **background thread**. This moves the expensive `tobytes()` + `QByteArray` copy (~25ms at 4608×3164) off the GUI thread during steady playback.
-* **Bounded Upload Side-Cache**: Pre-staged buffers are kept in a separate Python-side cache sized to ~3 seconds of frames (independent of the RAM cache limit) and evicted by playhead distance, avoiding unbounded memory growth.
+* **Parallel Decodes**: If the decoder provides file paths, `CacheEngine` delegates decoding to C++ via `decode_and_cache_frame()`, bypassing the Python GIL. For fallback python-based decoders, `write_frame()` writes pixel arrays directly into the pre-allocated C++ slots.
+* **Non-Blocking Playback**: If a frame is a cache hit, C++ returns a NumPy view. On cache miss, a high-priority background decode is scheduled, and the UI continues playing without stuttering.
 * **Timeline Cache Indicator**: During playback, the timeline's cached-frame overlay refreshes on a 250ms timer instead of every `seek_to_frame` tick, reducing mutex contention from `get_cached_frames()` on the GUI thread.
 
-### D. Python Qt RHI Viewport Renderer (`RhiViewportRenderer`)
+### D. C++ Qt RHI Viewport Renderer (`RhiRenderer`)
 
-Located in `src/framecycler/render/rhi_viewport_renderer.py`. Called from `Viewport` (`QRhiWidget` subclass in `src/framecycler/ui/viewport.py`). The viewport maintains a dynamic pool of `frame_slots` (one per loaded source) and passes indexed texture state to the renderer.
+Located in `src/cpp/engine/rhi_renderer.cpp`. The viewport UI containerizes a native `QWindow` and binds it to a native `RhiRenderer` instance.
 
-* **Why Python, not C++**: Rendering uses the same PySide6 `QRhi*` instance as the widget, avoiding dual-Qt SDK linking crashes that occurred when a C++ module compiled against one Qt build was loaded alongside PySide6 at runtime (especially on macOS).
-* **Backend selection**: `QRhiWidget` selects Metal (macOS), D3D11/12 (Windows), Vulkan, or OpenGL ES per platform. The active backend is logged once at viewport initialization (e.g. `Viewport: QRhi backend = Metal`).
-* **Shader baking**: OCIO vertex/fragment GLSL is baked via `pyside6-qsb` (`ShaderBaker` in `shader_baker.py`) into backend-specific `QShader` blobs at pipeline change time (look, colorspace, display output, or custom LUT change — not per frame).
-* **Texture uploads**: Frame buffers are uploaded as `RGBA16F` or `R16F` QRhi textures. During playback, pre-staged `QByteArray` buffers from `CacheEngine` are passed directly to `uploadTexture`. Upload-token deduplication skips redundant GPU transfers when the playhead holds on a frame.
-* **Fallback logging**: If a frame is displayed before its upload buffer is ready (e.g. scrub to an uncached frame), the renderer falls back to synchronous main-thread packing and emits a rate-limited warning. Shader bake failures, missing pipelines, decode errors, and EXR nearest-frame fallbacks are also logged explicitly.
-* **Color Processing (OCIO)**: OCIO-generated GLSL is injected into the fragment template (`ocio_color_transform`). 3D LUT grids are uploaded slice-by-slice to QRhi 3D textures (required on Metal/Vulkan). Interactive grading (exposure / gamma / offset) updates a dynamic uniform buffer without rebaking shaders.
-* **Compare modes** (Tools → Compare):
-  * **Sequence** — shows the source whose timeline segment contains the global playhead (`sequence_index`).
-  * **Wipe** — vertical split between sources `[0]` (left) and `[1]` (right); divider dragged via HUD overlay.
-  * **Difference** — `abs(A − B)` RGB blend between sources `[0]` and `[1]`.
-  * **Tile** — all N sources in an aspect-preserving grid (`tile_layout.py`); each cell is a separate QRhi draw with per-tile transform uniforms (not the legacy fragment-shader side-by-side branch).
-  Wipe and Difference always use list order `[0]` vs `[1]`, independent of the panel's active source selection.
-* **Channel isolations**: RGBA, R, G, B, A, and Luminance masks run in the fragment shader.
+* **Direct C++ Rendering**: Viewport draws are executed directly inside C++ on a dedicated render thread. It links against the PySide6 Qt libraries dynamically, avoiding binary ABI conflicts.
+* **Platform Backend Selection**: Initializes Metal (macOS), D3D11 (Windows), or Vulkan (Linux). Preemptively checks if the platform name is `"offscreen"` (used in headless/CI tests), in which case it bypasses Vulkan initialization and instantiates a `QRhi::Null` backend directly to prevent crashes.
+* **Shader Compilation**: GLSL source strings are compiled natively inside C++ using `QShaderBaker` into platform-compatible SPIR-V, GLSL, HLSL, and MSL binary packages at pipeline transition time.
+* **Texture Uploads & Cache Integration**: The renderer registers `CacheManager` pointers. During updates, the rendering loop fetches pixel data from the C++ cache directly, uploading them as `RGBA16F` or `R16F` textures natively.
+* **Color Processing (OCIO)**: OpenColorIO transforms are compiled to GLSL 450 by PyOpenColorIO and injected into the fragment shader. 3D LUT grids are uploaded as native 3D textures. CDL grading changes (exposure, gamma, offset) update a C++ mapped uniform buffer dynamically, preventing pipeline rebuilds.
+* **Compare Modes**:
+  * **Sequence** — shows the source under the playhead (`sequence_index`).
+  * **Wipe** — performs a vertical split shader pass between sources `[0]` and `[1]` using a divider position.
+  * **Difference** — renders `abs(A - B)` using texture slots `[0]` and `[1]`.
+  * **Tile** — draws all sources in an aspect-preserving grid using hardware viewport/scissor offsets and uniform parameters.
 
 ---
 
 ## 3. PyBind11 Bindings Layer
 
-The interface bindings are defined in `src/cpp/bindings/python_bindings.cpp`. The compiled module exposes **only** `CacheManager` — GPU rendering is handled entirely in Python.
+The interface bindings are defined in `src/cpp/bindings/python_bindings.cpp`. The compiled module exposes `CacheManager`, `RhiRenderer`, and the shared data structures (`RenderParams`, `FrameSlotSpec`, `TileSpec`).
 
 ### Zero-Copy Memory Sharing
-Framecycler Reboot avoids copying cached frame pixels between C++ and Python. When Python requests a cached frame, the C++ engine wraps the direct pointer in a NumPy `float16` view:
+Framecycler Reboot avoids copying cached frame pixels when inspected in Python. C++ wraps the memory buffer pointer into a NumPy view:
 ```cpp
 return py::array(
     py::dtype("float16"),
@@ -131,7 +125,6 @@ return py::array(
     self   // keeps CacheManager alive
 );
 ```
-The viewport references this zero-copy view for dimensions and metadata. GPU upload uses a separately pre-staged `QByteArray` built on decode worker threads (see §2.C).
 
 ---
 
@@ -230,18 +223,19 @@ Detected spaces are validated against the active OCIO config; unknown values fal
 
 ### E. GPU Shader Compilation
 
-Color transforms are compiled to GLSL 450 by PyOpenColorIO and injected into the Python `RhiViewportRenderer` fragment shader template (`ocio_color_transform`). Shader sources are baked with `pyside6-qsb` at pipeline change time; the pipeline includes:
+Color transforms are compiled to GLSL 450 by PyOpenColorIO in Python and passed as strings to the native `RhiRenderer` interface. The C++ core utilizes `QShaderBaker` to compile these sources into platform-native shader variants (`SPIR-V` for Vulkan, `MSL` for Metal, `HLSL` for Direct3D 11, and `GLSL` for OpenGL).
 
+The compilation includes:
 * Input color space → working space conversion
-* Interactive grading (CDL exposure / gamma / offset from the **Tools → Grading** menu) via dynamic OCIO uniform buffer updates — no shader rebake while dragging
-* Optional look or custom LUT
+* Interactive grading (CDL exposure / gamma / offset from the **Tools → Grading** menu) via uniform buffer block updates dynamically in C++ — avoiding pipeline rebuilds while dragging
+* Optional creative Look or custom LUT transforms
 * Display output encoding (`sRGB`, Rec.709 gamma, or passthrough `Raw`)
 
 **API compatibility**: Uses a dual-path LUT upload. If the modern PyOpenColorIO iterator API is present (`get3DTextures` / `getTextures`), it reads `Texture3D` objects via `edgeLen` and `getValues()`. Legacy builds fall back to index-based queries (`getNum3DTextures`).
 
 LUT grids are uploaded to QRhi 3D textures (slice-by-slice on Metal/Vulkan) and sampled in the fragment shader during each viewport draw.
 
-Shader templates live in `src/framecycler/render/shaders/`; Python-side bundling is in `src/framecycler/render/shader_pipeline.py`; baking is in `src/framecycler/render/shader_baker.py`.
+Shader templates live in `src/framecycler/render/shaders/`; Python-side compilation preparation is located in `src/framecycler/render/shader_pipeline.py`.
 
 ---
 
@@ -286,18 +280,18 @@ Located in `src/framecycler/ui/`.
    ```
 
 ### Compiling C++ Extensions
-Ensure **CMake** is available (installed via pip in `requirements.txt`, or system package manager). On Windows, also install **Visual Studio 2022 Build Tools (MSVC)**.
+Ensure **CMake** is available. On Windows, also install **Visual Studio 2022 Build Tools (MSVC)**.
 
-The C++ engine depends only on **pybind11** (no Qt SDK required for compilation). GPU rendering and shader baking run in Python via PySide6:
+The C++ engine compiles against the **Qt SDK** (version 6.10.3) and **pybind11**. It links against Qt Gui, Widgets, ShaderTools, and private modules to execute the native GPU RhiRenderer:
 
 ```bash
 python build.py
 ```
 
-* **Windows**: The script locates `vcvars64.bat`, configures NMake, and builds the `.pyd` module.
-* **macOS / Linux**: Standard CMake configure/build. On macOS, the compiled `.so` is ad-hoc signed automatically to satisfy Gatekeeper on import.
+* **Windows**: The script automatically fetches the Qt SDK using `aqtinstall` (located in `.qt/6.10.3/msvc2022_64`), configures the project using standard CMake (targeting the Visual Studio generator), compiles the `.pyd` module, and stages required DLLs.
+* **macOS / Linux**: Standard CMake configure/build using `aqtinstall`-managed or package-manager-managed Qt installations. On macOS, the compiled `.so` is automatically signed for Gatekeeper.
 
-Shader baking at runtime uses `pyside6-qsb` (bundled with PySide6). Pinned dependency: `PySide6==6.11.1` (QRhiWidget + ShaderTools).
+Shader baking at runtime is executed natively inside the C++ engine using the Qt `QShaderBaker` class. Pinned package dependency: `PySide6==6.10.3` (providing standard Qt runtimes and library compatibility).
 
 ### Running App & Tests
 * Run Framecycler Reboot manually:
