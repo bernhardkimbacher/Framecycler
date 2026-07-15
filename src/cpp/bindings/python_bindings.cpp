@@ -94,6 +94,7 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def(py::init<>())
         .def("initialize", &RhiRenderer::initialize)
         .def("shutdown", &RhiRenderer::shutdown)
+        .def("is_fallback_null_backend", &RhiRenderer::is_fallback_null_backend)
         .def("update_render_params", &RhiRenderer::update_render_params)
         .def("set_grading_uniform", &RhiRenderer::set_grading_uniform)
         .def("set_grading_uniform_vec3", &RhiRenderer::set_grading_uniform_vec3)

@@ -95,6 +95,7 @@ public:
     void set_source_playhead(int source_index, int playhead, int direction, int in_point, int out_point);
     void invalidate_display_cache_source(int source_index);
     GpuTextureCache::Stats get_display_cache_stats() const;
+    bool is_fallback_null_backend() const { return _is_fallback_null_backend.load(); }
 
     struct DebugStats {
         int begin_frame_ok = 0;
@@ -252,4 +253,5 @@ private:
     GpuTextureCache _displayCache;
     QRhiTexture* _last_bound_tex_a = nullptr;
     QRhiTexture* _last_bound_tex_b = nullptr;
+    std::atomic<bool> _is_fallback_null_backend{false};
 };

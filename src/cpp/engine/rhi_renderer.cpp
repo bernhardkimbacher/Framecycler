@@ -115,6 +115,8 @@ bool RhiRenderer::initialize_rhi_on_thread()
         return false;
     }
 
+    _is_fallback_null_backend = false;
+
 #if defined(Q_OS_MACOS)
     QRhiMetalInitParams params;
     _rhi = QRhi::create(QRhi::Metal, &params);
@@ -125,6 +127,13 @@ bool RhiRenderer::initialize_rhi_on_thread()
     QRhiVulkanInitParams params;
     _rhi = QRhi::create(QRhi::Vulkan, &params);
 #endif
+
+    if (!_rhi) {
+        qWarning() << "RhiRenderer: Failed to initialize primary QRhi backend! Falling back to Null backend.";
+        QRhiNullInitParams nullParams;
+        _rhi = QRhi::create(QRhi::Null, &nullParams);
+        _is_fallback_null_backend = true;
+    }
 
     if (!_rhi) {
         qWarning() << "RhiRenderer: Failed to initialize QRhi backend!";

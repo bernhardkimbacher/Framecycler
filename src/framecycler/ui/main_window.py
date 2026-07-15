@@ -121,6 +121,9 @@ class MainWindow(QMainWindow):
         # Cross-thread bridge: CacheEngine worker threads emit through this signal
         # so Qt can safely queue the update onto the GUI thread.
         self._frame_ready_signal.connect(self._on_cache_frame_ready)
+        
+        # Check renderer initialization status on startup
+        QTimer.singleShot(500, self._check_renderer_status)
 
     def _init_ui(self):
         # Create Central Viewport (QRhi surface + HUD overlay as siblings)
@@ -1441,6 +1444,18 @@ class MainWindow(QMainWindow):
     def _update_ui_states(self):
         self._populate_look_combo()
         self._build_ocio_submenu()
+
+    def _check_renderer_status(self):
+        if hasattr(self, "viewport") and hasattr(self.viewport, "native_renderer"):
+            if self.viewport.native_renderer.is_fallback_null_backend():
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(
+                    self,
+                    "Graphics Warning",
+                    "Failed to initialize hardware accelerated graphics (Vulkan/Metal/Direct3D).\n\n"
+                    "The application has fallen back to the offscreen Null backend, so no frames will be displayed. "
+                    "Please check your graphics drivers and Vulkan/GPU support."
+                )
 
     def closeEvent(self, event):
         self.timer.stop()
