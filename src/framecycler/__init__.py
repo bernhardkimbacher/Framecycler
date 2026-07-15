@@ -1,3 +1,8 @@
+try:
+    import OpenImageIO
+except ImportError:
+    pass
+
 import os
 import sys
 
