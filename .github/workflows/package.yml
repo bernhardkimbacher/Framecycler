@@ -136,7 +136,7 @@ jobs:
             || echo "No previous release found (first release for this channel)."
 
       - name: Create Velopack release (Windows)
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           vpk pack `
@@ -149,7 +149,7 @@ jobs:
             --icon assets/icons/app_icon.ico
 
       - name: Create Velopack release (macOS)
-        if: matrix.os == 'macos-latest'
+        if: runner.os == 'macOS'
         run: |
           vpk pack \
             -u "$VPK_PACK_ID" \
@@ -162,7 +162,7 @@ jobs:
             --icon assets/icons/app_icon.icns
 
       - name: Create Velopack release (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: |
           vpk pack \
             -u "$VPK_PACK_ID" \
