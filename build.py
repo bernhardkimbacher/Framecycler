@@ -25,8 +25,11 @@ def find_cmake():
         vs_cmake = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
         if os.path.exists(vs_cmake):
             return vs_cmake
+        vs_ent_cmake = r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+        if os.path.exists(vs_ent_cmake):
+            return vs_ent_cmake
         raise FileNotFoundError(
-            "Could not find 'cmake.exe' in PATH, python packages, or Visual Studio BuildTools.\n"
+            "Could not find 'cmake.exe' in PATH, python packages, or Visual Studio.\n"
             "Please install CMake and ensure it is in your PATH."
         )
     else:
@@ -34,16 +37,6 @@ def find_cmake():
             "Could not find 'cmake' in PATH or python packages.\n"
             "Please install CMake using your package manager (e.g., 'brew install cmake' on macOS, or 'sudo apt install cmake' on Linux)."
         )
-
-def find_vcvarsall():
-    # Look for vcvars64.bat or vcvarsall.bat
-    vcvars = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-    if os.path.exists(vcvars):
-        return vcvars
-    vcvars_all = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
-    if os.path.exists(vcvars_all):
-        return vcvars_all
-    return None
 
 def build_extension():
     print("=== Framecycler C++ Engine Build Script ===")
@@ -54,10 +47,8 @@ def build_extension():
         subprocess.run([sys.executable, version_script], check=True)
     
     cmake_path = find_cmake()
-    vcvars_path = find_vcvarsall()
     
     print(f"Using CMake: {cmake_path}")
-    print(f"Using VCVars: {vcvars_path}")
     
     current_dir = os.path.dirname(os.path.abspath(__file__))
     build_dir = os.path.join(current_dir, "build")
@@ -89,46 +80,31 @@ def build_extension():
         if os.path.exists(toolchain_path):
             vcpkg_toolchain = toolchain_path
 
-    # On Windows, compile with NMake inside the vcvars64.bat shell
-    if sys.platform == "win32" and vcvars_path:
-        toolchain_arg = f'-DCMAKE_TOOLCHAIN_FILE="{vcpkg_toolchain}"' if vcpkg_toolchain else ""
-        configure_cmd = (
-            f'"{vcvars_path}" amd64 && '
-            f'"{cmake_path}" -G "NMake Makefiles" -S "{current_dir}" -B "{build_dir}" '
-            f'-DPython_EXECUTABLE="{python_exe}" -DCMAKE_BUILD_TYPE=Release '
-            f'-DQT_SDK_PATH="{qt_sdk_path_str}" -DPYSIDE6_QT_LIB="{pyside_qt_lib_path_str}" {toolchain_arg}'
-        )
-        build_cmd = (
-            f'"{vcvars_path}" amd64 && '
-            f'"{cmake_path}" --build "{build_dir}" --config Release'
-        )
+    # Standard platform-independent configuration and build flow
+    configure_cmd = [
+        cmake_path,
+        "-S", current_dir,
+        "-B", build_dir,
+        f"-DPython_EXECUTABLE={python_exe}",
+        "-DCMAKE_BUILD_TYPE=Release",
+    ]
+    if qt_sdk_path_str:
+        configure_cmd.append(f"-DQT_SDK_PATH={qt_sdk_path_str}")
+    if pyside_qt_lib_path_str:
+        configure_cmd.append(f"-DPYSIDE6_QT_LIB={pyside_qt_lib_path_str}")
+    if vcpkg_toolchain:
+        configure_cmd.append(f"-DCMAKE_TOOLCHAIN_FILE={vcpkg_toolchain}")
         
-        print("Configuring with NMake inside VC Environment...")
-        subprocess.run(f'cmd.exe /c "{configure_cmd}"', shell=True, check=True)
-        
-        print("Building with NMake inside VC Environment...")
-        subprocess.run(f'cmd.exe /c "{build_cmd}"', shell=True, check=True)
-    else:
-        # Standard fallback for POSIX or standard path setups
-        configure_cmd = [
-            cmake_path,
-            "-S", current_dir,
-            "-B", build_dir,
-            f"-DPython_EXECUTABLE={python_exe}",
-            "-DCMAKE_BUILD_TYPE=Release",
-        ]
-        if qt_sdk_path_str:
-            configure_cmd.append(f"-DQT_SDK_PATH={qt_sdk_path_str}")
-        if pyside_qt_lib_path_str:
-            configure_cmd.append(f"-DPYSIDE6_QT_LIB={pyside_qt_lib_path_str}")
-        subprocess.run(configure_cmd, check=True)
-        
-        build_cmd = [
-            cmake_path,
-            "--build", build_dir,
-            "--config", "Release"
-        ]
-        subprocess.run(build_cmd, check=True)
+    print(f"Configuring project: {configure_cmd}")
+    subprocess.run(configure_cmd, check=True)
+    
+    build_cmd = [
+        cmake_path,
+        "--build", build_dir,
+        "--config", "Release"
+    ]
+    print(f"Building project: {build_cmd}")
+    subprocess.run(build_cmd, check=True)
         
     print("Locating compiled library module...")
     ext_suffix = ".pyd" if sys.platform == "win32" else ".so"
