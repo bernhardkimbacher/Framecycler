@@ -136,6 +136,14 @@ def build_extension():
             for file in os.listdir(vcpkg_bin):
                 if file.endswith(".dll"):
                     shutil.copy2(os.path.join(vcpkg_bin, file), os.path.join(dest_dir, file))
+
+        # Copy Qt DLLs from the exact SDK used at link time
+        qt_bin_dir = os.path.join(qt_sdk_path_str, "bin")
+        if os.path.isdir(qt_bin_dir):
+            print(f"Copying Qt DLLs from {qt_bin_dir} to {dest_dir}...")
+            for file in os.listdir(qt_bin_dir):
+                if file.endswith(".dll"):
+                    shutil.copy2(os.path.join(qt_bin_dir, file), os.path.join(dest_dir, file))
     
     # On macOS, ad-hoc sign the compiled binary to satisfy Gatekeeper.
     # Without this, macOS provenance tracking quarantines freshly compiled .so files

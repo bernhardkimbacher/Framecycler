@@ -77,6 +77,14 @@ jobs:
       - name: Compile native C++ core
         run: ${{ matrix.python }} build.py
 
+      - name: Diagnose missing DLLs (temporary)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dumpbin = (Get-ChildItem -Path "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC" -Filter dumpbin.exe -Recurse | Select-Object -First 1).FullName
+          & $dumpbin /dependents src\framecycler\framecycler_engine.pyd
+          Get-ChildItem src\framecycler\*.dll
+
       - name: Run unit tests
         shell: bash
         env:
