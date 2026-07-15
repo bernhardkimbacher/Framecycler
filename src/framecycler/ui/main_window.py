@@ -1448,6 +1448,9 @@ class MainWindow(QMainWindow):
     def _check_renderer_status(self):
         if hasattr(self, "viewport") and hasattr(self.viewport, "native_renderer"):
             if self.viewport.native_renderer.is_fallback_null_backend():
+                from PySide6.QtGui import QGuiApplication
+                if QGuiApplication.platformName() == "offscreen":
+                    return
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.warning(
                     self,

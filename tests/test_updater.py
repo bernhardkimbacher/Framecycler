@@ -63,7 +63,8 @@ class TestUpdater(unittest.TestCase):
 
     @patch("src.framecycler.core.updater.velopack.UpdateManager")
     @patch("src.framecycler.core.updater.velopack.GithubSource")
-    def test_check_for_updates_interactive_when_up_to_date(self, mock_source, mock_manager_cls):
+    @patch("src.framecycler.core.updater.QProgressDialog")
+    def test_check_for_updates_interactive_when_up_to_date(self, mock_progress, mock_source, mock_manager_cls):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication, QMessageBox
 
