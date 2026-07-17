@@ -87,8 +87,11 @@ class CacheEngine:
             self.native_cache.set_playhead(frame_index, direction, self.playback_range[0], self.playback_range[1])
         self.trigger_prefetch()
 
+    def has_frame(self, frame_index: int) -> bool:
+        return bool(self.native_cache.has_frame(frame_index))
+
     def get_frame(self, frame_index: int) -> Dict[str, Any] | None:
-        if self.native_cache.has_frame(frame_index):
+        if self.has_frame(frame_index):
             data_view = self.native_cache.get_frame_data(frame_index)
             if data_view is not None:
                 cache_channels = data_view.shape[2] if data_view.ndim > 2 else 1

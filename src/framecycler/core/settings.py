@@ -2,6 +2,10 @@ import os
 import json
 
 from .system_memory import clamp_cache_limits, get_platform_cache_limits
+from .playback_timing import (
+    PLAYBACK_TIMING_EVERY_FRAME,
+    normalize_playback_timing,
+)
 
 
 class Settings:
@@ -22,6 +26,8 @@ class Settings:
         self.default_fps = 24.0
         self.ocio_config_path = ""
         self.loop_mode = "loop"  # loop, bounce, once
+        # every_frame | realtime — default prefers contiguous display-cache fill
+        self.playback_timing = PLAYBACK_TIMING_EVERY_FRAME
         self.timecode_mode = False  # True = Timecode mode, False = Frame mode
         self.recent_files = []
         self.resolution_scale = 1.0
@@ -75,6 +81,9 @@ class Settings:
                 self.default_fps = data.get("default_fps", self.default_fps)
                 self.ocio_config_path = data.get("ocio_config_path", self.ocio_config_path)
                 self.loop_mode = data.get("loop_mode", self.loop_mode)
+                self.playback_timing = normalize_playback_timing(
+                    data.get("playback_timing", self.playback_timing)
+                )
                 self.timecode_mode = data.get("timecode_mode", self.timecode_mode)
                 self.recent_files = data.get("recent_files", self.recent_files)
                 self.missing_frame_mode = data.get("missing_frame_mode", "Nearest Frame")
@@ -106,6 +115,7 @@ class Settings:
                 "default_fps": self.default_fps,
                 "ocio_config_path": self.ocio_config_path,
                 "loop_mode": self.loop_mode,
+                "playback_timing": normalize_playback_timing(self.playback_timing),
                 "timecode_mode": self.timecode_mode,
                 "recent_files": self.recent_files,
                 "missing_frame_mode": self.missing_frame_mode,

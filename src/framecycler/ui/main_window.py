@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QFileDialog, QMenuBar, QMenu, QPushButton, 
                              QComboBox, QLabel, QDockWidget, QSlider, QInputDialog, QSplitter)
@@ -11,13 +12,27 @@ from ..core.timecode import Timecode
 from ..core.session import Session
 from ..core import otio_model
 from ..core.media_source import MediaSource, decoder_frame_to_local_index
+from ..core.playback_timing import (
+    PLAYBACK_TIMING_EVERY_FRAME,
+    PLAYBACK_TIMING_REALTIME,
+    advance_playback,
+    every_frame_can_advance,
+    normalize_playback_timing,
+    realtime_steps,
+)
 from ..color.ocio_manager import OCIOManager
 from ..decoders.exr_decoder import EXRDecoder
 from ..decoders.image_io import ANAMORPHIC_PIXEL_ASPECT, SQUARE_PIXEL_ASPECT
 from ..packages.manager import PackageManager
 
 
-from .viewport import ViewportContainer, COMPARE_SEQUENCE
+from .viewport import (
+    ViewportContainer,
+    COMPARE_SEQUENCE,
+    COMPARE_TILE,
+    COMPARE_WIPE,
+    COMPARE_DIFFERENCE,
+)
 from .timeline import Timeline
 from .timeline_editor import TimelineSegmentInfo, TimelineVersionInfo
 from .theme import get_viewfinder_stylesheet
@@ -97,6 +112,9 @@ class MainWindow(QMainWindow):
         self.file_pixel_aspect_ratio = SQUARE_PIXEL_ASPECT
         self.source_width = 0
         self.source_height = 0
+        self._playback_anchor_time = 0.0
+        self._playback_anchor_frame = 0
+        self._playback_anchor_direction = 1
         
         # Dynamic menus references
         self.exr_layer_combo = None
@@ -404,7 +422,23 @@ class MainWindow(QMainWindow):
         # Playback menu
         playback_menu = menubar.addMenu("&Playback")
 
-        add_menu_section(playback_menu, "Mode", first=True)
+        add_menu_section(playback_menu, "Timing", first=True)
+
+        self.playback_timing_actions = []
+        timing_modes = [
+            ("Play Every Frame", PLAYBACK_TIMING_EVERY_FRAME),
+            ("Play Realtime", PLAYBACK_TIMING_REALTIME),
+        ]
+        active_timing = normalize_playback_timing(self.settings.playback_timing)
+        for label, mode in timing_modes:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(mode == active_timing)
+            act.triggered.connect(lambda checked=False, m=mode: self._set_playback_timing(m))
+            playback_menu.addAction(act)
+            self.playback_timing_actions.append((mode, act))
+
+        add_menu_section(playback_menu, "Mode")
 
         self.loop_mode_actions = []
         loop_modes = [("Loop", "loop"), ("Bounce", "bounce"), ("Once", "once")]
@@ -619,6 +653,10 @@ class MainWindow(QMainWindow):
     def _toggle_playback_direction(self, direction: int):
         if self.playing and self.playback_direction == direction:
             self.stop_playback()
+        elif self.playing:
+            self.playback_direction = direction
+            self._reset_playback_clock()
+            self._update_playback_buttons()
         else:
             self.playback_direction = direction
             self.start_playback()
@@ -1256,6 +1294,7 @@ class MainWindow(QMainWindow):
         # Restart timer when rate changes mid-playback
         if self.playing and not self._fps_matches(previous_fps, self.fps):
             self.timer.start(int(1000.0 / max(1.0, self.fps)))
+            self._reset_playback_clock()
 
         self._apply_resolved_cdl()
         self._apply_resolved_input_colorspace()
@@ -1388,30 +1427,148 @@ class MainWindow(QMainWindow):
                 return index
         return None
 
+    def _reset_playback_clock(self):
+        self._playback_anchor_time = time.monotonic()
+        self._playback_anchor_frame = self.current_frame
+        self._playback_anchor_direction = self.playback_direction
+
+    def _schedule_decode_for_frame(self, frame: int) -> None:
+        """Prioritize decode for ``frame`` without moving the playhead."""
+        plan = self.session.plan
+        if plan.empty:
+            return
+        segment = plan.segment_at(frame)
+        if segment is None:
+            return
+        for version in segment.display_versions():
+            if version.source is None or version.source.cache is None or version.offline:
+                continue
+            decoder_frame = plan.decoder_frame_for_version(segment, version, frame)
+            version.source.cache.get_frame(decoder_frame)
+
+    def _frame_ready_for_display(self, frame: int) -> bool:
+        """True when every online compare slot for ``frame`` is in the decode cache."""
+        plan = self.session.plan
+        if plan.empty:
+            return True
+        segment = plan.segment_at(frame)
+        if segment is None:
+            return True
+        online = [
+            version
+            for version in segment.display_versions()
+            if version.source is not None
+            and version.source.cache is not None
+            and not version.offline
+        ]
+        if not online:
+            return True
+        for version in online:
+            decoder_frame = plan.decoder_frame_for_version(segment, version, frame)
+            if not version.source.cache.has_frame(decoder_frame):
+                return False
+        return True
+
+    def _visible_display_slot_indices(self) -> list[int]:
+        """Compare slots that the renderer uploads into the display cache."""
+        mode = self.viewport.compare_mode
+        count = len(self.viewport.frame_slots)
+        if count <= 0:
+            return []
+        if mode == COMPARE_TILE:
+            return list(range(count))
+        if mode == COMPARE_SEQUENCE:
+            idx = self.viewport.sequence_index
+            if 0 <= idx < count:
+                return [idx]
+            return [0]
+        if mode in (COMPARE_WIPE, COMPARE_DIFFERENCE):
+            return [i for i in (0, 1) if i < count]
+        return [0]
+
+    def _frame_in_display_cache(self, frame: int) -> bool:
+        """True when visible slots for ``frame`` are resident in the GPU display cache."""
+        if self.settings.display_cache_limit_gb <= 0.0:
+            return True
+        plan = self.session.plan
+        if plan.empty:
+            return True
+        segment = plan.segment_at(frame)
+        if segment is None:
+            return True
+        versions = segment.display_versions()
+        for slot_index in self._visible_display_slot_indices():
+            if slot_index >= len(versions):
+                continue
+            version = versions[slot_index]
+            if version.source is None or version.source.cache is None or version.offline:
+                continue
+            if (
+                slot_index >= len(self.viewport.frame_slots)
+                or not self.viewport.frame_slots[slot_index].cached
+            ):
+                return False
+            decoder_frame = plan.decoder_frame_for_version(segment, version, frame)
+            try:
+                gpu_frames = self.viewport.native_renderer.get_display_cached_frames(slot_index)
+            except Exception:
+                return False
+            if decoder_frame not in gpu_frames:
+                return False
+        return True
+
     def _playback_tick(self):
-        next_frame = self.current_frame + self.playback_direction
-        
-        # Bounds and looping behavior
-        if self.playback_direction > 0 and next_frame > self.out_point:
-            if self.settings.loop_mode == "loop":
-                next_frame = self.in_point
-            elif self.settings.loop_mode == "bounce":
-                self.playback_direction = -1
-                next_frame = self.out_point - 1
-            else:  # once
+        timing = normalize_playback_timing(self.settings.playback_timing)
+        if timing == PLAYBACK_TIMING_REALTIME:
+            steps = realtime_steps(
+                time.monotonic() - self._playback_anchor_time,
+                self.fps,
+            )
+            result = advance_playback(
+                self._playback_anchor_frame,
+                self._playback_anchor_direction,
+                steps,
+                self.in_point,
+                self.out_point,
+                self.settings.loop_mode,
+            )
+        else:
+            result = advance_playback(
+                self.current_frame,
+                self.playback_direction,
+                1,
+                self.in_point,
+                self.out_point,
+                self.settings.loop_mode,
+            )
+
+        if result.frame is None:
+            if result.stop:
                 self.stop_playback()
+            return
+
+        if timing == PLAYBACK_TIMING_EVERY_FRAME and not result.stop:
+            display_enabled = self.settings.display_cache_limit_gb > 0.0
+            next_decode_ready = self._frame_ready_for_display(result.frame)
+            current_display_ready = self._frame_in_display_cache(self.current_frame)
+            if not every_frame_can_advance(
+                next_decode_ready=next_decode_ready,
+                current_display_ready=current_display_ready,
+                display_cache_enabled=display_enabled,
+            ):
+                if not current_display_ready and display_enabled:
+                    # Keep pumping the render thread until the current frame is uploaded.
+                    self.viewport.update()
+                if not next_decode_ready:
+                    self._schedule_decode_for_frame(result.frame)
                 return
-        elif self.playback_direction < 0 and next_frame < self.in_point:
-            if self.settings.loop_mode == "loop":
-                next_frame = self.out_point
-            elif self.settings.loop_mode == "bounce":
-                self.playback_direction = 1
-                next_frame = self.in_point + 1
-            else:  # once
-                self.stop_playback()
-                return
-                
-        self.seek_to_frame(next_frame)
+
+        if result.frame != self.current_frame or result.direction != self.playback_direction:
+            self.playback_direction = result.direction
+            self.seek_to_frame(result.frame)
+
+        if result.stop:
+            self.stop_playback()
 
     def toggle_playback(self):
         if self.playing:
@@ -1424,6 +1581,7 @@ class MainWindow(QMainWindow):
             return
         self.playing = True
         self._update_playback_buttons()
+        self._reset_playback_clock()
 
         # Match rate timer interval (ms)
         interval_ms = int(1000.0 / max(1.0, self.fps))
@@ -1504,6 +1662,19 @@ class MainWindow(QMainWindow):
         if hasattr(self, "loop_mode_actions"):
             for m, act in self.loop_mode_actions:
                 act.setChecked(m == mode)
+
+    def _sync_playback_timing_actions(self):
+        timing = normalize_playback_timing(self.settings.playback_timing)
+        if hasattr(self, "playback_timing_actions"):
+            for mode, act in self.playback_timing_actions:
+                act.setChecked(mode == timing)
+
+    def _set_playback_timing(self, mode: str):
+        self.settings.playback_timing = normalize_playback_timing(mode)
+        self.settings.save()
+        self._sync_playback_timing_actions()
+        if self.playing:
+            self._reset_playback_clock()
 
     def _scale_matches(self, a: float, b: float, tol: float = 0.001) -> bool:
         return abs(a - b) < tol
@@ -1778,10 +1949,15 @@ class MainWindow(QMainWindow):
     def _open_settings_dialog(self):
         dialog = SettingsDialog(self.settings, self)
         old_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
+        old_timing = normalize_playback_timing(self.settings.playback_timing)
         if dialog.exec():
             # Apply changes
             self.settings.save()
             new_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
+            new_timing = normalize_playback_timing(self.settings.playback_timing)
+            self._sync_playback_timing_actions()
+            if self.playing and new_timing != old_timing:
+                self._reset_playback_clock()
             # Update cache worker thread sizes
             for source in self.session.all_online_sources():
                 if source.cache is None:

@@ -5,6 +5,7 @@ import json
 from unittest.mock import patch
 from src.framecycler.core.system_memory import PlatformCacheLimits
 from src.framecycler.core.settings import Settings
+from src.framecycler.core.playback_timing import PLAYBACK_TIMING_EVERY_FRAME
 
 
 class TestSettings(unittest.TestCase):
@@ -36,6 +37,7 @@ class TestSettings(unittest.TestCase):
         self.assertGreaterEqual(self.settings.decode_cache_limit_gb, 0.0)
         self.assertGreaterEqual(self.settings.display_cache_limit_gb, 0.0)
         self.assertEqual(self.settings.default_fps, 24.0)
+        self.assertEqual(self.settings.playback_timing, PLAYBACK_TIMING_EVERY_FRAME)
         self.assertEqual(self.settings.ram_cache_limit_gb, self.settings.decode_cache_limit_gb)
 
     def test_save_and_load(self):

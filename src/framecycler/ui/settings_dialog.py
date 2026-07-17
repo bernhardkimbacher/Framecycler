@@ -18,6 +18,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from ..core.settings import Settings
+from ..core.playback_timing import (
+    PLAYBACK_TIMING_EVERY_FRAME,
+    PLAYBACK_TIMING_REALTIME,
+    normalize_playback_timing,
+)
 from ..core.system_memory import (
     cache_warning_text,
     clamp_cache_limits,
@@ -124,6 +129,15 @@ class SettingsDialog(QDialog):
             else f"{self.settings.default_fps:.1f}"
         )
         layout.addWidget(self.fps_combo)
+
+        layout.addWidget(QLabel("Default Playback:"))
+        self.playback_timing_combo = QComboBox()
+        self.playback_timing_combo.addItem("Play Every Frame", PLAYBACK_TIMING_EVERY_FRAME)
+        self.playback_timing_combo.addItem("Play Realtime", PLAYBACK_TIMING_REALTIME)
+        timing = normalize_playback_timing(self.settings.playback_timing)
+        index = self.playback_timing_combo.findData(timing)
+        self.playback_timing_combo.setCurrentIndex(max(0, index))
+        layout.addWidget(self.playback_timing_combo)
 
         layout.addWidget(QLabel("Missing Frame Handling:"))
         self.missing_frame_combo = QComboBox()
@@ -265,6 +279,9 @@ class SettingsDialog(QDialog):
         self.settings.decode_cache_limit_gb = decode_gb
         self.settings.display_cache_limit_gb = display_gb
         self.settings.default_fps = float(self.fps_combo.currentText())
+        self.settings.playback_timing = normalize_playback_timing(
+            self.playback_timing_combo.currentData()
+        )
         self.settings.ocio_config_path = self.ocio_path_edit.text().strip()
         self.settings.missing_frame_mode = self.missing_frame_combo.currentText()
 
