@@ -199,11 +199,11 @@ class CacheEngine:
                     self.active_requests.discard(frame_index)
                 return
 
-            get_path = getattr(self.decoder, "get_file_path", None)
-            if get_path is not None:
+            uses_native = getattr(self.decoder, "uses_native_path_decode", None)
+            if uses_native is not None and uses_native():
                 fallback_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
                 fallback_nearest = (fallback_mode == "Nearest Frame")
-                path = get_path(frame_index, fallback_nearest=fallback_nearest)
+                path = self.decoder.get_file_path(frame_index, fallback_nearest=fallback_nearest)
                 active_layer = getattr(self.decoder, "active_layer", "") or ""
                 meta = getattr(self.decoder, "metadata", {}) or {}
                 ph_w = meta.get("width", 0)

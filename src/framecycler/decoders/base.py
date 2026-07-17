@@ -80,6 +80,13 @@ class BaseDecoder(ABC):
         """
         return None
 
+    def uses_native_path_decode(self) -> bool:
+        """
+        True when frames are discrete image files decoded via C++ OIIO.
+        False for container media (e.g. QuickTime) that use Python read_frame.
+        """
+        return False
+
     @abstractmethod
     def close(self):
         """

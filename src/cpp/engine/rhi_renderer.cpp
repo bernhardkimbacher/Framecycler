@@ -304,6 +304,7 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
         {
             std::lock_guard<std::mutex> lock(_mutex);
             _displayCache.clear();
+            _caches.clear();
         }
         _texAState.texture = nullptr;
         _texBState.texture = nullptr;

@@ -132,5 +132,8 @@ class EXRDecoder(BaseDecoder):
             return self.frame_map.get(closest_frame)
         return self.frame_map.get(frame_index)
 
+    def uses_native_path_decode(self) -> bool:
+        return True
+
     def close(self):
         pass

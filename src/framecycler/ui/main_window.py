@@ -1031,6 +1031,7 @@ class MainWindow(QMainWindow):
         self.viewport.resolution_str = "0x0"
         self.viewport.set_source_count(0)
         self.viewport.set_source_labels([])
+        self.viewport.native_renderer.clear_display_cache()
         self.viewport.update()
         self.statusBar().showMessage("Viewer inputs cleared.")
 
