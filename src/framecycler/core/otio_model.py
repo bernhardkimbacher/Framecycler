@@ -18,6 +18,7 @@ import opentimelineio as otio
 FC_META = "framecycler"
 VIDEO_TRACK_NAME = "V1"
 CDL_KEY = "cdl"
+INPUT_COLORSPACE_KEY = "input_colorspace"
 
 _IDENTITY_CDL: Dict[str, Any] = {
     "slope": [1.0, 1.0, 1.0],
@@ -197,6 +198,35 @@ def cdl_cache_key(cdl: Dict[str, Any]) -> str:
         f"{norm['slope']}|{norm['offset']}|{norm['power']}|"
         f"{norm['saturation']}|{style}"
     )
+
+
+def get_input_colorspace(clip) -> Optional[str]:
+    """Return stored input colorspace on a Clip, or None if unset."""
+    if clip is None:
+        return None
+    meta = _fc(clip)
+    raw = meta.get(INPUT_COLORSPACE_KEY)
+    if raw is None:
+        return None
+    name = str(raw).strip()
+    return name or None
+
+
+def set_input_colorspace(clip, name: str) -> str:
+    """Persist input colorspace on a Clip under ``framecycler.input_colorspace``."""
+    value = str(name).strip()
+    if not value:
+        raise ValueError("input_colorspace must be a non-empty string")
+    update_fc_meta(clip, **{INPUT_COLORSPACE_KEY: value})
+    return value
+
+
+def clear_input_colorspace(clip) -> None:
+    """Remove stored input colorspace from a Clip."""
+    meta = _fc(clip)
+    if INPUT_COLORSPACE_KEY in meta:
+        meta.pop(INPUT_COLORSPACE_KEY, None)
+        _set_fc(clip, meta)
 
 
 def new_timeline(name: str = "Framecycler Session") -> otio.schema.Timeline:

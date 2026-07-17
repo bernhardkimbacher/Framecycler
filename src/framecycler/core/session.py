@@ -25,6 +25,8 @@ class Session:
         self.media_pool = MediaPool(settings)
         self.plan = PlaybackPlan()
         self._on_changed: Optional[TimelineChangedCallback] = None
+        # Optional: (path, metadata) -> colorspace name (usually OCIOManager.detect_input_colorspace)
+        self._input_colorspace_detector: Optional[Callable[[str, Optional[Dict[str, Any]]], str]] = None
         # Selected shot / version for metadata UI (independent of playhead sequence shot)
         self.selected_shot_index: int = 0
         self.selected_version_index: int = 0
@@ -34,6 +36,13 @@ class Session:
 
     def set_frame_ready_callback(self, callback) -> None:
         self.media_pool.set_frame_ready_callback(callback)
+
+    def set_input_colorspace_detector(
+        self,
+        detector: Optional[Callable[[str, Optional[Dict[str, Any]]], str]],
+    ) -> None:
+        """Wire media → input colorspace detection (e.g. OCIOManager.detect_input_colorspace)."""
+        self._input_colorspace_detector = detector
 
     def _notify(self) -> None:
         self.plan = build_plan(self.timeline, self.media_pool)
@@ -86,6 +95,23 @@ class Session:
             return None
         return version.source
 
+    def ensure_clip_input_colorspace(
+        self,
+        clip: otio.schema.Clip,
+        path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Keep existing clip colorspace; otherwise detect once and store."""
+        existing = otio_model.get_input_colorspace(clip)
+        if existing is not None:
+            return existing
+        if self._input_colorspace_detector is None:
+            return None
+        detected = self._input_colorspace_detector(path, metadata)
+        if not detected:
+            return None
+        return otio_model.set_input_colorspace(clip, detected)
+
     def acquire_clip_media(self, clip: otio.schema.Clip) -> Optional[MediaSource]:
         path = otio_model.media_path_from_clip(clip)
         if not path:
@@ -107,6 +133,7 @@ class Session:
             fc["height"] = source.height
             fc["pixel_aspect_ratio"] = source.pixel_aspect_ratio
             otio_model._set_fc(clip, fc)
+            self.ensure_clip_input_colorspace(clip, source.path, source.metadata)
             return source
         except Exception:
             otio_model.mark_clip_offline(clip, True)
@@ -151,6 +178,7 @@ class Session:
                 acquired = True
                 clip = otio_model.clip_from_media(path, source.metadata)
                 otio_model.mark_clip_offline(clip, False)
+                self.ensure_clip_input_colorspace(clip, source.path, source.metadata)
 
                 if mode == "stack" and target_stack is not None:
                     otio_model.add_version(target_stack, clip, make_active=True)
@@ -406,6 +434,39 @@ class Session:
         clips = otio_model.version_clips(stack)
         clip = clips[version_index] if 0 <= version_index < len(clips) else None
         return otio_model.resolve_cdl(clip, stack, self.timeline)
+
+    def set_clip_input_colorspace(
+        self, shot_index: int, version_index: int, name: str
+    ) -> Optional[str]:
+        clip = self._clip_at(shot_index, version_index)
+        if clip is None:
+            return None
+        return otio_model.set_input_colorspace(clip, name)
+
+    def get_clip_input_colorspace(
+        self, shot_index: int, version_index: int
+    ) -> Optional[str]:
+        clip = self._clip_at(shot_index, version_index)
+        if clip is None:
+            return None
+        return otio_model.get_input_colorspace(clip)
+
+    def resolved_input_colorspace_for_active(
+        self, playhead_frame: Optional[int] = None
+    ) -> Optional[str]:
+        """Return stored input colorspace for the playhead active version clip."""
+        stacks = otio_model.shot_stacks(self.timeline)
+        if not stacks:
+            return None
+        loc = self.playhead_shot_version(playhead_frame)
+        if loc is None:
+            return None
+        shot_index, version_index = loc
+        stack = stacks[shot_index]
+        clips = otio_model.version_clips(stack)
+        if not (0 <= version_index < len(clips)):
+            return None
+        return otio_model.get_input_colorspace(clips[version_index])
 
     def export_timeline(self, path: str) -> None:
         otio_model.save_timeline(self.timeline, path)

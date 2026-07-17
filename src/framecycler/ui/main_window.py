@@ -69,6 +69,9 @@ class MainWindow(QMainWindow):
         self.session.set_frame_ready_callback(
             lambda path, frame: self._frame_ready_signal.emit(path, frame)
         )
+        self.session.set_input_colorspace_detector(
+            self.ocio_manager.detect_input_colorspace
+        )
         
         # Playback states
         self.active_shot_index = 0
@@ -79,6 +82,7 @@ class MainWindow(QMainWindow):
         self._suppress_session_refresh = False
         self._reset_timeline_on_next_change = False
         self._applied_cdl_key: str | None = None
+        self._applied_input_colorspace_key: str | None = None
 
         self.playing = False
         self.playback_direction = 1
@@ -897,6 +901,7 @@ class MainWindow(QMainWindow):
             self.timeline.set_in_out(0, 0)
             self.timeline.set_cached_frames(set(), set())
             self._apply_resolved_cdl(force=True)
+            self._apply_resolved_input_colorspace(force=True)
             return
 
         self.start_frame = plan.global_start
@@ -953,9 +958,28 @@ class MainWindow(QMainWindow):
         else:
             self.exr_layer_combo.addItem("beauty")
 
-        detected_cs = self.ocio_manager.detect_input_colorspace(source.path, meta)
-        self.ocio_manager.input_colorspace = detected_cs
+        clip = None
+        stacks = otio_model.shot_stacks(self.session.timeline)
+        if 0 <= self.session.selected_shot_index < len(stacks):
+            clips = otio_model.version_clips(stacks[self.session.selected_shot_index])
+            if 0 <= self.session.selected_version_index < len(clips):
+                clip = clips[self.session.selected_version_index]
+        if clip is not None:
+            stored_cs = otio_model.get_input_colorspace(clip)
+            if stored_cs is None:
+                stored_cs = self.session.ensure_clip_input_colorspace(
+                    clip, source.path, meta
+                )
+            if stored_cs:
+                self.ocio_manager.input_colorspace = stored_cs
+        else:
+            detected_cs = self.ocio_manager.detect_input_colorspace(source.path, meta)
+            self.ocio_manager.input_colorspace = detected_cs
         self.viewport.update_ocio_pipeline()
+        self._applied_input_colorspace_key = (
+            f"{self.session.selected_shot_index}:{self.session.selected_version_index}|"
+            f"{self.ocio_manager.input_colorspace}"
+        )
         self._build_ocio_submenu()
         self._update_ocio_info_label()
 
@@ -1115,12 +1139,60 @@ class MainWindow(QMainWindow):
             self.viewport.update_ocio_pipeline()
         self._update_ocio_info_label()
 
+    def _apply_resolved_input_colorspace(self, *, force: bool = False) -> None:
+        """Apply the playhead active clip's stored input colorspace to the viewer."""
+        if self.session.empty:
+            cache_key = "empty"
+            if not force and self._applied_input_colorspace_key == cache_key:
+                return
+            self._applied_input_colorspace_key = cache_key
+            if hasattr(self, "ocio_menu") and self.ocio_menu is not None:
+                self._build_ocio_submenu()
+            self._update_ocio_info_label()
+            return
+
+        loc = self.session.playhead_shot_version(self.current_frame)
+        cs = self.session.resolved_input_colorspace_for_active(self.current_frame)
+        if cs is None and loc is not None:
+            # Lazily detect/store if an older timeline lacks the key
+            shot_index, version_index = loc
+            stacks = otio_model.shot_stacks(self.session.timeline)
+            if 0 <= shot_index < len(stacks):
+                clips = otio_model.version_clips(stacks[shot_index])
+                if 0 <= version_index < len(clips):
+                    clip = clips[version_index]
+                    path = otio_model.media_path_from_clip(clip)
+                    source = self.session.media_pool.get(path) if path else None
+                    meta = source.metadata if source is not None else None
+                    if path:
+                        cs = self.session.ensure_clip_input_colorspace(clip, path, meta)
+
+        if cs is None:
+            return
+
+        loc_key = f"{loc[0]}:{loc[1]}" if loc else "none"
+        cache_key = f"{loc_key}|{cs}"
+        if (
+            not force
+            and self._applied_input_colorspace_key == cache_key
+            and self.ocio_manager.input_colorspace == cs
+        ):
+            return
+        self._applied_input_colorspace_key = cache_key
+        if self.ocio_manager.input_colorspace != cs:
+            self.ocio_manager.input_colorspace = cs
+            if hasattr(self, "viewport") and self.viewport is not None:
+                self.viewport.update_ocio_pipeline()
+        self._build_ocio_submenu()
+        self._update_ocio_info_label()
+
     def seek_to_frame(self, frame: int):
         plan = self.session.plan
         if plan.empty:
             self.current_frame = 0
             self.timeline.set_current_frame(0)
             self._apply_resolved_cdl()
+            self._apply_resolved_input_colorspace()
             return
 
         frame = max(self.start_frame, min(self.end_frame, frame))
@@ -1186,6 +1258,7 @@ class MainWindow(QMainWindow):
             self.timer.start(int(1000.0 / max(1.0, self.fps)))
 
         self._apply_resolved_cdl()
+        self._apply_resolved_input_colorspace()
 
         if hasattr(self, "package_manager"):
             self.package_manager.emit_frame_changed(frame, self.viewport.current_timecode)
@@ -1582,7 +1655,12 @@ class MainWindow(QMainWindow):
 
     # OCIO sub-menu handlers
     def _set_input_colorspace(self, name):
+        loc = self.session.playhead_shot_version(self.current_frame)
+        if loc is not None:
+            self.session.set_clip_input_colorspace(loc[0], loc[1], name)
         self.ocio_manager.input_colorspace = name
+        loc_key = f"{loc[0]}:{loc[1]}" if loc else "none"
+        self._applied_input_colorspace_key = f"{loc_key}|{name}"
         self.viewport.update_ocio_pipeline()
         self._build_ocio_submenu()
         self._update_ocio_info_label()
