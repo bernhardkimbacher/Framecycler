@@ -29,7 +29,7 @@ class Settings:
         # Package id -> enabled override; absent means use manifest enabled_by_default
         self.package_enabled: dict[str, bool] = {}
         # Vertical main splitter: [viewer_area, timeline_pane]
-        self.timeline_splitter_sizes: list[int] = [700, 220]
+        self.timeline_splitter_sizes: list[int] = [700, 96]
 
         self.load()
 
@@ -91,7 +91,7 @@ class Settings:
                     and len(raw_sizes) == 2
                     and all(isinstance(v, (int, float)) for v in raw_sizes)
                 ):
-                    self.timeline_splitter_sizes = [max(80, int(raw_sizes[0])), max(120, int(raw_sizes[1]))]
+                    self.timeline_splitter_sizes = [max(80, int(raw_sizes[0])), max(64, int(raw_sizes[1]))]
         except Exception as e:
             print(f"Error loading settings: {e}")
         self.clamp_cache_limits_to_platform()

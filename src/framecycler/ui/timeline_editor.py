@@ -91,7 +91,7 @@ class TimelineEditor(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(64)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
 
@@ -107,6 +107,7 @@ class TimelineEditor(QWidget):
 
         self._view_start = 0.0
         self._ppf = 2.0
+        self._pending_fit = False
         self._drag = _DragMode.NONE
         self._drag_shot = -1
         self._drag_origin = QPoint()
@@ -127,12 +128,29 @@ class TimelineEditor(QWidget):
         self.update()
 
     def set_range(self, start: int, end: int):
+        old_start, old_end = self.start_frame, self.end_frame
         self.start_frame = start
         self.end_frame = max(start, end)
         self.in_point = max(self.start_frame, min(self.end_frame, self.in_point))
         self.out_point = max(self.in_point, min(self.end_frame, self.out_point))
         self.current_frame = max(self.start_frame, min(self.end_frame, self.current_frame))
-        self._fit_view_if_needed()
+        # Refit when the sequence span changes (new/removed/trimmed clips).
+        if self.start_frame != old_start or self.end_frame != old_end:
+            self.fit_to_sequence()
+        else:
+            self.update()
+
+    def fit_to_sequence(self):
+        """Zoom/pan so the full start..end range fills the timeline width."""
+        span = max(1, self.end_frame - self.start_frame + 1)
+        track_w = self._track_width()
+        if track_w <= 1 or self.width() <= 2 * MARGIN_X:
+            self._pending_fit = True
+            self.update()
+            return
+        self._ppf = max(MIN_PPF, min(MAX_PPF, track_w / float(span)))
+        self._view_start = float(self.start_frame)
+        self._pending_fit = False
         self.update()
 
     def set_current_frame(self, frame: int):
@@ -188,12 +206,10 @@ class TimelineEditor(QWidget):
     def _display_lane_y(self) -> int:
         return self._body_top() + self._body_height() // 2 - LANE_H // 2
 
-    def _fit_view_if_needed(self):
-        span = max(1, self.end_frame - self.start_frame + 1)
-        track_w = self._track_width()
-        if self._ppf * span < track_w * 0.5 or self._ppf * span > track_w * 8:
-            self._ppf = max(MIN_PPF, min(MAX_PPF, track_w / float(span)))
-            self._view_start = float(self.start_frame)
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._pending_fit:
+            self.fit_to_sequence()
 
     def _frame_from_x(self, x: float) -> int:
         frame = self._view_start + (x - MARGIN_X) / max(self._ppf, 1e-6)
