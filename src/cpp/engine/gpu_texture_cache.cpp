@@ -46,6 +46,19 @@ void GpuTextureCache::invalidate_source(int source_index)
     _playheads.erase(source_index);
 }
 
+std::vector<int> GpuTextureCache::cached_frames_for_source(int source_index) const
+{
+    std::vector<int> frames;
+    frames.reserve(_entries.size());
+    for (const auto& pair : _entries) {
+        if (pair.first.source_index == source_index) {
+            frames.push_back(pair.first.decoder_frame);
+        }
+    }
+    std::sort(frames.begin(), frames.end());
+    return frames;
+}
+
 void GpuTextureCache::clear()
 {
     for (auto& pair : _entries) {

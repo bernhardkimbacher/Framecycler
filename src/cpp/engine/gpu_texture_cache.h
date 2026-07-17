@@ -81,6 +81,9 @@ public:
     void evict_before_insert(size_t incoming_bytes, int source_index);
     Stats stats() const { return _stats; }
 
+    // Decoder frame indices currently resident for a viewport source slot.
+    std::vector<int> cached_frames_for_source(int source_index) const;
+
 private:
     void destroy_entry(GpuCacheEntry& entry);
     void erase_key(const GpuFrameKey& key);

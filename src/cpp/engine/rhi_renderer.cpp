@@ -254,6 +254,12 @@ GpuTextureCache::Stats RhiRenderer::get_display_cache_stats() const
     return _displayCache.stats();
 }
 
+std::vector<int> RhiRenderer::get_display_cached_frames(int source_index)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _displayCache.cached_frames_for_source(source_index);
+}
+
 void RhiRenderer::update_render_params(const RenderParams& params)
 {
     std::lock_guard<std::mutex> lock(_mutex);

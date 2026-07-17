@@ -121,6 +121,8 @@ PYBIND11_MODULE(framecycler_engine, m) {
             d["resident_frames"] = s.resident_frames;
             return d;
         })
+        .def("get_display_cached_frames", &RhiRenderer::get_display_cached_frames,
+             py::arg("source_index"))
         .def("get_debug_stats", [](const RhiRenderer& self) {
             auto s = self.get_debug_stats();
             py::dict d;

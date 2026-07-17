@@ -103,6 +103,7 @@ class TimelineEditor(QWidget):
         self.fps = 24.0
         self.show_timecode = False
         self.cached_frames: Set[int] = set()
+        self.display_cached_frames: Set[int] = set()
         self.segments: List[TimelineSegmentInfo] = []
 
         self._view_start = 0.0
@@ -163,9 +164,30 @@ class TimelineEditor(QWidget):
         self.in_out_changed.emit(self.in_point, self.out_point)
         self.update()
 
-    def set_cached_frames(self, cached: set):
+    def set_cached_frames(self, cached: set, display_cached: set | None = None):
+        """Set decode/RAM and optional display/VRAM cache frames (global timeline space)."""
         self.cached_frames = set(cached or [])
+        # None means leave VRAM set unchanged; pass set() to clear both.
+        if display_cached is not None:
+            self.display_cached_frames = set(display_cached)
         self.update()
+
+    @staticmethod
+    def coalesce_frame_runs(frames: Set[int]) -> List[tuple[int, int]]:
+        """Group sorted global frames into inclusive (start, end) runs."""
+        if not frames:
+            return []
+        cached_sorted = sorted(frames)
+        groups: List[tuple[int, int]] = []
+        start_block = prev = cached_sorted[0]
+        for f in cached_sorted[1:]:
+            if f == prev + 1:
+                prev = f
+            else:
+                groups.append((start_block, prev))
+                start_block = prev = f
+        groups.append((start_block, prev))
+        return groups
 
     def set_shot_markers(self, markers: list):
         """Back-compat: convert (start, end, version_count) markers into bare segments."""
@@ -519,8 +541,8 @@ class TimelineEditor(QWidget):
             QBrush(QColor(255, 165, 0, 28)),
         )
 
-        # Cache blocks on display lane
-        self._paint_cache(painter, display_y)
+        # Cache indicator lines above display lane
+        self._paint_cache_lines(painter, display_y)
 
         # Segments / version stacks
         for seg in self._layout_segments_for_draw():
@@ -560,24 +582,34 @@ class TimelineEditor(QWidget):
                 painter.drawText(x + 2, 12, label)
             f += step
 
-    def _paint_cache(self, painter: QPainter, display_y: int):
-        if not self.cached_frames:
+    def _paint_cache_lines(self, painter: QPainter, display_y: int):
+        """Two thin strips above the display lane: green=RAM, purple=VRAM."""
+        line_h = 2
+        gap = 1
+        green_y = display_y - (line_h * 2 + gap + 1)
+        purple_y = display_y - (line_h + 1)
+        self._paint_frame_runs(
+            painter, self.cached_frames, green_y, line_h, QColor(0, 120, 40)
+        )
+        self._paint_frame_runs(
+            painter, self.display_cached_frames, purple_y, line_h, QColor(123, 77, 255)
+        )
+
+    def _paint_frame_runs(
+        self,
+        painter: QPainter,
+        frames: Set[int],
+        y: int,
+        height: int,
+        color: QColor,
+    ):
+        if not frames or height <= 0:
             return
-        brush = QBrush(QColor(0, 120, 40, 140))
-        cached_sorted = sorted(self.cached_frames)
-        groups = []
-        start_block = prev = cached_sorted[0]
-        for f in cached_sorted[1:]:
-            if f == prev + 1:
-                prev = f
-            else:
-                groups.append((start_block, prev))
-                start_block = prev = f
-        groups.append((start_block, prev))
-        for start_f, end_f in groups:
+        brush = QBrush(color)
+        for start_f, end_f in self.coalesce_frame_runs(frames):
             x0 = self._x_from_frame(start_f)
             x1 = self._x_from_frame(end_f + 1)
-            painter.fillRect(x0, display_y, max(2, x1 - x0), LANE_H, brush)
+            painter.fillRect(x0, y, max(2, x1 - x0), height, brush)
 
     def _paint_segment(self, painter: QPainter, seg: TimelineSegmentInfo):
         offset = self._stack_offset(seg)

@@ -895,7 +895,7 @@ class MainWindow(QMainWindow):
             self.source_height = 0
             self.timeline.set_range(0, 0)
             self.timeline.set_in_out(0, 0)
-            self.timeline.set_cached_frames(set())
+            self.timeline.set_cached_frames(set(), set())
             self._apply_resolved_cdl(force=True)
             return
 
@@ -1063,7 +1063,7 @@ class MainWindow(QMainWindow):
         self.timeline.set_range(0, 0)
         self.timeline.set_in_out(0, 0)
         self.timeline.set_current_frame(0)
-        self.timeline.set_cached_frames(set())
+        self.timeline.set_cached_frames(set(), set())
         self.timeline.set_segments([])
 
         self.exr_layer_combo.clear()
@@ -1258,7 +1258,7 @@ class MainWindow(QMainWindow):
     def _refresh_timeline_cached_frames(self):
         plan = self.session.plan
         if plan.empty:
-            self.timeline.set_cached_frames(set())
+            self.timeline.set_cached_frames(set(), set())
             return
         source = self._selected_source()
         segment = None
@@ -1269,22 +1269,51 @@ class MainWindow(QMainWindow):
             # Fall back to active version of playhead segment
             segment = plan.segment_at(self.current_frame)
             if segment is None or segment.active is None or segment.active.source is None:
-                self.timeline.set_cached_frames(set())
+                self.timeline.set_cached_frames(set(), set())
                 return
             version = segment.active
             source = version.source
         if source is None or source.cache is None:
-            self.timeline.set_cached_frames(set())
+            self.timeline.set_cached_frames(set(), set())
             return
 
         decoder_frame = plan.decoder_frame_for_version(segment, version, self.current_frame)
         source.cache.set_playhead(decoder_frame, self.playback_direction)
         cached = source.cache.get_cached_frames()
-        local_cached = {
+        ram_cached = {
             segment.global_start + decoder_frame_to_local_index(source, decoder_frame_num)
             for decoder_frame_num in cached
         }
-        self.timeline.set_cached_frames(local_cached)
+
+        display_cached: set[int] = set()
+        slot = self._display_slot_for_source(source)
+        if slot is not None:
+            try:
+                gpu_frames = self.viewport.native_renderer.get_display_cached_frames(slot)
+            except Exception:
+                gpu_frames = []
+            display_cached = {
+                segment.global_start + decoder_frame_to_local_index(source, decoder_frame_num)
+                for decoder_frame_num in gpu_frames
+            }
+
+        self.timeline.set_cached_frames(ram_cached, display_cached)
+
+    def _display_slot_for_source(self, source: MediaSource) -> int | None:
+        """Viewport compare-slot index for a source currently registered with the renderer."""
+        plan = self.session.plan
+        segment = plan.segment_at(self.current_frame)
+        if segment is None or source is None or source.cache is None:
+            return None
+        target = source.cache.native_cache
+        for index, version in enumerate(segment.display_versions()):
+            if (
+                version.source is not None
+                and version.source.cache is not None
+                and version.source.cache.native_cache is target
+            ):
+                return index
+        return None
 
     def _playback_tick(self):
         next_frame = self.current_frame + self.playback_direction
