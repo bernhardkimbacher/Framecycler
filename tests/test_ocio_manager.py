@@ -172,6 +172,39 @@ class TestOCIOManager(unittest.TestCase):
         text_b, _, _ = self.ocio_mgr.get_gpu_shader_glsl()
         self.assertEqual(text_a, text_b)
 
+    def test_cdl_defaults_identity(self):
+        self.assertEqual(self.ocio_mgr.cdl_slope, (1.0, 1.0, 1.0))
+        self.assertEqual(self.ocio_mgr.cdl_offset, (0.0, 0.0, 0.0))
+        self.assertEqual(self.ocio_mgr.cdl_power, (1.0, 1.0, 1.0))
+        self.assertEqual(self.ocio_mgr.cdl_saturation, 1.0)
+
+    def test_cdl_changes_pipeline_key_and_shader(self):
+        key_a = self.ocio_mgr.get_pipeline_key()
+        text_a, _, _ = self.ocio_mgr.get_gpu_shader_glsl()
+
+        self.ocio_mgr.set_cdl_values(
+            slope=(1.2, 1.0, 0.8),
+            offset=(0.01, 0.0, -0.01),
+            power=(1.0, 1.0, 1.0),
+            saturation=1.15,
+        )
+        key_b = self.ocio_mgr.get_pipeline_key()
+        text_b, _, _ = self.ocio_mgr.get_gpu_shader_glsl()
+
+        self.assertNotEqual(key_a, key_b)
+        self.assertNotEqual(text_a, text_b)
+        # OCIO may fold CDL into a Matrix op; assert baked constants appear.
+        self.assertTrue(
+            "1.2" in text_b or "CDL" in text_b or "Add Matrix" in text_b,
+            "Expected CDL effect in generated shader",
+        )
+
+    def test_reset_cdl_values(self):
+        self.ocio_mgr.set_cdl_values(slope=(1.5, 1.5, 1.5), saturation=0.5)
+        self.ocio_mgr.reset_cdl_values()
+        self.assertEqual(self.ocio_mgr.cdl_slope, (1.0, 1.0, 1.0))
+        self.assertEqual(self.ocio_mgr.cdl_saturation, 1.0)
+
     def test_grading_uniform_values(self):
         self.ocio_mgr.set_grading_values(exposure=1.0, gamma=1.5, offset=-0.1)
         values = self.ocio_mgr.get_grading_uniform_values()

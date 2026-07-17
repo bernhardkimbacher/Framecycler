@@ -9,11 +9,12 @@ from PySide6.QtGui import QAction, QKeySequence, QFont
 from ..core.settings import Settings
 from ..core.timecode import Timecode
 from ..core.session import Session
+from ..core import otio_model
 from ..core.media_source import MediaSource, decoder_frame_to_local_index
 from ..color.ocio_manager import OCIOManager
 from ..decoders.exr_decoder import EXRDecoder
 from ..decoders.image_io import ANAMORPHIC_PIXEL_ASPECT, SQUARE_PIXEL_ASPECT
-from ..extensions.ocio_api_tool import OcioApiTool
+from ..packages.manager import PackageManager
 
 
 from .viewport import ViewportContainer, COMPARE_SEQUENCE
@@ -76,7 +77,8 @@ class MainWindow(QMainWindow):
         self._drag_drop_zone = DragDropOverlay.ZONE_SEQUENCE
         self._suppress_session_refresh = False
         self._reset_timeline_on_next_change = False
-        
+        self._applied_cdl_key: str | None = None
+
         self.playing = False
         self.playback_direction = 1
         self.current_frame = 0
@@ -106,11 +108,8 @@ class MainWindow(QMainWindow):
         self._cached_frames_timer.setInterval(250)
         self._cached_frames_timer.timeout.connect(self._refresh_timeline_cached_frames)
         
-        # Plugins registration
-        self.plugins = [OcioApiTool(self)]
-        for plugin in self.plugins:
-            plugin.on_init()
-            
+        self.package_manager = PackageManager(self, config_dir=self.settings.config_dir)
+
         # Build UI layout
         self._init_ui()
         
@@ -440,12 +439,11 @@ class MainWindow(QMainWindow):
             (True, act_show_timecode),
         ]
         
-        # Plugins menu
-        plugins_menu = menubar.addMenu("&Plugins")
-        for plugin in self.plugins:
-            for action in plugin.get_menu_actions():
-                plugins_menu.addAction(action)
-                
+        # Packages menu (populated after packages activate)
+        self._plugins_menu = menubar.addMenu("&Plugins")
+        self.package_manager.load_enabled()
+        self._rebuild_plugins_menu()
+
         # Tools menu (grading and compare)
         tools_menu = menubar.addMenu("&Tools")
 
@@ -793,7 +791,7 @@ class MainWindow(QMainWindow):
 
         valid_paths = [path for path in paths if path and os.path.exists(path)]
         if not valid_paths:
-            return
+            return 0
 
         was_empty = self.session.empty
         if mode == "replace" or was_empty:
@@ -808,22 +806,22 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.statusBar().showMessage(f"Error loading: {exc}")
             print(f"Error: {exc}")
-            return
+            return 0
 
         if loaded <= 0:
             errors = getattr(self.session, "_last_add_errors", [])
             if errors:
                 self.statusBar().showMessage(f"Error loading: {errors[0]}")
-            return
+            return 0
 
-        for plugin in self.plugins:
-            for path in valid_paths[:loaded]:
-                source = self.session.media_pool.get(path)
-                meta = source.metadata if source else {}
-                plugin.on_media_loaded(0, path, meta)
+        for index, path in enumerate(valid_paths[:loaded]):
+            source = self.session.media_pool.get(path)
+            meta = source.metadata if source else {}
+            self.package_manager.emit_media_loaded(index, path, meta)
 
         self.statusBar().showMessage(f"Added {loaded} media item(s) ({mode})")
         self._update_ui_states()
+        return loaded
 
     def _close_all_sources(self):
         self.session.clear()
@@ -834,6 +832,22 @@ class MainWindow(QMainWindow):
         reset = self._reset_timeline_on_next_change
         self._reset_timeline_on_next_change = False
         self._refresh_from_session(reset_timeline=reset)
+        if hasattr(self, "package_manager"):
+            self.package_manager.emit_session_changed()
+
+    def _rebuild_plugins_menu(self):
+        menu = getattr(self, "_plugins_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        actions = self.package_manager.menu_actions
+        if not actions:
+            empty = QAction("No packages enabled", self)
+            empty.setEnabled(False)
+            menu.addAction(empty)
+            return
+        for action in actions:
+            menu.addAction(action)
 
     def _refresh_from_session(self, *, reset_timeline: bool = False):
         plan = self.session.plan
@@ -877,6 +891,7 @@ class MainWindow(QMainWindow):
             self.timeline.set_range(0, 0)
             self.timeline.set_in_out(0, 0)
             self.timeline.set_cached_frames(set())
+            self._apply_resolved_cdl(force=True)
             return
 
         self.start_frame = plan.global_start
@@ -1024,11 +1039,37 @@ class MainWindow(QMainWindow):
             self.stop_playback()
         self.seek_to_frame(frame)
 
+    def _apply_resolved_cdl(self, *, force: bool = False) -> None:
+        """Apply Clip > Stack > Timeline CDL for the playhead active version."""
+        if self.session.empty:
+            cache_key = "empty"
+            if not force and self._applied_cdl_key == cache_key:
+                return
+            self._applied_cdl_key = cache_key
+            self.ocio_manager.reset_cdl_values()
+            if hasattr(self, "viewport") and self.viewport is not None:
+                self.viewport.update_ocio_pipeline()
+            self._update_ocio_info_label()
+            return
+
+        cdl = self.session.resolved_cdl_for_active(self.current_frame)
+        loc = self.session.playhead_shot_version(self.current_frame)
+        loc_key = f"{loc[0]}:{loc[1]}" if loc else "none"
+        cache_key = f"{loc_key}|{otio_model.cdl_cache_key(cdl)}"
+        if not force and self._applied_cdl_key == cache_key:
+            return
+        self._applied_cdl_key = cache_key
+        self.ocio_manager.apply_cdl_dict(cdl)
+        if hasattr(self, "viewport") and self.viewport is not None:
+            self.viewport.update_ocio_pipeline()
+        self._update_ocio_info_label()
+
     def seek_to_frame(self, frame: int):
         plan = self.session.plan
         if plan.empty:
             self.current_frame = 0
             self.timeline.set_current_frame(0)
+            self._apply_resolved_cdl()
             return
 
         frame = max(self.start_frame, min(self.end_frame, frame))
@@ -1093,8 +1134,10 @@ class MainWindow(QMainWindow):
         if self.playing and not self._fps_matches(previous_fps, self.fps):
             self.timer.start(int(1000.0 / max(1.0, self.fps)))
 
-        for plugin in self.plugins:
-            plugin.on_frame_changed(frame, self.viewport.current_timecode)
+        self._apply_resolved_cdl()
+
+        if hasattr(self, "package_manager"):
+            self.package_manager.emit_frame_changed(frame, self.viewport.current_timecode)
 
     def _apply_cached_frames(self, frame: int):
         plan = self.session.plan
@@ -1500,10 +1543,12 @@ class MainWindow(QMainWindow):
                 grade_parts.append(f"Gam: {self.ocio_manager.grade_gamma:.2f}")
             if self.ocio_manager.grade_offset != 0.0:
                 grade_parts.append(f"Off: {self.ocio_manager.grade_offset:+.3f}")
-                
+            if not self.ocio_manager._cdl_is_identity():
+                grade_parts.append("CDL")
+
             if grade_parts:
                 info += f" | GRADE: {', '.join(grade_parts)}"
-                
+
             self.lbl_ocio_info.setText(info)
 
     def _activate_exposure_mode(self):
@@ -1531,6 +1576,10 @@ class MainWindow(QMainWindow):
         self.ocio_manager.grade_exposure = 0.0
         self.ocio_manager.grade_gamma = 1.0
         self.ocio_manager.grade_offset = 0.0
+        self.ocio_manager.reset_cdl_values()
+        # Clear apply cache so the next version/shot change reloads OTIO CDL.
+        # Does not wipe persisted metadata["framecycler"]["cdl"] keys.
+        self._applied_cdl_key = None
         self.viewport.update_ocio_pipeline()
         self._update_ocio_info_label()
         self.statusBar().showMessage("Color grading parameters reset to defaults.")

@@ -1,3 +1,3 @@
-# Framecycler custom extension toolkits
-from .base_tool import BaseTool
-from .ocio_api_tool import OcioApiTool
+"""Deprecated: use framecycler.packages instead."""
+
+from ..packages.api import Package as BaseTool  # noqa: F401

@@ -14,10 +14,17 @@ class OCIOManager:
         self.display_output = "sRGB"  # "Raw" | "sRGB" | "Rec709"
         self._custom_lut_path = None
         
-        # Grading Tool parameters (Exposure, Gamma, Offset)
+        # Grading Tool parameters (Exposure, Gamma, Offset) — UBO-driven
         self.grade_exposure = 0.0
         self.grade_gamma = 1.0
         self.grade_offset = 0.0
+
+        # ASC CDL (slope/offset/power/sat) — baked into shader; requires rebuild
+        self.cdl_slope = (1.0, 1.0, 1.0)
+        self.cdl_offset = (0.0, 0.0, 0.0)
+        self.cdl_power = (1.0, 1.0, 1.0)
+        self.cdl_saturation = 1.0
+        self.cdl_style = OCIO.CDL_NO_CLAMP
 
         self._cached_pipeline_key = ""
         self._cached_ocio_shader = ""
@@ -242,6 +249,77 @@ class OCIOManager:
             self.grade_offset = float(offset)
 
     @staticmethod
+    def _as_rgb_triple(value) -> tuple[float, float, float]:
+        if isinstance(value, (list, tuple)) and len(value) >= 3:
+            return (float(value[0]), float(value[1]), float(value[2]))
+        scalar = float(value)
+        return (scalar, scalar, scalar)
+
+    def _cdl_is_identity(self) -> bool:
+        return (
+            self.cdl_slope == (1.0, 1.0, 1.0)
+            and self.cdl_offset == (0.0, 0.0, 0.0)
+            and self.cdl_power == (1.0, 1.0, 1.0)
+            and abs(self.cdl_saturation - 1.0) < 1e-9
+        )
+
+    def set_cdl_values(
+        self,
+        slope: tuple[float, float, float] | None = None,
+        offset: tuple[float, float, float] | None = None,
+        power: tuple[float, float, float] | None = None,
+        saturation: float | None = None,
+        style=None,
+    ) -> None:
+        """Update ASC CDL parameters. Requires shader pipeline rebuild (not UBO-driven)."""
+        if slope is not None:
+            self.cdl_slope = self._as_rgb_triple(slope)
+        if offset is not None:
+            self.cdl_offset = self._as_rgb_triple(offset)
+        if power is not None:
+            self.cdl_power = self._as_rgb_triple(power)
+        if saturation is not None:
+            self.cdl_saturation = float(saturation)
+        if style is not None:
+            self.cdl_style = style
+        self.invalidate_shader_cache()
+
+    def reset_cdl_values(self) -> None:
+        self.set_cdl_values(
+            slope=(1.0, 1.0, 1.0),
+            offset=(0.0, 0.0, 0.0),
+            power=(1.0, 1.0, 1.0),
+            saturation=1.0,
+            style=OCIO.CDL_NO_CLAMP,
+        )
+
+    def apply_cdl_dict(self, cdl: dict | None) -> None:
+        """Apply a Framecycler OTIO CDL dict (slope/offset/power/sat[/style])."""
+        if not cdl:
+            self.reset_cdl_values()
+            return
+        style_name = cdl.get("style", "no_clamp")
+        style = OCIO.CDL_ASC if style_name == "asc" else OCIO.CDL_NO_CLAMP
+        self.set_cdl_values(
+            slope=tuple(cdl.get("slope", (1.0, 1.0, 1.0))),
+            offset=tuple(cdl.get("offset", (0.0, 0.0, 0.0))),
+            power=tuple(cdl.get("power", (1.0, 1.0, 1.0))),
+            saturation=float(cdl.get("saturation", 1.0)),
+            style=style,
+        )
+
+    def load_cdl(self, path: str, cccid: str = "") -> None:
+        """Load ASC CDL from a .cdl/.ccc/.cc file via OCIO."""
+        cdl = OCIO.CDLTransform.CreateFromFile(path, cccid)
+        self.set_cdl_values(
+            slope=tuple(cdl.getSlope()),
+            offset=tuple(cdl.getOffset()),
+            power=tuple(cdl.getPower()),
+            saturation=float(cdl.getSat()),
+            style=cdl.getStyle(),
+        )
+
+    @staticmethod
     def _gpu_uniform_float(value: float) -> float:
         """Clamp OCIO scalar uniforms to finite float32 range for GPU UBO uploads."""
         value = float(value)
@@ -307,12 +385,17 @@ class OCIOManager:
     def get_pipeline_key(self) -> str:
         look_key = self.look or ""
         custom_lut = self._custom_lut_path or ""
+        cdl_key = (
+            f"{self.cdl_slope}|{self.cdl_offset}|{self.cdl_power}|"
+            f"{self.cdl_saturation}|{self.cdl_style}"
+        )
         return hash_pipeline_state(
             self.input_colorspace,
             look_key,
             self.display_output,
             custom_lut,
             self.config_path,
+            cdl_key,
         )
 
     @staticmethod
@@ -330,6 +413,17 @@ class OCIOManager:
         gpt.setValue(primary)
         gpt.makeDynamic()
         group.appendTransform(gpt)
+
+    def _append_cdl(self, group: OCIO.GroupTransform) -> None:
+        if self._cdl_is_identity():
+            return
+        cdl = OCIO.CDLTransform()
+        cdl.setSlope(list(self.cdl_slope))
+        cdl.setOffset(list(self.cdl_offset))
+        cdl.setPower(list(self.cdl_power))
+        cdl.setSat(self.cdl_saturation)
+        cdl.setStyle(self.cdl_style)
+        group.appendTransform(cdl)
 
     def _resolve_working_space(self) -> str:
         if not self.config:
@@ -350,6 +444,7 @@ class OCIOManager:
 
         if not self.config:
             self._append_dynamic_grading(group, self.grade_exposure, self.grade_gamma, self.grade_offset)
+            self._append_cdl(group)
             return group
 
         working_space = self._resolve_working_space()
@@ -362,6 +457,7 @@ class OCIOManager:
                 )
 
         self._append_dynamic_grading(group, self.grade_exposure, self.grade_gamma, self.grade_offset)
+        self._append_cdl(group)
 
         look_applied = False
         if self.look:

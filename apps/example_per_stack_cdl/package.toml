@@ -1,0 +1,6 @@
+id = "framecycler.example_per_stack_cdl"
+name = "Example Per-Stack CDL"
+version = "0.1.0"
+description = "Assigns alternating red/green/blue ASC CDL to each shot stack (demo)."
+entry = "package:ExamplePerStackCdlPackage"
+enabled_by_default = false

@@ -87,6 +87,21 @@ class TestSettings(unittest.TestCase):
         self.settings.resolution_scale = Settings.clamp_resolution_scale(2.0)
         self.assertEqual(self.settings.resolution_scale, 1.0)
 
+    def test_package_enabled_round_trip(self):
+        self.settings.package_enabled = {
+            "framecycler.example_apply_cdl": True,
+            "framecycler.ocio_api_loader": False,
+        }
+        self.settings.save()
+        reloaded = Settings(config_dir=self.settings.config_dir)
+        self.assertEqual(
+            reloaded.package_enabled,
+            {
+                "framecycler.example_apply_cdl": True,
+                "framecycler.ocio_api_loader": False,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

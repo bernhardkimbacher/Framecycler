@@ -1,4 +1,3 @@
-import os
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -10,6 +9,11 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFileDialog,
     QDialogButtonBox,
+    QTabWidget,
+    QWidget,
+    QCheckBox,
+    QScrollArea,
+    QFrame,
 )
 from PySide6.QtCore import Qt
 
@@ -21,6 +25,8 @@ from ..core.system_memory import (
     get_platform_cache_limits,
     slider_ticks_to_gb,
 )
+from ..packages.manifest import discover_packages, is_package_enabled
+from ..packages.paths import ensure_user_packages_dir, package_search_roots
 
 
 class SettingsDialog(QDialog):
@@ -29,12 +35,28 @@ class SettingsDialog(QDialog):
         self.settings = settings
         self.limits = get_platform_cache_limits()
         self._coupling = False
+        self._package_checks: dict[str, QCheckBox] = {}
+        self._package_manifests = []
         self.setWindowTitle("Preferences")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(480)
         self._init_ui()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._build_general_tab(), "General")
+        tabs.addTab(self._build_packages_tab(), "Packages")
+        layout.addWidget(tabs)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        buttons.accepted.connect(self.accept_settings)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _build_general_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
 
         layout.addWidget(QLabel("Reader Thread Count:"))
         thread_layout = QHBoxLayout()
@@ -119,10 +141,59 @@ class SettingsDialog(QDialog):
         path_layout.addWidget(btn_browse)
         layout.addLayout(path_layout)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
-        buttons.accepted.connect(self.accept_settings)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        layout.addStretch(1)
+        return page
+
+    def _build_packages_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        ensure_user_packages_dir(self.settings.config_dir)
+
+        restart_note = QLabel("Package enable/disable changes apply after restart.")
+        restart_note.setWordWrap(True)
+        restart_note.setStyleSheet("color: #aaa;")
+        layout.addWidget(restart_note)
+
+        roots_lines = []
+        for source, root in package_search_roots(self.settings.config_dir):
+            roots_lines.append(f"{source}: {root}")
+        roots_label = QLabel("Search paths:\n" + "\n".join(roots_lines))
+        roots_label.setWordWrap(True)
+        roots_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(roots_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        list_host = QWidget()
+        list_layout = QVBoxLayout(list_host)
+
+        self._package_manifests = discover_packages(self.settings.config_dir)
+        self._package_checks.clear()
+        if not self._package_manifests:
+            list_layout.addWidget(QLabel("No packages found."))
+        else:
+            for manifest in self._package_manifests:
+                enabled = is_package_enabled(manifest, self.settings.package_enabled)
+                checkbox = QCheckBox(f"{manifest.name} ({manifest.id})")
+                checkbox.setChecked(enabled)
+                checkbox.setToolTip(
+                    f"{manifest.description}\n"
+                    f"Source: {manifest.source}\n"
+                    f"Path: {manifest.path}\n"
+                    f"Default: {'enabled' if manifest.enabled_by_default else 'disabled'}"
+                )
+                self._package_checks[manifest.id] = checkbox
+                list_layout.addWidget(checkbox)
+                meta = QLabel(f"  {manifest.source} · v{manifest.version}")
+                meta.setStyleSheet("color: #888; margin-left: 18px;")
+                list_layout.addWidget(meta)
+
+        list_layout.addStretch(1)
+        scroll.setWidget(list_host)
+        layout.addWidget(scroll, 1)
+        return page
 
     @staticmethod
     def _format_gb_label(value_gb: float, max_gb: float) -> str:
@@ -196,4 +267,14 @@ class SettingsDialog(QDialog):
         self.settings.default_fps = float(self.fps_combo.currentText())
         self.settings.ocio_config_path = self.ocio_path_edit.text().strip()
         self.settings.missing_frame_mode = self.missing_frame_combo.currentText()
+
+        overrides: dict[str, bool] = {}
+        for manifest in self._package_manifests:
+            checkbox = self._package_checks.get(manifest.id)
+            if checkbox is None:
+                continue
+            checked = checkbox.isChecked()
+            if checked != manifest.enabled_by_default:
+                overrides[manifest.id] = checked
+        self.settings.package_enabled = overrides
         self.accept()

@@ -97,7 +97,7 @@ Located in `src/cpp/engine/rhi_renderer.cpp`. The viewport UI containerizes a na
 * **Platform Backend Selection**: Initializes Metal (macOS), D3D11 (Windows), or Vulkan (Linux). Preemptively checks if the platform name is `"offscreen"` (used in headless/CI tests), in which case it bypasses Vulkan initialization and instantiates a `QRhi::Null` backend directly to prevent crashes.
 * **Shader Compilation**: GLSL source strings are compiled natively inside C++ using `QShaderBaker` into platform-compatible SPIR-V, GLSL, HLSL, and MSL binary packages at pipeline transition time.
 * **Texture Uploads & Cache Integration**: The renderer registers `CacheManager` pointers. During updates, the rendering loop fetches pixel data from the C++ cache directly, uploading them as `RGBA16F` or `R16F` textures natively.
-* **Color Processing (OCIO)**: OpenColorIO transforms are compiled to GLSL 450 by PyOpenColorIO and injected into the fragment shader. 3D LUT grids are uploaded as native 3D textures. CDL grading changes (exposure, gamma, offset) update a C++ mapped uniform buffer dynamically, preventing pipeline rebuilds.
+* **Color Processing (OCIO)**: OpenColorIO transforms are compiled to GLSL 450 by PyOpenColorIO and injected into the fragment shader. 3D LUT grids are uploaded as native 3D textures. Interactive grading (exposure, gamma, offset) updates a C++ mapped uniform buffer dynamically, preventing pipeline rebuilds. True ASC CDL (slope/offset/power/saturation) is applied via `OCIO.CDLTransform` and requires a shader rebuild when values change.
 * **Compare Modes**:
   * **Sequence** — shows the source under the playhead (`sequence_index`).
   * **Wipe** — performs a vertical split shader pass between sources `[0]` and `[1]` using a divider position.
@@ -227,7 +227,9 @@ Color transforms are compiled to GLSL 450 by PyOpenColorIO in Python and passed 
 
 The compilation includes:
 * Input color space → working space conversion
-* Interactive grading (CDL exposure / gamma / offset from the **Tools → Grading** menu) via uniform buffer block updates dynamically in C++ — avoiding pipeline rebuilds while dragging
+* Interactive grading (exposure / gamma / offset from the **Tools → Grading** menu) via uniform buffer block updates dynamically in C++ — avoiding pipeline rebuilds while dragging
+* Optional ASC CDL (`OCIO.CDLTransform` slope/offset/power/saturation) — baked into the shader; value changes rebuild the pipeline
+* **Per-level OTIO CDL**: ASC CDL can be stored under `metadata["framecycler"]["cdl"]` on a **Clip** (version), **Stack** (shot), or **Timeline**. Resolution is Clip > Stack > Timeline > identity. The viewer applies the resolved CDL for the playhead shot’s active version when that version/shot changes. Timeline export/import round-trips these keys. `PackageContext.apply_cdl` is viewer-only; use `set_cdl_on_active_version` / `set_cdl_on_active_shot` / `set_cdl_on_timeline` to persist. **Reset Color Grade** clears the viewer grade/CDL but does not remove OTIO `cdl` keys.
 * Optional creative Look or custom LUT transforms
 * Display output encoding (`sRGB`, Rec.709 gamma, or passthrough `Raw`)
 
@@ -250,8 +252,8 @@ Located in `src/framecycler/ui/`.
 * **Viewfinder Overlay (HUD)**: Keeps the Wipe compare divider line inside the image container when Wipe mode is active.
 * **Timeline Status Row**: Positioned directly above the timeline slider. Displays `FR`, `FPS`, and `TC` in a clean, larger `Segoe UI` font that matches the timeline theme.
 * **Centered Transport Controls**: The playback buttons and loop mode dropdown are centered in the bottom transport bar, with `TC / FR` toggle aligned on the far right.
-* **Grading Menu**: Adds a **Grading** menu with interactive exposure, gamma, and offset adjustment modes (mouse-drag in the viewport). **Reset Color Grade** restores defaults (`Exposure: 0.0`, `Gamma: 1.0`, `Offset: 0.0`) via the menu or the `Home` shortcut.
-* **Plugins Menu**: Hosts registered extension tools (e.g. **Load OCIO from External API...** from `extensions/ocio_api_tool.py`).
+* **Grading Menu**: Adds a **Grading** menu with interactive exposure, gamma, and offset adjustment modes (mouse-drag in the viewport). **Reset Color Grade** restores interactive grade defaults and clears viewer ASC CDL via the menu or the `Home` shortcut (OTIO-stored CDL is kept and reapplied on the next version/shot change).
+* **Plugins Menu**: Hosts enabled packages discovered from `apps/`, `~/.framecycler/packages/`, and optional `FRAMECYCLER_APPS`. Enable/disable packages under **Preferences → Packages** (restart required). Shipped examples (`example_apply_cdl`, `example_add_version`, `example_per_stack_cdl`) are disabled by default; `ocio_api_loader` is enabled by default.
 * **Channel Mask Highlights**: The quick channel selection buttons on the top right (`RGB`, `R`, `G`, `B`, `A`, `LUM`) are checkable and automatically highlight in blue (`#007acc`) when selected.
 
 ---

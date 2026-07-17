@@ -1,0 +1,6 @@
+id = "framecycler.example_add_version"
+name = "Add Example Version"
+version = "0.1.0"
+description = "Adds a grey placeholder EXR version to the shot stack under the playhead."
+entry = "package:ExampleAddVersionPackage"
+enabled_by_default = false

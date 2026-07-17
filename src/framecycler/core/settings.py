@@ -26,6 +26,8 @@ class Settings:
         self.recent_files = []
         self.resolution_scale = 1.0
         self.missing_frame_mode = "Nearest Frame"
+        # Package id -> enabled override; absent means use manifest enabled_by_default
+        self.package_enabled: dict[str, bool] = {}
 
         self.load()
 
@@ -74,6 +76,13 @@ class Settings:
                 self.timecode_mode = data.get("timecode_mode", self.timecode_mode)
                 self.recent_files = data.get("recent_files", self.recent_files)
                 self.missing_frame_mode = data.get("missing_frame_mode", "Nearest Frame")
+                raw_packages = data.get("package_enabled", self.package_enabled)
+                if isinstance(raw_packages, dict):
+                    self.package_enabled = {
+                        str(key): bool(value) for key, value in raw_packages.items()
+                    }
+                else:
+                    self.package_enabled = {}
         except Exception as e:
             print(f"Error loading settings: {e}")
         self.clamp_cache_limits_to_platform()
@@ -91,6 +100,7 @@ class Settings:
                 "timecode_mode": self.timecode_mode,
                 "recent_files": self.recent_files,
                 "missing_frame_mode": self.missing_frame_mode,
+                "package_enabled": self.package_enabled,
             }
             with open(self.config_path, "w") as f:
                 json.dump(data, f, indent=4)

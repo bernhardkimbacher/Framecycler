@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Callable, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import opentimelineio as otio
 
@@ -266,6 +266,133 @@ class Session:
 
     def playback_rate_override(self) -> Optional[float]:
         return otio_model.playback_rate_override(self.timeline)
+
+    def _stack_at(self, shot_index: int) -> Optional[otio.schema.Stack]:
+        stacks = otio_model.shot_stacks(self.timeline)
+        if shot_index < 0 or shot_index >= len(stacks):
+            return None
+        return stacks[shot_index]
+
+    def _clip_at(self, shot_index: int, version_index: int) -> Optional[otio.schema.Clip]:
+        stack = self._stack_at(shot_index)
+        if stack is None:
+            return None
+        clips = otio_model.version_clips(stack)
+        if version_index < 0 or version_index >= len(clips):
+            return None
+        return clips[version_index]
+
+    def playhead_shot_version(
+        self, playhead_frame: Optional[int] = None
+    ) -> Optional[Tuple[int, int]]:
+        """Return (shot_index, active_version_index) for the playhead shot."""
+        stacks = otio_model.shot_stacks(self.timeline)
+        if not stacks:
+            return None
+        if self.plan.empty:
+            return (0, otio_model.active_index(stacks[0]))
+        frame = playhead_frame if playhead_frame is not None else self.plan.global_start
+        segment = self.plan.segment_at(frame)
+        if segment is None:
+            return (0, otio_model.active_index(stacks[0]))
+        shot_index = max(0, min(segment.index, len(stacks) - 1))
+        return (shot_index, otio_model.active_index(stacks[shot_index]))
+
+    def set_clip_cdl(
+        self,
+        shot_index: int,
+        version_index: int,
+        *,
+        slope: Any = None,
+        offset: Any = None,
+        power: Any = None,
+        saturation: Optional[float] = None,
+        style: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        clip = self._clip_at(shot_index, version_index)
+        if clip is None:
+            return None
+        return otio_model.set_cdl(
+            clip,
+            slope=slope,
+            offset=offset,
+            power=power,
+            saturation=saturation,
+            style=style,
+        )
+
+    def set_stack_cdl(
+        self,
+        shot_index: int,
+        *,
+        slope: Any = None,
+        offset: Any = None,
+        power: Any = None,
+        saturation: Optional[float] = None,
+        style: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        stack = self._stack_at(shot_index)
+        if stack is None:
+            return None
+        return otio_model.set_cdl(
+            stack,
+            slope=slope,
+            offset=offset,
+            power=power,
+            saturation=saturation,
+            style=style,
+        )
+
+    def set_timeline_cdl(
+        self,
+        *,
+        slope: Any = None,
+        offset: Any = None,
+        power: Any = None,
+        saturation: Optional[float] = None,
+        style: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return otio_model.set_cdl(
+            self.timeline,
+            slope=slope,
+            offset=offset,
+            power=power,
+            saturation=saturation,
+            style=style,
+        )
+
+    def clear_clip_cdl(self, shot_index: int, version_index: int) -> bool:
+        clip = self._clip_at(shot_index, version_index)
+        if clip is None:
+            return False
+        otio_model.clear_cdl(clip)
+        return True
+
+    def clear_stack_cdl(self, shot_index: int) -> bool:
+        stack = self._stack_at(shot_index)
+        if stack is None:
+            return False
+        otio_model.clear_cdl(stack)
+        return True
+
+    def clear_timeline_cdl(self) -> None:
+        otio_model.clear_cdl(self.timeline)
+
+    def resolved_cdl_for_active(
+        self, playhead_frame: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Resolve Clip > Stack > Timeline CDL for the playhead active version."""
+        stacks = otio_model.shot_stacks(self.timeline)
+        if not stacks:
+            return otio_model.identity_cdl()
+        loc = self.playhead_shot_version(playhead_frame)
+        if loc is None:
+            return otio_model.resolve_cdl(None, None, self.timeline)
+        shot_index, version_index = loc
+        stack = stacks[shot_index]
+        clips = otio_model.version_clips(stack)
+        clip = clips[version_index] if 0 <= version_index < len(clips) else None
+        return otio_model.resolve_cdl(clip, stack, self.timeline)
 
     def export_timeline(self, path: str) -> None:
         otio_model.save_timeline(self.timeline, path)

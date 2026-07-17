@@ -1,0 +1,6 @@
+id = "framecycler.ocio_api_loader"
+name = "OCIO API Loader"
+version = "0.1.0"
+description = "Load an OCIO config from a mock external studio API."
+entry = "package:OcioApiLoaderPackage"
+enabled_by_default = true

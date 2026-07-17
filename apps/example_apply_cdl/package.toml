@@ -1,0 +1,6 @@
+id = "framecycler.example_apply_cdl"
+name = "Apply Example CDL"
+version = "0.1.0"
+description = "Applies a hardcoded ASC CDL (stub for external fetch)."
+entry = "package:ExampleApplyCdlPackage"
+enabled_by_default = false

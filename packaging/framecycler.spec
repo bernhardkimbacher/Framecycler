@@ -45,6 +45,7 @@ a = Analysis(
         (str(root / "src" / "framecycler" / "color" / "studio_config"), "framecycler/color/studio_config"),
         (str(root / "src" / "framecycler" / "render" / "shaders"), "framecycler/render/shaders"),
         (str(root / "assets" / "icons"), "assets/icons"),
+        (str(root / "apps"), "apps"),
     ],
     hiddenimports=["OpenImageIO"],
     hookspath=[],

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import unquote, urlparse
 
@@ -16,6 +17,14 @@ import opentimelineio as otio
 
 FC_META = "framecycler"
 VIDEO_TRACK_NAME = "V1"
+CDL_KEY = "cdl"
+
+_IDENTITY_CDL: Dict[str, Any] = {
+    "slope": [1.0, 1.0, 1.0],
+    "offset": [0.0, 0.0, 0.0],
+    "power": [1.0, 1.0, 1.0],
+    "saturation": 1.0,
+}
 
 
 def _fc(item) -> Dict[str, Any]:
@@ -32,6 +41,162 @@ def _fc(item) -> Dict[str, Any]:
 
 def _set_fc(item, meta: Dict[str, Any]) -> None:
     item.metadata[FC_META] = dict(meta)
+
+
+def get_fc_meta(item) -> Dict[str, Any]:
+    """Public read of ``metadata['framecycler']`` (copy)."""
+    return _fc(item)
+
+
+def update_fc_meta(item, **fields: Any) -> Dict[str, Any]:
+    """Merge fields into ``metadata['framecycler']`` and write back."""
+    meta = _fc(item)
+    meta.update(fields)
+    _set_fc(item, meta)
+    return meta
+
+
+def identity_cdl() -> Dict[str, Any]:
+    return {
+        "slope": list(_IDENTITY_CDL["slope"]),
+        "offset": list(_IDENTITY_CDL["offset"]),
+        "power": list(_IDENTITY_CDL["power"]),
+        "saturation": float(_IDENTITY_CDL["saturation"]),
+    }
+
+
+def _as_rgb_list(value: Any) -> List[float]:
+    # OTIO stores vectors as AnyVector (iterable but not list/tuple).
+    if isinstance(value, (str, bytes)):
+        scalar = float(value)
+        return [scalar, scalar, scalar]
+    try:
+        items = list(value)
+        if len(items) >= 3:
+            return [float(items[0]), float(items[1]), float(items[2])]
+    except TypeError:
+        pass
+    scalar = float(value)
+    return [scalar, scalar, scalar]
+
+
+def _as_plain_dict(value: Any) -> Optional[Dict[str, Any]]:
+    """Convert OTIO AnyDictionary / Mapping to a plain dict."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, Mapping):
+        return dict(value)
+    try:
+        return dict(value)
+    except Exception:
+        return None
+
+
+def normalize_cdl(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return a complete CDL dict with defaults filled in."""
+    result = identity_cdl()
+    plain = _as_plain_dict(data)
+    if plain is None:
+        return result
+    if "slope" in plain:
+        result["slope"] = _as_rgb_list(plain["slope"])
+    if "offset" in plain:
+        result["offset"] = _as_rgb_list(plain["offset"])
+    if "power" in plain:
+        result["power"] = _as_rgb_list(plain["power"])
+    if "saturation" in plain:
+        result["saturation"] = float(plain["saturation"])
+    style = plain.get("style")
+    if style in ("no_clamp", "asc"):
+        result["style"] = style
+    elif style is not None:
+        # Preserve unknown string styles; ignore invalid types
+        result["style"] = str(style)
+    return result
+
+
+def cdl_is_identity(data: Optional[Dict[str, Any]]) -> bool:
+    cdl = normalize_cdl(data)
+    return (
+        cdl["slope"] == [1.0, 1.0, 1.0]
+        and cdl["offset"] == [0.0, 0.0, 0.0]
+        and cdl["power"] == [1.0, 1.0, 1.0]
+        and abs(float(cdl["saturation"]) - 1.0) < 1e-9
+    )
+
+
+def get_cdl(item) -> Optional[Dict[str, Any]]:
+    """Return normalized CDL if ``framecycler.cdl`` is present, else None (inherit)."""
+    meta = _fc(item)
+    if CDL_KEY not in meta:
+        return None
+    raw = meta.get(CDL_KEY)
+    plain = _as_plain_dict(raw)
+    if plain is None:
+        return identity_cdl()
+    return normalize_cdl(plain)
+
+
+def set_cdl(
+    item,
+    *,
+    slope: Any = None,
+    offset: Any = None,
+    power: Any = None,
+    saturation: Optional[float] = None,
+    style: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Write/merge ASC CDL onto a Clip, Stack, or Timeline under ``framecycler.cdl``."""
+    current = get_cdl(item) or identity_cdl()
+    if slope is not None:
+        current["slope"] = _as_rgb_list(slope)
+    if offset is not None:
+        current["offset"] = _as_rgb_list(offset)
+    if power is not None:
+        current["power"] = _as_rgb_list(power)
+    if saturation is not None:
+        current["saturation"] = float(saturation)
+    if style is not None:
+        if style not in ("no_clamp", "asc"):
+            raise ValueError(f"Unsupported CDL style: {style!r}")
+        current["style"] = style
+    update_fc_meta(item, **{CDL_KEY: current})
+    return current
+
+
+def clear_cdl(item) -> None:
+    """Remove stored CDL so inheritance from parent levels applies again."""
+    meta = _fc(item)
+    if CDL_KEY in meta:
+        meta.pop(CDL_KEY, None)
+        _set_fc(item, meta)
+
+
+def resolve_cdl(
+    clip=None,
+    stack=None,
+    timeline=None,
+) -> Dict[str, Any]:
+    """Resolve effective CDL: Clip > Stack > Timeline > identity."""
+    for item in (clip, stack, timeline):
+        if item is None:
+            continue
+        cdl = get_cdl(item)
+        if cdl is not None:
+            return cdl
+    return identity_cdl()
+
+
+def cdl_cache_key(cdl: Dict[str, Any]) -> str:
+    """Stable string key for viewer apply caching."""
+    norm = normalize_cdl(cdl)
+    style = norm.get("style", "no_clamp")
+    return (
+        f"{norm['slope']}|{norm['offset']}|{norm['power']}|"
+        f"{norm['saturation']}|{style}"
+    )
 
 
 def new_timeline(name: str = "Framecycler Session") -> otio.schema.Timeline:
@@ -270,7 +435,11 @@ def wrap_shot_stack(clip: otio.schema.Clip, name: Optional[str] = None) -> otio.
     path = media_path_from_clip(clip) or clip.name or "shot"
     stack = otio.schema.Stack(name=name or _shot_name_from_path(path))
     stack.append(clip)
-    _set_fc(stack, {"active": 0, "compare": 0})
+    # Merge-safe: preserve any pre-set stack FC keys (e.g. cdl) when initializing indices.
+    meta = _fc(stack)
+    meta.setdefault("active", 0)
+    meta.setdefault("compare", 0)
+    _set_fc(stack, meta)
     _sync_stack_source_range(stack)
     return stack
 
