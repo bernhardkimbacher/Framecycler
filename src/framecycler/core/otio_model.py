@@ -283,16 +283,65 @@ def compare_clip(stack: otio.schema.Stack) -> Optional[otio.schema.Clip]:
     return clips[compare_index(stack)]
 
 
+def clip_available_range_frames(clip: otio.schema.Clip) -> tuple[int, int]:
+    """Return (available_start, available_duration) in media timebase frames."""
+    ref = clip.media_reference
+    if ref is not None and ref.available_range is not None:
+        start = int(round(ref.available_range.start_time.value))
+        duration = max(0, int(round(ref.available_range.duration.value)))
+        return start, duration
+    meta = _fc(clip)
+    frame_count = int(meta.get("frame_count", 0) or 0)
+    return 0, max(0, frame_count)
+
+
+def clip_source_start_frames(clip: otio.schema.Clip) -> int:
+    """Start of the clip's source_range in media timebase frames."""
+    try:
+        if clip.source_range is not None:
+            return int(round(clip.source_range.start_time.value))
+    except Exception:
+        pass
+    avail_start, _ = clip_available_range_frames(clip)
+    return avail_start
+
+
 def clip_duration_frames(clip: otio.schema.Clip) -> int:
     try:
         if clip.source_range is not None:
             return max(0, int(round(clip.source_range.duration.value)))
     except Exception:
         pass
-    ref = clip.media_reference
-    if ref is not None and ref.available_range is not None:
-        return max(0, int(round(ref.available_range.duration.value)))
-    return 0
+    _, avail_duration = clip_available_range_frames(clip)
+    return avail_duration
+
+
+def trim_active_version(
+    stack: otio.schema.Stack,
+    source_start_frame: int,
+    duration_frames: int,
+) -> bool:
+    """
+    Trim the active version's source_range, clamped to available media.
+    Returns True if the clip was updated.
+    """
+    clip = active_clip(stack)
+    if clip is None:
+        return False
+    avail_start, avail_duration = clip_available_range_frames(clip)
+    if avail_duration <= 0:
+        return False
+    avail_end = avail_start + avail_duration
+    rate = clip_rate(clip)
+    start = max(avail_start, min(avail_end - 1, int(source_start_frame)))
+    max_duration = avail_end - start
+    duration = max(1, min(max_duration, int(duration_frames)))
+    clip.source_range = otio.opentime.TimeRange(
+        start_time=otio.opentime.RationalTime(start, rate),
+        duration=otio.opentime.RationalTime(duration, rate),
+    )
+    _sync_stack_source_range(stack)
+    return True
 
 
 def clip_rate(clip: otio.schema.Clip, default: float = 24.0) -> float:

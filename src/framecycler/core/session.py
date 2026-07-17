@@ -231,6 +231,19 @@ class Session:
         self.selected_version_index = version_index
         self._notify()
 
+    def trim_active_version(
+        self,
+        shot_index: int,
+        source_start_frame: int,
+        duration_frames: int,
+    ) -> None:
+        stacks = otio_model.shot_stacks(self.timeline)
+        if shot_index < 0 or shot_index >= len(stacks):
+            return
+        if otio_model.trim_active_version(stacks[shot_index], source_start_frame, duration_frames):
+            self.selected_shot_index = shot_index
+            self._notify()
+
     def set_compare_version(self, shot_index: int, version_index: int) -> None:
         stacks = otio_model.shot_stacks(self.timeline)
         if shot_index < 0 or shot_index >= len(stacks):

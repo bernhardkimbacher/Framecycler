@@ -19,6 +19,7 @@ from ..packages.manager import PackageManager
 
 from .viewport import ViewportContainer, COMPARE_SEQUENCE
 from .timeline import Timeline
+from .timeline_editor import TimelineSegmentInfo, TimelineVersionInfo
 from .theme import get_viewfinder_stylesheet
 from .settings_dialog import SettingsDialog
 from .widgets import WideComboBox, add_menu_section
@@ -137,37 +138,42 @@ class MainWindow(QMainWindow):
         self.viewport.frame_scrubbed.connect(self._on_timeline_scrub)
         self.viewport.zoom_mode_changed.connect(self._sync_zoom_actions)
         
-        # Create Custom Timeline
+        # NLE timeline editor
         self.timeline = Timeline(self)
         self.timeline.frame_changed.connect(self._on_timeline_scrub)
         self.timeline.in_out_changed.connect(self._on_in_out_changed)
-        
-        # Central layout
+        self.timeline.active_version_changed.connect(self._on_active_version_changed)
+        self.timeline.shots_reordered.connect(self._on_shot_order_changed)
+        self.timeline.shot_trimmed.connect(self._on_shot_trimmed)
+
+        # Central layout: viewer column + resizable timeline pane
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(2)
-        
+
+        viewer_column = QWidget()
+        viewer_layout = QVBoxLayout(viewer_column)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
+        viewer_layout.setSpacing(2)
+
         # Viewport Header controls row
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(10, 2, 10, 2)
-        
-        # Left header: Channel extraction icons / drop-down
+
         header_layout.addWidget(QLabel("LAYER:"))
         self.exr_layer_combo = WideComboBox(min_popup_width=240)
         self.exr_layer_combo.addItem("beauty")
         self.exr_layer_combo.currentIndexChanged.connect(self._on_exr_layer_changed)
         header_layout.addWidget(self.exr_layer_combo)
-        
-        # Resolution label (no "RESO:" text prefix, just width x height)
+
         lbl_font = ui_font(10)
         header_layout.addSpacing(20)
         self.lbl_resolution = QLabel("")
         self.lbl_resolution.setFont(lbl_font)
         header_layout.addWidget(self.lbl_resolution)
-        
-        # IN/OUT colorspace info and Look selector
+
         header_layout.addSpacing(20)
         self.lbl_ocio_info = QLabel("")
         self.lbl_ocio_info.setFont(lbl_font)
@@ -179,10 +185,9 @@ class MainWindow(QMainWindow):
         self.look_combo.currentTextChanged.connect(self._on_look_combo_changed)
         self._populate_look_combo()
         header_layout.addWidget(self.look_combo)
-        
+
         header_layout.addStretch()
-        
-        # Right header: channel quick buttons
+
         channels = [("RGB", 0), ("R", 1), ("G", 2), ("B", 3), ("A", 4), ("LUM", 5)]
         self.channel_buttons = {}
         for label, val in channels:
@@ -195,8 +200,8 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda checked=False, v=val: self.toggle_channel_mask(v))
             header_layout.addWidget(btn)
             self.channel_buttons[val] = btn
-            
-        main_layout.addLayout(header_layout)
+
+        viewer_layout.addLayout(header_layout)
 
         self.source_panel = SourceListPanel(self)
         self.source_panel.shot_selected.connect(self._on_shot_selected)
@@ -213,9 +218,8 @@ class MainWindow(QMainWindow):
         self.viewer_splitter.setStretchFactor(1, 1)
         self._source_panel_sizes = [220, 900]
         self.viewer_splitter.setSizes(self._source_panel_sizes)
-        main_layout.addWidget(self.viewer_splitter, stretch=1)
-        
-        # Readout row just above the timeline
+        viewer_layout.addWidget(self.viewer_splitter, stretch=1)
+
         readout_widget = QWidget()
         readout_layout = QGridLayout(readout_widget)
         readout_layout.setContentsMargins(10, 2, 10, 2)
@@ -233,13 +237,10 @@ class MainWindow(QMainWindow):
         readout_layout.addWidget(self.lbl_frame, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
         readout_layout.addWidget(self.lbl_fps, 0, 1, Qt.AlignCenter)
         readout_layout.addWidget(QWidget(), 0, 2)
+        viewer_layout.addWidget(readout_widget)
 
-        main_layout.addWidget(readout_widget)
-
-        # Transport controls row (above timeline)
         transport_layout = QHBoxLayout()
         transport_layout.setContentsMargins(10, 0, 10, 2)
-
         transport_font = ui_font(13)
 
         self.btn_begin = self._make_transport_button("|<", transport_font)
@@ -284,15 +285,23 @@ class MainWindow(QMainWindow):
         ):
             transport_layout.addWidget(btn)
         transport_layout.addStretch()
+        viewer_layout.addLayout(transport_layout)
 
-        main_layout.addLayout(transport_layout)
-        main_layout.addWidget(self.timeline)
+        self.main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.main_splitter.addWidget(viewer_column)
+        self.main_splitter.addWidget(self.timeline)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 0)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.timeline.setMinimumHeight(120)
+        sizes = getattr(self.settings, "timeline_splitter_sizes", [700, 220])
+        self.main_splitter.setSizes(sizes)
+        self.main_splitter.splitterMoved.connect(self._on_main_splitter_moved)
+        main_layout.addWidget(self.main_splitter, stretch=1)
+
         self.timeline.set_display_options(self.settings.timecode_mode, self.fps)
         self._update_readout_display()
-        # Setup Menu bar
         self._build_menu()
-        
-        # Set status bar
         self.statusBar().showMessage("Ready.")
 
     def _build_menu(self):
@@ -871,11 +880,7 @@ class MainWindow(QMainWindow):
             selected_version=self.session.selected_version_index,
         )
 
-        markers = [
-            (seg.global_start, seg.global_end, len(seg.versions))
-            for seg in plan.segments
-        ]
-        self.timeline.set_shot_markers(markers)
+        self._push_timeline_segments(plan)
 
         if plan.empty:
             self.start_frame = 0
@@ -968,6 +973,51 @@ class MainWindow(QMainWindow):
         self.session.set_active_version(shot_index, version_index)
         self.statusBar().showMessage(f"Active version set (shot {shot_index}, v{version_index})")
 
+    def _on_shot_trimmed(self, shot_index: int, source_start: int, duration: int):
+        self.session.trim_active_version(shot_index, source_start, duration)
+        self.statusBar().showMessage(
+            f"Trimmed shot {shot_index}: start={source_start}, duration={duration}"
+        )
+
+    def _on_main_splitter_moved(self, *_args):
+        sizes = self.main_splitter.sizes()
+        if len(sizes) == 2 and sizes[1] > 0:
+            self.settings.timeline_splitter_sizes = sizes
+            self.settings.save()
+
+    def _push_timeline_segments(self, plan) -> None:
+        segments: list[TimelineSegmentInfo] = []
+        for seg in plan.segments:
+            versions: list[TimelineVersionInfo] = []
+            for slot in seg.versions:
+                avail_start, avail_count = otio_model.clip_available_range_frames(slot.clip)
+                name = (
+                    slot.source.display_name
+                    if slot.source is not None
+                    else (slot.clip.name or "offline")
+                )
+                versions.append(
+                    TimelineVersionInfo(
+                        name=name,
+                        is_active=slot.is_active,
+                        is_compare=slot.is_compare,
+                        offline=slot.offline,
+                        source_start=otio_model.clip_source_start_frames(slot.clip),
+                        duration=otio_model.clip_duration_frames(slot.clip),
+                        available_start=avail_start,
+                        available_count=avail_count,
+                    )
+                )
+            segments.append(
+                TimelineSegmentInfo(
+                    index=seg.index,
+                    global_start=seg.global_start,
+                    global_end=seg.global_end,
+                    versions=versions,
+                )
+            )
+        self.timeline.set_segments(segments)
+
     def _remove_shot(self, shot_index: int):
         self.viewport.clear_frames()
         self.session.remove_shot(shot_index)
@@ -1014,7 +1064,7 @@ class MainWindow(QMainWindow):
         self.timeline.set_in_out(0, 0)
         self.timeline.set_current_frame(0)
         self.timeline.set_cached_frames(set())
-        self.timeline.set_shot_markers([])
+        self.timeline.set_segments([])
 
         self.exr_layer_combo.clear()
         self.exr_layer_combo.addItem("beauty")
@@ -1661,6 +1711,11 @@ class MainWindow(QMainWindow):
                 )
 
     def closeEvent(self, event):
+        if hasattr(self, "main_splitter"):
+            sizes = self.main_splitter.sizes()
+            if len(sizes) == 2 and sizes[1] > 0:
+                self.settings.timeline_splitter_sizes = sizes
+                self.settings.save()
         self.timer.stop()
         self._close_all_sources()
         self.viewport.cleanup()

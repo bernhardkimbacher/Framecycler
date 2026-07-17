@@ -117,13 +117,14 @@ class PlaybackPlan:
 
     def decoder_frame_for_version(self, segment: Segment, version: VersionSlot, global_frame: int) -> int:
         local = self.local_index(segment, global_frame)
+        src_offset = otio_model.clip_source_start_frames(version.clip)
         if version.source is None:
             clip_start = otio_model.clip_start_frame(version.clip)
-            return clip_start + local
-        # Clamp local to the source's own frame count (compare version may be shorter/longer)
+            return clip_start + src_offset + local
+        media_local = src_offset + local
         if version.source.frame_count > 0:
-            local = max(0, min(version.source.frame_count - 1, local))
-        return local_index_to_decoder_frame(version.source, local)
+            media_local = max(0, min(version.source.frame_count - 1, media_local))
+        return local_index_to_decoder_frame(version.source, media_local)
 
     def global_range_of(self, stack: "otio.schema.Stack") -> Optional[Tuple[int, int]]:
         for segment in self.segments:
@@ -138,16 +139,22 @@ class PlaybackPlan:
         global_in: int,
         global_out: int,
     ) -> Tuple[int, int]:
+        src_offset = otio_model.clip_source_start_frames(version.clip)
         if version.source is None:
-            start = otio_model.clip_start_frame(version.clip)
+            start = otio_model.clip_start_frame(version.clip) + src_offset
             return start, start
-        local_in = max(0, min(version.source.frame_count - 1, global_in - segment.global_start))
-        local_out = max(0, min(version.source.frame_count - 1, global_out - segment.global_start))
+        local_in = max(0, min(segment.frame_count - 1, global_in - segment.global_start))
+        local_out = max(0, min(segment.frame_count - 1, global_out - segment.global_start))
         if local_out < local_in:
             local_out = local_in
+        media_in = src_offset + local_in
+        media_out = src_offset + local_out
+        if version.source.frame_count > 0:
+            media_in = max(0, min(version.source.frame_count - 1, media_in))
+            media_out = max(0, min(version.source.frame_count - 1, media_out))
         return (
-            local_index_to_decoder_frame(version.source, local_in),
-            local_index_to_decoder_frame(version.source, local_out),
+            local_index_to_decoder_frame(version.source, media_in),
+            local_index_to_decoder_frame(version.source, media_out),
         )
 
 
@@ -187,13 +194,16 @@ def build(timeline: "otio.schema.Timeline", media_pool: "MediaPool") -> Playback
             if clip_index == active_idx:
                 active_source = source if source is not None and not source.offline else None
 
-        # Segment length follows the active version (frame-conform, 1:1).
+        # Segment length follows the active version's trimmed source_range (frame-conform, 1:1).
+        active = otio_model.active_clip(stack)
+        frame_count = otio_model.clip_duration_frames(active) if active else 0
         if active_source is not None:
-            frame_count = max(0, active_source.frame_count)
             rate = active_source.fps
+            if frame_count <= 0:
+                frame_count = max(0, active_source.frame_count)
+            elif active_source.frame_count > 0:
+                frame_count = min(frame_count, active_source.frame_count)
         else:
-            active = otio_model.active_clip(stack)
-            frame_count = otio_model.clip_duration_frames(active) if active else 0
             rate = otio_model.clip_rate(active) if active else 24.0
 
         global_end = cursor + max(0, frame_count - 1) if frame_count > 0 else cursor - 1

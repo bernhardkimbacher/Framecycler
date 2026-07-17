@@ -28,6 +28,8 @@ class Settings:
         self.missing_frame_mode = "Nearest Frame"
         # Package id -> enabled override; absent means use manifest enabled_by_default
         self.package_enabled: dict[str, bool] = {}
+        # Vertical main splitter: [viewer_area, timeline_pane]
+        self.timeline_splitter_sizes: list[int] = [700, 220]
 
         self.load()
 
@@ -83,6 +85,13 @@ class Settings:
                     }
                 else:
                     self.package_enabled = {}
+                raw_sizes = data.get("timeline_splitter_sizes", self.timeline_splitter_sizes)
+                if (
+                    isinstance(raw_sizes, list)
+                    and len(raw_sizes) == 2
+                    and all(isinstance(v, (int, float)) for v in raw_sizes)
+                ):
+                    self.timeline_splitter_sizes = [max(80, int(raw_sizes[0])), max(120, int(raw_sizes[1]))]
         except Exception as e:
             print(f"Error loading settings: {e}")
         self.clamp_cache_limits_to_platform()
@@ -101,6 +110,7 @@ class Settings:
                 "recent_files": self.recent_files,
                 "missing_frame_mode": self.missing_frame_mode,
                 "package_enabled": self.package_enabled,
+                "timeline_splitter_sizes": self.timeline_splitter_sizes,
             }
             with open(self.config_path, "w") as f:
                 json.dump(data, f, indent=4)
