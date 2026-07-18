@@ -1,3 +1,4 @@
+import time
 import unittest
 
 import numpy as np
@@ -7,7 +8,16 @@ from src.framecycler.core.settings import Settings
 from src.framecycler.decoders.base import BaseDecoder
 
 
-class _FakeDecoder:
+def _wait_until(predicate, timeout=2.0, interval=0.01):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
+class _FakeDecoder(BaseDecoder):
     def __init__(self, channels: int = 3):
         self._channels = channels
         self._meta = {"frame_count": 2, "fps": 24.0, "start_frame": 0, "end_frame": 1, "channels": ["R", "G", "B"]}
@@ -25,6 +35,9 @@ class _FakeDecoder:
             data[..., 1] = 0.5
             data[..., 2] = 0.25
         return {"data": data}
+
+    def close(self):
+        pass
 
 
 class _ContainerDecoder(BaseDecoder):
@@ -106,8 +119,8 @@ class TestCacheRgbaExpansion(unittest.TestCase):
         settings.decode_cache_limit_gb = 0.1
         engine = CacheEngine(_FakeDecoder(channels=3), settings)
         try:
-            engine._read_and_cache_worker(0)
-            self.assertTrue(engine.native_cache.has_frame(0))
+            engine.set_playhead(0, 1)
+            self.assertTrue(_wait_until(lambda: engine.has_frame(0)))
             view = engine.native_cache.get_frame_data(0)
             self.assertIsNotNone(view)
             self.assertEqual(view.shape, (16, 32, 4))
@@ -124,9 +137,9 @@ class TestCacheRgbaExpansion(unittest.TestCase):
         decoder = _ContainerDecoder()
         engine = CacheEngine(decoder, settings)
         try:
-            engine._read_and_cache_worker(0)
-            self.assertEqual(decoder.read_calls, [0])
-            self.assertTrue(engine.native_cache.has_frame(0))
+            engine.set_playhead(0, 1)
+            self.assertTrue(_wait_until(lambda: engine.has_frame(0)))
+            self.assertIn(0, decoder.read_calls)
             view = engine.native_cache.get_frame_data(0)
             self.assertIsNotNone(view)
             self.assertEqual(view.shape, (8, 16, 4))
@@ -142,8 +155,9 @@ class TestCacheRgbaExpansion(unittest.TestCase):
         decoder = _NativePathDecoder(path_for_frame=None)
         engine = CacheEngine(decoder, settings)
         try:
-            engine._read_and_cache_worker(0)
-            self.assertTrue(engine.native_cache.has_frame(0))
+            engine._prefetch.set_lookahead(1)
+            engine.set_playhead(0, 1)
+            self.assertTrue(_wait_until(lambda: engine.has_frame(0)))
             view = engine.native_cache.get_frame_data(0)
             self.assertIsNotNone(view)
             # Placeholder sized from decoder metadata (64x32), Flat Gray ~0.05

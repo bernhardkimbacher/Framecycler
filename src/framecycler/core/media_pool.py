@@ -48,6 +48,7 @@ class MediaPool:
                 self._frame_ready_callback(p, frame_index)
 
         source.cache.add_frame_ready_callback(_on_ready)
+        source.cache.start()
         self._entries[key] = (source, 1)
         return source
 

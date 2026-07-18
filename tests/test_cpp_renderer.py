@@ -46,7 +46,12 @@ class TestCppRenderer(unittest.TestCase):
         self.assertTrue(hasattr(renderer, "sync_and_render"))
         self.assertTrue(hasattr(renderer, "set_display_cache_limit_gb"))
         self.assertTrue(hasattr(renderer, "get_display_cache_stats"))
+        self.assertTrue(hasattr(renderer, "set_upload_queue_policy"))
+        self.assertTrue(hasattr(renderer, "get_upload_queue_stats"))
         renderer.request_redraw()
+        renderer.set_upload_queue_policy(framecycler_engine.UploadQueuePolicy.EveryFrame)
+        stats = renderer.get_upload_queue_stats()
+        self.assertEqual(stats["pending"], 0)
 
 
 if __name__ == "__main__":

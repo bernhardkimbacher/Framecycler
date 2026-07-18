@@ -18,6 +18,7 @@ void CacheManager::set_ram_limit(double ram_limit_gb) {
         _slots.clear();
         _frame_to_slot.clear();
         _slot_to_frame.clear();
+        _inflight_decodes.clear();
         _allocated_bytes = 0;
         return;
     }
@@ -123,13 +124,45 @@ void CacheManager::write_frame(int frame_index, int width, int height, int chann
     }
 }
 
+bool CacheManager::try_claim_decode(int frame_index) {
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+    if (_frame_to_slot.find(frame_index) != _frame_to_slot.end()) {
+        return false;
+    }
+    if (_inflight_decodes.find(frame_index) != _inflight_decodes.end()) {
+        return false;
+    }
+    _inflight_decodes.insert(frame_index);
+    return true;
+}
+
+void CacheManager::release_decode_claim(int frame_index) {
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+    _inflight_decodes.erase(frame_index);
+}
+
+bool CacheManager::is_decode_claimed(int frame_index) const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    return _inflight_decodes.find(frame_index) != _inflight_decodes.end();
+}
+
 bool CacheManager::decode_and_cache_frame(int frame_index, const std::string& file_path, float resolution_scale, const std::string& layer, const std::string& fallback_mode, int placeholder_width, int placeholder_height)
 {
     if (has_frame(frame_index)) {
         return true;
     }
-    auto res = NativeDecoder::decode_frame(file_path, resolution_scale, layer, fallback_mode, placeholder_width, placeholder_height);
-    write_frame(frame_index, res.width, res.height, res.channels, res.pixel_data.data(), res.pixel_data.size());
+    if (!try_claim_decode(frame_index)) {
+        return has_frame(frame_index);
+    }
+    NativeDecoder::DecodeResult res;
+    try {
+        res = NativeDecoder::decode_frame(file_path, resolution_scale, layer, fallback_mode, placeholder_width, placeholder_height);
+        write_frame(frame_index, res.width, res.height, res.channels, res.pixel_data.data(), res.pixel_data.size());
+    } catch (...) {
+        release_decode_claim(frame_index);
+        throw;
+    }
+    release_decode_claim(frame_index);
     return res.success;
 }
 
@@ -193,11 +226,32 @@ std::vector<int> CacheManager::get_cached_frames() {
     return frames;
 }
 
+size_t CacheManager::allocated_bytes() const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    return _allocated_bytes;
+}
+
+size_t CacheManager::max_bytes() const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    return _max_bytes;
+}
+
+size_t CacheManager::bytes_per_frame() const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    for (const auto& slot : _slots) {
+        if (slot.active && !slot.data.empty()) {
+            return slot.data.size() * sizeof(uint16_t);
+        }
+    }
+    return 0;
+}
+
 void CacheManager::clear() {
     std::unique_lock<std::shared_mutex> lock(_mutex);
     _slots.clear();
     _frame_to_slot.clear();
     _slot_to_frame.clear();
+    _inflight_decodes.clear();
     _allocated_bytes = 0;
 }
 

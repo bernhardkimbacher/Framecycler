@@ -84,6 +84,12 @@ public:
     // Decoder frame indices currently resident for a viewport source slot.
     std::vector<int> cached_frames_for_source(int source_index) const;
 
+    bool contains(int source_index, int decoder_frame) const;
+
+    size_t max_bytes() const { return _max_bytes; }
+    size_t resident_bytes() const { return _resident_bytes; }
+    bool playhead_for_source(int source_index, SourcePlayhead& out) const;
+
 private:
     void destroy_entry(GpuCacheEntry& entry);
     void erase_key(const GpuFrameKey& key);

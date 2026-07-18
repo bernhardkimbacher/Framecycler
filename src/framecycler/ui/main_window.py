@@ -26,13 +26,7 @@ from ..decoders.image_io import ANAMORPHIC_PIXEL_ASPECT, SQUARE_PIXEL_ASPECT
 from ..packages.manager import PackageManager
 
 
-from .viewport import (
-    ViewportContainer,
-    COMPARE_SEQUENCE,
-    COMPARE_TILE,
-    COMPARE_WIPE,
-    COMPARE_DIFFERENCE,
-)
+from .viewport import ViewportContainer, COMPARE_SEQUENCE
 from .timeline import Timeline
 from .timeline_editor import TimelineSegmentInfo, TimelineVersionInfo
 from .theme import get_viewfinder_stylesheet
@@ -1352,20 +1346,30 @@ class MainWindow(QMainWindow):
         segment = plan.segment_at(self.current_frame)
         if segment is None:
             return
+        matched_path = False
         for version in segment.display_versions():
             if version.source is None or version.offline:
                 continue
             if os.path.abspath(version.source.path) != os.path.abspath(media_path):
                 continue
+            matched_path = True
             decoder_at_playhead = plan.decoder_frame_for_version(
                 segment, version, self.current_frame
             )
             if frame_index != decoder_at_playhead:
-                return
+                # Non-playhead decode: wake the renderer so GPU lookahead can
+                # upload into the display cache while idle.
+                if self.viewport is not None and self.viewport.native_renderer is not None:
+                    self.viewport.native_renderer.request_redraw()
+                if not self.playing:
+                    self._refresh_timeline_cached_frames()
+                continue
             self._apply_cached_frames(self.current_frame)
             if not self.playing:
                 self._refresh_timeline_cached_frames()
             return
+        if matched_path and not self.playing:
+            self._refresh_timeline_cached_frames()
 
     def _refresh_timeline_cached_frames(self):
         plan = self.session.plan
@@ -1469,54 +1473,6 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
-    def _visible_display_slot_indices(self) -> list[int]:
-        """Compare slots that the renderer uploads into the display cache."""
-        mode = self.viewport.compare_mode
-        count = len(self.viewport.frame_slots)
-        if count <= 0:
-            return []
-        if mode == COMPARE_TILE:
-            return list(range(count))
-        if mode == COMPARE_SEQUENCE:
-            idx = self.viewport.sequence_index
-            if 0 <= idx < count:
-                return [idx]
-            return [0]
-        if mode in (COMPARE_WIPE, COMPARE_DIFFERENCE):
-            return [i for i in (0, 1) if i < count]
-        return [0]
-
-    def _frame_in_display_cache(self, frame: int) -> bool:
-        """True when visible slots for ``frame`` are resident in the GPU display cache."""
-        if self.settings.display_cache_limit_gb <= 0.0:
-            return True
-        plan = self.session.plan
-        if plan.empty:
-            return True
-        segment = plan.segment_at(frame)
-        if segment is None:
-            return True
-        versions = segment.display_versions()
-        for slot_index in self._visible_display_slot_indices():
-            if slot_index >= len(versions):
-                continue
-            version = versions[slot_index]
-            if version.source is None or version.source.cache is None or version.offline:
-                continue
-            if (
-                slot_index >= len(self.viewport.frame_slots)
-                or not self.viewport.frame_slots[slot_index].cached
-            ):
-                return False
-            decoder_frame = plan.decoder_frame_for_version(segment, version, frame)
-            try:
-                gpu_frames = self.viewport.native_renderer.get_display_cached_frames(slot_index)
-            except Exception:
-                return False
-            if decoder_frame not in gpu_frames:
-                return False
-        return True
-
     def _playback_tick(self):
         timing = normalize_playback_timing(self.settings.playback_timing)
         if timing == PLAYBACK_TIMING_REALTIME:
@@ -1548,19 +1504,9 @@ class MainWindow(QMainWindow):
             return
 
         if timing == PLAYBACK_TIMING_EVERY_FRAME and not result.stop:
-            display_enabled = self.settings.display_cache_limit_gb > 0.0
             next_decode_ready = self._frame_ready_for_display(result.frame)
-            current_display_ready = self._frame_in_display_cache(self.current_frame)
-            if not every_frame_can_advance(
-                next_decode_ready=next_decode_ready,
-                current_display_ready=current_display_ready,
-                display_cache_enabled=display_enabled,
-            ):
-                if not current_display_ready and display_enabled:
-                    # Keep pumping the render thread until the current frame is uploaded.
-                    self.viewport.update()
-                if not next_decode_ready:
-                    self._schedule_decode_for_frame(result.frame)
+            if not every_frame_can_advance(next_decode_ready=next_decode_ready):
+                self._schedule_decode_for_frame(result.frame)
                 return
 
         if result.frame != self.current_frame or result.direction != self.playback_direction:
@@ -1673,6 +1619,7 @@ class MainWindow(QMainWindow):
         self.settings.playback_timing = normalize_playback_timing(mode)
         self.settings.save()
         self._sync_playback_timing_actions()
+        self._sync_upload_queue_policy()
         if self.playing:
             self._reset_playback_clock()
 
@@ -1940,11 +1887,26 @@ class MainWindow(QMainWindow):
                 btn.setChecked(val == active_mask)
 
     # Settings and helper dialogs
+    def _sync_upload_queue_policy(self):
+        renderer = getattr(getattr(self, "viewport", None), "native_renderer", None)
+        if renderer is None or not hasattr(renderer, "set_upload_queue_policy"):
+            return
+        from .. import framecycler_engine
+
+        timing = normalize_playback_timing(self.settings.playback_timing)
+        policy = (
+            framecycler_engine.UploadQueuePolicy.Realtime
+            if timing == PLAYBACK_TIMING_REALTIME
+            else framecycler_engine.UploadQueuePolicy.EveryFrame
+        )
+        renderer.set_upload_queue_policy(policy)
+
     def _apply_renderer_cache_settings(self):
         renderer = self.viewport.native_renderer
         renderer.set_display_cache_limit_gb(self.settings.display_cache_limit_gb)
         if self.settings.display_cache_limit_gb <= 0.0:
             renderer.clear_display_cache()
+        self._sync_upload_queue_policy()
 
     def _open_settings_dialog(self):
         dialog = SettingsDialog(self.settings, self)
@@ -1956,6 +1918,7 @@ class MainWindow(QMainWindow):
             new_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
             new_timing = normalize_playback_timing(self.settings.playback_timing)
             self._sync_playback_timing_actions()
+            self._sync_upload_queue_policy()
             if self.playing and new_timing != old_timing:
                 self._reset_playback_clock()
             # Update cache worker thread sizes

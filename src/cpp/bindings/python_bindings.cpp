@@ -1,13 +1,54 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
+#include <pybind11/functional.h>
 #include <pybind11/stl.h>
 #include "cache_manager.h"
+#include "prefetch_engine.h"
 #include "rhi_renderer.h"
+#include "display_upload_queue.h"
+
+#include <iostream>
+#include <memory>
+#include <unordered_map>
 
 namespace py = pybind11;
 
 PYBIND11_MODULE(framecycler_engine, m) {
     m.doc() = "Framecycler High-Performance C++ Review Playback Core Engine";
+
+    py::enum_<UploadQueuePolicy>(m, "UploadQueuePolicy")
+        .value("EveryFrame", UploadQueuePolicy::EveryFrame)
+        .value("Realtime", UploadQueuePolicy::Realtime);
+
+    py::class_<DisplayUploadQueue>(m, "DisplayUploadQueue")
+        .def(py::init<>())
+        .def("set_policy", &DisplayUploadQueue::set_policy)
+        .def("policy", &DisplayUploadQueue::policy)
+        .def(
+            "enqueue",
+            [](DisplayUploadQueue& self, int source_index, int decoder_frame, int upload_token, bool already_resident) {
+                return self.enqueue(
+                    UploadJobRequest{source_index, decoder_frame, upload_token},
+                    already_resident);
+            },
+            py::arg("source_index"),
+            py::arg("decoder_frame"),
+            py::arg("upload_token") = 0,
+            py::arg("already_resident") = false)
+        .def("has_job", &DisplayUploadQueue::has_job)
+        .def("clear", &DisplayUploadQueue::clear)
+        .def("job_count", &DisplayUploadQueue::job_count)
+        .def("stats", [](const DisplayUploadQueue& self) {
+            auto s = self.stats();
+            py::dict d;
+            d["pending"] = s.pending;
+            d["inflight"] = s.inflight;
+            d["ready"] = s.ready;
+            d["completed"] = s.completed;
+            d["refused"] = s.refused;
+            d["coalesced"] = s.coalesced;
+            return d;
+        });
 
     py::class_<CacheManager, std::shared_ptr<CacheManager>>(m, "CacheManager")
         .def(py::init<double>(), py::arg("ram_limit_gb") = 8.0)
@@ -54,11 +95,102 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("get_cached_frames", &CacheManager::get_cached_frames)
         .def("clear", &CacheManager::clear)
         .def("set_ram_limit", &CacheManager::set_ram_limit)
+        .def("allocated_bytes", &CacheManager::allocated_bytes)
+        .def("max_bytes", &CacheManager::max_bytes)
+        .def("bytes_per_frame", &CacheManager::bytes_per_frame)
         .def("decode_and_cache_frame", &CacheManager::decode_and_cache_frame,
              py::arg("frame_index"), py::arg("file_path"), py::arg("resolution_scale"),
              py::arg("layer") = "", py::arg("fallback_mode") = "Flat Gray",
              py::arg("placeholder_width") = 0, py::arg("placeholder_height") = 0,
-             py::call_guard<py::gil_scoped_release>());
+             py::call_guard<py::gil_scoped_release>())
+        .def("try_claim_decode", &CacheManager::try_claim_decode)
+        .def("release_decode_claim", &CacheManager::release_decode_claim)
+        .def("is_decode_claimed", &CacheManager::is_decode_claimed);
+
+    py::class_<PrefetchEngine, std::shared_ptr<PrefetchEngine>>(m, "PrefetchEngine")
+        .def(py::init<std::shared_ptr<CacheManager>, int>(),
+             py::arg("cache"), py::arg("max_workers") = 4,
+             py::keep_alive<1, 2>())
+        .def(
+            "set_path_table",
+            [](PrefetchEngine& self, const std::unordered_map<int, std::string>& paths,
+               const std::vector<int>& sorted_frames) {
+                self.set_path_table(paths, sorted_frames);
+            },
+            py::arg("paths"), py::arg("sorted_frames"))
+        .def(
+            "set_options",
+            &PrefetchEngine::set_options,
+            py::arg("resolution_scale"),
+            py::arg("layer") = "",
+            py::arg("fallback_mode") = "Flat Gray",
+            py::arg("placeholder_width") = 0,
+            py::arg("placeholder_height") = 0,
+            py::arg("native_path_decode") = true)
+        .def("set_enabled", &PrefetchEngine::set_enabled)
+        .def("set_lookahead", &PrefetchEngine::set_lookahead)
+        .def("set_max_workers", &PrefetchEngine::set_max_workers)
+        .def("set_playback_range", &PrefetchEngine::set_playback_range)
+        .def("set_playhead", &PrefetchEngine::set_playhead,
+             py::arg("frame_index"), py::arg("direction") = 1)
+        .def("schedule", &PrefetchEngine::schedule,
+             py::arg("frame_index"), py::arg("priority") = 0)
+        .def(
+            "set_frame_ready_callback",
+            [](PrefetchEngine& self, py::object cb) {
+                if (cb.is_none()) {
+                    self.set_frame_ready_callback(nullptr);
+                    return;
+                }
+                auto holder = std::make_shared<py::object>(std::move(cb));
+                self.set_frame_ready_callback([holder](int frame_index) {
+                    py::gil_scoped_acquire gil;
+                    try {
+                        (*holder)(frame_index);
+                    } catch (py::error_already_set& e) {
+                        std::cerr << "PrefetchEngine: frame-ready Python callback failed: "
+                                  << e.what() << std::endl;
+                        e.discard_as_unraisable(__func__);
+                    }
+                });
+            },
+            py::arg("callback"))
+        .def(
+            "set_python_decode_callback",
+            [](PrefetchEngine& self, py::object cb) {
+                if (cb.is_none()) {
+                    self.set_python_decode_callback(nullptr);
+                    return;
+                }
+                auto holder = std::make_shared<py::object>(std::move(cb));
+                self.set_python_decode_callback([holder](int frame_index) -> bool {
+                    py::gil_scoped_acquire gil;
+                    try {
+                        py::object result = (*holder)(frame_index);
+                        if (result.is_none()) {
+                            return false;
+                        }
+                        return py::bool_(result);
+                    } catch (py::error_already_set& e) {
+                        std::cerr << "PrefetchEngine: python-decode callback failed: "
+                                  << e.what() << std::endl;
+                        e.discard_as_unraisable(__func__);
+                        return false;
+                    }
+                });
+            },
+            py::arg("callback"))
+        .def("clear", &PrefetchEngine::clear, py::call_guard<py::gil_scoped_release>())
+        // Clear Python callbacks under the GIL, then join workers with GIL released
+        // so in-flight callbacks can finish without deadlocking.
+        .def("stop", [](PrefetchEngine& self) {
+            self.set_frame_ready_callback(nullptr);
+            self.set_python_decode_callback(nullptr);
+            {
+                py::gil_scoped_release release;
+                self.stop();
+            }
+        });
 
     py::class_<FrameSlotSpec>(m, "FrameSlotSpec")
         .def(py::init<>())
@@ -123,6 +255,19 @@ PYBIND11_MODULE(framecycler_engine, m) {
         })
         .def("get_display_cached_frames", &RhiRenderer::get_display_cached_frames,
              py::arg("source_index"))
+        .def("set_upload_queue_policy", &RhiRenderer::set_upload_queue_policy)
+        .def("upload_queue_policy", &RhiRenderer::upload_queue_policy)
+        .def("get_upload_queue_stats", [](const RhiRenderer& self) {
+            auto s = self.get_upload_queue_stats();
+            py::dict d;
+            d["pending"] = s.pending;
+            d["inflight"] = s.inflight;
+            d["ready"] = s.ready;
+            d["completed"] = s.completed;
+            d["refused"] = s.refused;
+            d["coalesced"] = s.coalesced;
+            return d;
+        })
         .def("get_debug_stats", [](const RhiRenderer& self) {
             auto s = self.get_debug_stats();
             py::dict d;

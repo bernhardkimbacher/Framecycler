@@ -102,41 +102,11 @@ class TestAdvancePlaybackRealtime(unittest.TestCase):
 
 
 class TestEveryFrameCanAdvance(unittest.TestCase):
-    def test_waits_for_display_cache_when_enabled(self):
-        self.assertFalse(
-            every_frame_can_advance(
-                next_decode_ready=True,
-                current_display_ready=False,
-                display_cache_enabled=True,
-            )
-        )
-
     def test_waits_for_next_decode(self):
-        self.assertFalse(
-            every_frame_can_advance(
-                next_decode_ready=False,
-                current_display_ready=True,
-                display_cache_enabled=True,
-            )
-        )
+        self.assertFalse(every_frame_can_advance(next_decode_ready=False))
 
-    def test_advances_when_decode_and_display_ready(self):
-        self.assertTrue(
-            every_frame_can_advance(
-                next_decode_ready=True,
-                current_display_ready=True,
-                display_cache_enabled=True,
-            )
-        )
-
-    def test_skips_display_gate_when_cache_disabled(self):
-        self.assertTrue(
-            every_frame_can_advance(
-                next_decode_ready=True,
-                current_display_ready=False,
-                display_cache_enabled=False,
-            )
-        )
+    def test_advances_when_decode_ready(self):
+        self.assertTrue(every_frame_can_advance(next_decode_ready=True))
 
 
 class TestPlaybackTimingSettingsRoundTrip(unittest.TestCase):

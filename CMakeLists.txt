@@ -38,8 +38,10 @@ find_package(OpenImageIO REQUIRED)
 pybind11_add_module(framecycler_engine
     src/cpp/bindings/python_bindings.cpp
     src/cpp/engine/cache_manager.cpp
+    src/cpp/engine/prefetch_engine.cpp
     src/cpp/engine/rhi_renderer.cpp
     src/cpp/engine/gpu_texture_cache.cpp
+    src/cpp/engine/display_upload_queue.cpp
     src/cpp/engine/native_decoder.cpp
 )
 

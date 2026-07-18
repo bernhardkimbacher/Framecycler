@@ -78,6 +78,8 @@ class TestFrameReadyThreading(unittest.TestCase):
         from src.framecycler.core.playback_plan import PlaybackPlan, Segment, VersionSlot
 
         class _FakeCache:
+            native_cache = None
+
             def get_frame(self, frame_index):
                 return None
 

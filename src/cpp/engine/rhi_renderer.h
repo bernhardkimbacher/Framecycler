@@ -18,6 +18,7 @@
 #include <memory>
 
 #include "gpu_texture_cache.h"
+#include "display_upload_queue.h"
 
 class CacheManager;
 
@@ -96,6 +97,9 @@ public:
     void invalidate_display_cache_source(int source_index);
     GpuTextureCache::Stats get_display_cache_stats() const;
     std::vector<int> get_display_cached_frames(int source_index);
+    void set_upload_queue_policy(UploadQueuePolicy policy);
+    UploadQueuePolicy upload_queue_policy() const;
+    UploadQueueStats get_upload_queue_stats() const;
     bool is_fallback_null_backend() const { return _is_fallback_null_backend.load(); }
 
     struct DebugStats {
@@ -179,6 +183,18 @@ private:
         TextureState& bind_state,
         QRhiResourceUpdateBatch* batch,
         bool& pipeline_dirty);
+    void apply_pending_display_cache_ops();
+    void publish_display_cache_snapshot();
+    void destroy_upload_texture(void* texture);
+    void drain_upload_queue(QRhiResourceUpdateBatch* batch);
+    void put_ready_upload_jobs();
+    QRhiTexture* upload_present_to_display_cache(
+        int source_index,
+        CacheManager* cpu_cache,
+        const FrameSlotSpec& spec,
+        QRhiResourceUpdateBatch* batch);
+    void enqueue_gpu_lookahead();
+    bool gpu_warmup_work_remaining() const;
     void _release_gpu_resources();
 
     // Threading / state sync
@@ -191,7 +207,7 @@ private:
     void _wake_render_thread();
 
     std::thread _render_thread;
-    std::mutex _mutex;
+    mutable std::mutex _mutex;
     std::condition_variable _render_cond;
     std::atomic<bool> _run_thread{false};
     std::atomic<bool> _redraw_needed{false};
@@ -246,12 +262,25 @@ private:
     // Shader binding layouts
     OcioUboLayout _ocioUboLayout;
 
-    // Staging ring
+    // Staging ring (depth >= max concurrent upload jobs)
     std::vector<StagingBuffer> _stagingRing;
     size_t _stagingRingIndex = 0;
+    std::vector<uint64_t> _stagingGeneration; // generation that last used each slot
+    uint64_t _upload_generation = 1;
+    uint64_t _completed_upload_generation = 0;
 
     std::unordered_map<int, CacheManager*> _caches;
     GpuTextureCache _displayCache;
+    DisplayUploadQueue _uploadQueue;
+
+    // Display-cache ops deferred to the render thread
+    bool _pending_limit_dirty = false;
+    double _pending_limit_gb = 0.0;
+    std::unordered_map<int, SourcePlayhead> _pending_playheads;
+    std::vector<int> _pending_invalidate_sources;
+    std::unordered_map<int, std::vector<int>> _display_frames_snapshot;
+    GpuTextureCache::Stats _display_stats_snapshot;
+
     QRhiTexture* _last_bound_tex_a = nullptr;
     QRhiTexture* _last_bound_tex_b = nullptr;
     std::atomic<bool> _is_fallback_null_backend{false};

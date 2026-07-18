@@ -24,6 +24,11 @@ public:
     void write_frame(int frame_index, int width, int height, int channels, const uint16_t* pixel_data, size_t data_size);
     bool decode_and_cache_frame(int frame_index, const std::string& file_path, float resolution_scale, const std::string& layer = "", const std::string& fallback_mode = "Flat Gray", int placeholder_width = 0, int placeholder_height = 0);
 
+    // Claim exclusive decode ownership for a frame. Returns false if already cached or claimed.
+    bool try_claim_decode(int frame_index);
+    void release_decode_claim(int frame_index);
+    bool is_decode_claimed(int frame_index) const;
+
     const uint16_t* get_frame_data(int frame_index, int& width, int& height, int& channels);
     bool get_frame_dimensions(int frame_index, int& width, int& height, int& channels);
     bool copy_frame_data(int frame_index, uint16_t* dest_ptr, size_t dest_size_elements);
@@ -31,6 +36,11 @@ public:
     std::vector<int> get_cached_frames();
     void clear();
     void set_ram_limit(double ram_limit_gb);
+
+    size_t allocated_bytes() const;
+    size_t max_bytes() const;
+    // Bytes of one resident frame (0 if cache empty).
+    size_t bytes_per_frame() const;
 
 private:
     size_t _find_slot_to_evict(int frame_count);
@@ -42,11 +52,12 @@ private:
     std::vector<FrameBuffer> _slots;
     std::unordered_map<int, size_t> _frame_to_slot;
     std::unordered_map<size_t, int> _slot_to_frame;
+    std::set<int> _inflight_decodes;
 
     int _current_playhead;
     int _play_direction;
     int _in_point;
     int _out_point;
 
-    std::shared_mutex _mutex;
+    mutable std::shared_mutex _mutex;
 };

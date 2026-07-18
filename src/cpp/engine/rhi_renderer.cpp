@@ -1,6 +1,7 @@
 #include "rhi_renderer.h"
 #include "cache_manager.h"
 #include "gpu_texture_cache.h"
+#include "display_upload_queue.h"
 #include <QWindow>
 #include <QGuiApplication>
 #include <QDebug>
@@ -153,7 +154,8 @@ bool RhiRenderer::initialize_rhi_on_thread()
     _fallbackRpDesc = _swapChain->newCompatibleRenderPassDescriptor();
     _swapChain->setRenderPassDescriptor(_fallbackRpDesc);
 
-    _stagingRing.resize(3);
+    _stagingRing.resize(6);
+    _stagingGeneration.assign(_stagingRing.size(), 0);
     _displayCache.set_rhi(_rhi);
     _debug_stats.rhi_ready = true;
     return true;
@@ -221,7 +223,9 @@ void RhiRenderer::_wake_render_thread()
 void RhiRenderer::set_display_cache_limit_gb(double limit_gb)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    _displayCache.set_limit_gb(limit_gb);
+    _pending_limit_gb = limit_gb;
+    _pending_limit_dirty = true;
+    _wake_render_thread();
 }
 
 void RhiRenderer::clear_display_cache()
@@ -238,26 +242,49 @@ void RhiRenderer::set_source_playhead(int source_index, int playhead, int direct
     ph.direction = direction;
     ph.in_point = in_point;
     ph.out_point = out_point;
-    _displayCache.set_source_playhead(source_index, ph);
+    _pending_playheads[source_index] = ph;
     _wake_render_thread();
 }
 
 void RhiRenderer::invalidate_display_cache_source(int source_index)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    _displayCache.invalidate_source(source_index);
+    _pending_invalidate_sources.push_back(source_index);
     _wake_render_thread();
 }
 
 GpuTextureCache::Stats RhiRenderer::get_display_cache_stats() const
 {
-    return _displayCache.stats();
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _display_stats_snapshot;
 }
 
 std::vector<int> RhiRenderer::get_display_cached_frames(int source_index)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    return _displayCache.cached_frames_for_source(source_index);
+    auto it = _display_frames_snapshot.find(source_index);
+    if (it == _display_frames_snapshot.end()) {
+        return {};
+    }
+    return it->second;
+}
+
+void RhiRenderer::set_upload_queue_policy(UploadQueuePolicy policy)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _uploadQueue.set_policy(policy);
+}
+
+UploadQueuePolicy RhiRenderer::upload_queue_policy() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _uploadQueue.policy();
+}
+
+UploadQueueStats RhiRenderer::get_upload_queue_stats() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _uploadQueue.stats();
 }
 
 void RhiRenderer::update_render_params(const RenderParams& params)
@@ -265,6 +292,24 @@ void RhiRenderer::update_render_params(const RenderParams& params)
     std::lock_guard<std::mutex> lock(_mutex);
     _pending_render_params = params;
     _render_params_dirty = true;
+
+    // Enqueue every visited slot so coalesced present params cannot skip puts.
+    // Residency is checked against the render-thread snapshot (safe under _mutex).
+    for (const auto& slot : params.slots) {
+        if (slot.frame_index < 0) {
+            continue;
+        }
+        bool resident = false;
+        auto snap = _display_frames_snapshot.find(slot.source_index);
+        if (snap != _display_frames_snapshot.end()) {
+            const auto& frames = snap->second;
+            resident = std::binary_search(frames.begin(), frames.end(), slot.frame_index);
+        }
+        _uploadQueue.enqueue(
+            UploadJobRequest{slot.source_index, slot.frame_index, slot.upload_token},
+            resident);
+    }
+
     _wake_render_thread();
 }
 
@@ -296,6 +341,8 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
         return;
     }
 
+    apply_pending_display_cache_ops();
+
     if (_clear_cache_pending.exchange(false)) {
         if (!_displayCache.enabled()) {
             if (_texAState.texture) {
@@ -309,8 +356,11 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
         }
         {
             std::lock_guard<std::mutex> lock(_mutex);
+            _uploadQueue.clear_with([this](void* tex) { destroy_upload_texture(tex); });
             _displayCache.clear();
-            _caches.clear();
+            // Keep _caches — registry is owned by register_cache only.
+            _display_frames_snapshot.clear();
+            _display_stats_snapshot = GpuTextureCache::Stats{};
         }
         _texAState.texture = nullptr;
         _texBState.texture = nullptr;
@@ -522,7 +572,18 @@ void RhiRenderer::render_frame()
 
     const auto upload_start = Clock::now();
 
-    // 1. Upload frame textures
+    // Complete prior GPU uploads, put into display cache, then submit new jobs.
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_completed_upload_generation > 0) {
+            _uploadQueue.complete_generation(_completed_upload_generation);
+        }
+    }
+    put_ready_upload_jobs();
+    enqueue_gpu_lookahead();
+    drain_upload_queue(batch);
+
+    // Present: bind from display cache (or sync upload when cache disabled).
     const int compare_mode = _active_render_params.compare_mode;
     bool pipeline_dirty = false;
     for (auto slot : _active_render_params.slots) {
@@ -589,9 +650,13 @@ void RhiRenderer::render_frame()
         }
     }
 
-    auto display_stats = _displayCache.stats();
-    _debug_stats.gpu_cache_hits = display_stats.hits;
-    _debug_stats.gpu_cache_misses = display_stats.misses;
+    {
+        auto display_stats = _displayCache.stats();
+        _debug_stats.gpu_cache_hits = display_stats.hits;
+        _debug_stats.gpu_cache_misses = display_stats.misses;
+        std::lock_guard<std::mutex> lock(_mutex);
+        _display_stats_snapshot = display_stats;
+    }
 
     if (pipeline_dirty || _texAState.texture != _last_bound_tex_a || _texBState.texture != _last_bound_tex_b) {
         build_pipeline(_swapChain->renderPassDescriptor(), true);
@@ -721,6 +786,10 @@ void RhiRenderer::render_frame()
 
     _debug_stats.pipeline_ready = _pipeline != nullptr;
     _rhi->endFrame(_swapChain);
+    // Staging/GPU uploads submitted this frame are safe to treat as complete next frame.
+    _completed_upload_generation = _upload_generation;
+    ++_upload_generation;
+    publish_display_cache_snapshot();
     if (_window) {
         _window->requestUpdate();
     }
@@ -729,6 +798,12 @@ void RhiRenderer::render_frame()
     _debug_stats.last_upload_ms = std::chrono::duration<double, std::milli>(upload_end - upload_start).count();
     _debug_stats.last_draw_ms = std::chrono::duration<double, std::milli>(frame_end - draw_start).count();
     _debug_stats.last_render_ms = std::chrono::duration<double, std::milli>(frame_end - frame_start).count();
+
+    // Idle GPU warming: keep rendering while the display cache can still absorb
+    // CPU-cached frames ahead of the playhead.
+    if (gpu_warmup_work_remaining()) {
+        _wake_render_thread();
+    }
 }
 
 void RhiRenderer::update_rhi_resources(QRhiResourceUpdateBatch* batch)
@@ -979,6 +1054,359 @@ std::vector<char> RhiRenderer::pack_ocio_ubo()
     return buf;
 }
 
+void RhiRenderer::apply_pending_display_cache_ops()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_pending_limit_dirty) {
+        _displayCache.set_limit_gb(_pending_limit_gb);
+        _pending_limit_dirty = false;
+    }
+    for (const auto& pair : _pending_playheads) {
+        _displayCache.set_source_playhead(pair.first, pair.second);
+    }
+    _pending_playheads.clear();
+    if (!_pending_invalidate_sources.empty()) {
+        for (int source_index : _pending_invalidate_sources) {
+            _displayCache.invalidate_source(source_index);
+        }
+        _pending_invalidate_sources.clear();
+        _uploadQueue.clear_with([this](void* tex) { destroy_upload_texture(tex); });
+    }
+}
+
+void RhiRenderer::publish_display_cache_snapshot()
+{
+    std::unordered_map<int, std::vector<int>> snapshot;
+    // Collect source indices from registered caches + known playheads.
+    std::vector<int> sources;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        for (const auto& pair : _caches) {
+            sources.push_back(pair.first);
+        }
+    }
+    for (int source_index : sources) {
+        snapshot[source_index] = _displayCache.cached_frames_for_source(source_index);
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    _display_frames_snapshot = std::move(snapshot);
+    _display_stats_snapshot = _displayCache.stats();
+}
+
+void RhiRenderer::destroy_upload_texture(void* texture)
+{
+    auto* tex = static_cast<QRhiTexture*>(texture);
+    if (!tex) {
+        return;
+    }
+    tex->destroy();
+    delete tex;
+}
+
+void RhiRenderer::put_ready_upload_jobs()
+{
+    std::vector<UploadJob> ready;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        ready = _uploadQueue.take_ready();
+        _uploadQueue.compact_failed();
+    }
+    for (auto& job : ready) {
+        auto* tex = static_cast<QRhiTexture*>(job.texture);
+        if (!tex || !_displayCache.enabled()) {
+            destroy_upload_texture(job.texture);
+            continue;
+        }
+        const size_t bytes = static_cast<size_t>(job.width) * static_cast<size_t>(job.height)
+            * static_cast<size_t>(job.channels) * sizeof(uint16_t);
+        _displayCache.put(
+            job.source_index,
+            job.decoder_frame,
+            job.width,
+            job.height,
+            job.channels,
+            tex,
+            bytes);
+        job.texture = nullptr;
+    }
+}
+
+void RhiRenderer::enqueue_gpu_lookahead()
+{
+    if (!_displayCache.enabled()) {
+        return;
+    }
+
+    UploadQueuePolicy policy;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        policy = _uploadQueue.policy();
+    }
+    if (policy != UploadQueuePolicy::EveryFrame) {
+        return;
+    }
+
+    const size_t max_bytes = _displayCache.max_bytes();
+    if (max_bytes == 0) {
+        return;
+    }
+
+    // Bound how many new jobs we enqueue per pass (staging ring depth).
+    const size_t max_enqueue = _stagingRing.empty() ? 0 : _stagingRing.size();
+    if (max_enqueue == 0) {
+        return;
+    }
+
+    size_t enqueued = 0;
+    std::unordered_map<int, CacheManager*> caches;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        caches = _caches;
+    }
+
+    for (const auto& slot : _active_render_params.slots) {
+        if (enqueued >= max_enqueue) {
+            break;
+        }
+        auto cache_it = caches.find(slot.source_index);
+        if (cache_it == caches.end() || !cache_it->second) {
+            continue;
+        }
+        CacheManager* cpu_cache = cache_it->second;
+
+        SourcePlayhead ph;
+        if (!_displayCache.playhead_for_source(slot.source_index, ph)) {
+            ph.playhead = slot.frame_index;
+            ph.direction = 1;
+            ph.in_point = slot.frame_index;
+            ph.out_point = slot.frame_index;
+        }
+        if (ph.out_point < ph.in_point) {
+            std::swap(ph.in_point, ph.out_point);
+        }
+        const int direction = (ph.direction >= 0) ? 1 : -1;
+        const int range_size = std::max(1, ph.out_point - ph.in_point + 1);
+
+        // Estimate remaining display budget (resident + in-flight queued/uploading).
+        UploadQueueStats qstats;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            qstats = _uploadQueue.stats();
+        }
+        size_t bytes_per = cpu_cache->bytes_per_frame();
+        if (bytes_per == 0) {
+            int w = 0, h = 0, c = 0;
+            if (cpu_cache->get_frame_dimensions(ph.playhead, w, h, c) && w > 0 && h > 0) {
+                bytes_per = static_cast<size_t>(w) * static_cast<size_t>(h)
+                    * static_cast<size_t>(std::max(1, c)) * sizeof(uint16_t);
+            }
+        }
+        if (bytes_per == 0) {
+            continue;
+        }
+
+        int curr = ph.playhead;
+        for (int distance = 1; distance <= range_size && enqueued < max_enqueue; ++distance) {
+            const size_t committed = _displayCache.resident_bytes()
+                + static_cast<size_t>(qstats.pending + qstats.inflight) * bytes_per;
+            if (committed + bytes_per > max_bytes) {
+                break;
+            }
+
+            curr += direction;
+            if (curr > ph.out_point) {
+                curr = ph.in_point;
+            } else if (curr < ph.in_point) {
+                curr = ph.out_point;
+            }
+
+            if (!cpu_cache->has_frame(curr)) {
+                continue;
+            }
+            if (_displayCache.contains(slot.source_index, curr)) {
+                continue;
+            }
+
+            bool inserted = false;
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                if (_uploadQueue.has_job(slot.source_index, curr)) {
+                    continue;
+                }
+                inserted = _uploadQueue.enqueue(
+                    UploadJobRequest{slot.source_index, curr, 0},
+                    false);
+                qstats = _uploadQueue.stats();
+            }
+            if (inserted) {
+                ++enqueued;
+            } else {
+                // Queue full — stop this pass.
+                break;
+            }
+        }
+    }
+}
+
+bool RhiRenderer::gpu_warmup_work_remaining() const
+{
+    if (!_displayCache.enabled()) {
+        return false;
+    }
+    UploadQueuePolicy policy;
+    UploadQueueStats qstats;
+    std::unordered_map<int, CacheManager*> caches;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        policy = _uploadQueue.policy();
+        qstats = _uploadQueue.stats();
+        caches = _caches;
+    }
+    if (policy != UploadQueuePolicy::EveryFrame) {
+        return false;
+    }
+    if (qstats.pending > 0 || qstats.inflight > 0 || qstats.ready > 0) {
+        return true;
+    }
+
+    const size_t max_bytes = _displayCache.max_bytes();
+    if (max_bytes == 0) {
+        return false;
+    }
+
+    for (const auto& slot : _active_render_params.slots) {
+        auto cache_it = caches.find(slot.source_index);
+        if (cache_it == caches.end() || !cache_it->second) {
+            continue;
+        }
+        CacheManager* cpu_cache = cache_it->second;
+        SourcePlayhead ph;
+        if (!_displayCache.playhead_for_source(slot.source_index, ph)) {
+            continue;
+        }
+        if (ph.out_point < ph.in_point) {
+            std::swap(ph.in_point, ph.out_point);
+        }
+        size_t bytes_per = cpu_cache->bytes_per_frame();
+        if (bytes_per == 0) {
+            continue;
+        }
+        if (_displayCache.resident_bytes() + bytes_per > max_bytes) {
+            continue;
+        }
+
+        const int direction = (ph.direction >= 0) ? 1 : -1;
+        const int range_size = std::max(1, ph.out_point - ph.in_point + 1);
+        int curr = ph.playhead;
+        for (int distance = 1; distance <= range_size; ++distance) {
+            curr += direction;
+            if (curr > ph.out_point) {
+                curr = ph.in_point;
+            } else if (curr < ph.in_point) {
+                curr = ph.out_point;
+            }
+            if (cpu_cache->has_frame(curr) && !_displayCache.contains(slot.source_index, curr)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void RhiRenderer::drain_upload_queue(QRhiResourceUpdateBatch* batch)
+{
+    if (!_displayCache.enabled() || !batch || !_rhi) {
+        return;
+    }
+
+    std::vector<UploadJob*> jobs;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        const size_t max_k = _stagingRing.empty() ? 0 : _stagingRing.size();
+        jobs = _uploadQueue.take_queued_for_submit(max_k);
+    }
+
+    for (UploadJob* job : jobs) {
+        if (!job) {
+            continue;
+        }
+        CacheManager* cpu_cache = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            auto it = _caches.find(job->source_index);
+            if (it != _caches.end()) {
+                cpu_cache = it->second;
+            }
+        }
+        if (!cpu_cache) {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _uploadQueue.mark_failed(job);
+            continue;
+        }
+
+        int w = 0, h = 0, channels = 0;
+        if (!cpu_cache->get_frame_dimensions(job->decoder_frame, w, h, channels) || w <= 0 || h <= 0) {
+            // Keep Queued — decode may still be in flight.
+            continue;
+        }
+
+        if (_displayCache.contains(job->source_index, job->decoder_frame)) {
+            // Do not erase here — other job* from take_queued_for_submit must stay valid.
+            std::lock_guard<std::mutex> lock(_mutex);
+            _uploadQueue.mark_failed(job);
+            continue;
+        }
+
+        size_t staging_slot = _stagingRingIndex;
+        // Avoid reusing a staging slot still referenced by an in-flight generation.
+        if (_stagingGeneration[staging_slot] != 0
+            && _stagingGeneration[staging_slot] > _completed_upload_generation) {
+            // Slot still live; retry this job next frame.
+            break;
+        }
+
+        QRhiTexture::Format texFormat = (channels == 1) ? QRhiTexture::R16F : QRhiTexture::RGBA16F;
+        QRhiTexture* texture = _rhi->newTexture(texFormat, QSize(w, h));
+        if (!texture || !texture->create()) {
+            delete texture;
+            std::lock_guard<std::mutex> lock(_mutex);
+            _uploadQueue.mark_failed(job);
+            continue;
+        }
+
+        StagingBuffer& ringBuf = _stagingRing[staging_slot];
+        const size_t reqElements = static_cast<size_t>(w) * static_cast<size_t>(h) * static_cast<size_t>(channels);
+        if (ringBuf.data.size() < reqElements) {
+            ringBuf.data.resize(reqElements);
+        }
+        if (!cpu_cache->copy_frame_data(job->decoder_frame, ringBuf.data.data(), reqElements)) {
+            destroy_upload_texture(texture);
+            continue; // remain Queued
+        }
+
+        QByteArray wrappedData(
+            reinterpret_cast<const char*>(ringBuf.data.data()),
+            static_cast<int>(reqElements * sizeof(uint16_t)));
+        QRhiTextureSubresourceUploadDescription subres(wrappedData);
+        subres.setDataStride(w * channels * static_cast<int>(sizeof(uint16_t)));
+        QRhiTextureUploadDescription desc(QRhiTextureUploadEntry(0, 0, subres));
+        batch->uploadTexture(texture, desc);
+
+        _stagingRingIndex = (_stagingRingIndex + 1) % _stagingRing.size();
+        job->width = w;
+        job->height = h;
+        job->channels = channels;
+        job->texture = texture;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _uploadQueue.mark_uploading(job, _upload_generation, staging_slot);
+        }
+        _stagingGeneration[staging_slot] = _upload_generation;
+        _debug_stats.last_upload_bytes += static_cast<int>(reqElements * sizeof(uint16_t));
+        _debug_stats.last_upload_count++;
+    }
+}
+
 bool RhiRenderer::resolve_display_texture(
     int source_index,
     CacheManager* cpu_cache,
@@ -1019,31 +1447,94 @@ bool RhiRenderer::resolve_display_texture(
         return true;
     }
 
-    TextureState upload_state;
-    upload_texture(upload_state, spec, cpu_cache, batch);
-    if (!upload_state.texture) {
-        return false;
+    // Present-authoritative: if CPU has the frame, upload into this batch and bind now.
+    if (cpu_cache && batch && _rhi) {
+        QRhiTexture* tex = upload_present_to_display_cache(
+            source_index, cpu_cache, spec, batch);
+        if (tex) {
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                _uploadQueue.discard_queued(source_index, spec.frame_index);
+            }
+            if (bind_state.texture != tex) {
+                pipeline_dirty = true;
+            }
+            bind_state.texture = tex;
+            bind_state.last_w = spec.width;
+            bind_state.last_h = spec.height;
+            bind_state.last_channels = spec.channels;
+            bind_state.last_upload_token = spec.upload_token;
+            return true;
+        }
     }
 
-    const size_t bytes = spec.data_size * sizeof(uint16_t);
+    // CPU miss: keep previous bind; enqueue for when decode catches up.
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _uploadQueue.enqueue(
+            UploadJobRequest{source_index, spec.frame_index, spec.upload_token},
+            false);
+    }
+    return bind_state.texture != nullptr;
+}
+
+QRhiTexture* RhiRenderer::upload_present_to_display_cache(
+    int source_index,
+    CacheManager* cpu_cache,
+    const FrameSlotSpec& spec,
+    QRhiResourceUpdateBatch* batch)
+{
+    if (!cpu_cache || !batch || !_rhi || spec.width <= 0 || spec.height <= 0) {
+        return nullptr;
+    }
+    if (_displayCache.contains(source_index, spec.frame_index)) {
+        return _displayCache.try_get(
+            source_index, spec.frame_index, spec.width, spec.height, spec.channels, cpu_cache);
+    }
+
+    QRhiTexture::Format texFormat = (spec.channels == 1) ? QRhiTexture::R16F : QRhiTexture::RGBA16F;
+    QRhiTexture* texture = _rhi->newTexture(texFormat, QSize(spec.width, spec.height));
+    if (!texture || !texture->create()) {
+        delete texture;
+        return nullptr;
+    }
+
+    StagingBuffer& ringBuf = _stagingRing[_stagingRingIndex];
+    _stagingRingIndex = (_stagingRingIndex + 1) % _stagingRing.size();
+    size_t reqElements = static_cast<size_t>(spec.width) * static_cast<size_t>(spec.height)
+        * static_cast<size_t>(spec.channels);
+    if (spec.data_size > 0) {
+        reqElements = spec.data_size;
+    }
+    if (ringBuf.data.size() < reqElements) {
+        ringBuf.data.resize(reqElements);
+    }
+    if (!cpu_cache->copy_frame_data(spec.frame_index, ringBuf.data.data(), reqElements)) {
+        destroy_upload_texture(texture);
+        return nullptr;
+    }
+
+    QByteArray wrappedData(
+        reinterpret_cast<const char*>(ringBuf.data.data()),
+        static_cast<int>(reqElements * sizeof(uint16_t)));
+    QRhiTextureSubresourceUploadDescription subres(wrappedData);
+    subres.setDataStride(spec.width * spec.channels * static_cast<int>(sizeof(uint16_t)));
+    QRhiTextureUploadDescription desc(QRhiTextureUploadEntry(0, 0, subres));
+    batch->uploadTexture(texture, desc);
+
+    const size_t bytes = reqElements * sizeof(uint16_t);
     _displayCache.put(
         source_index,
         spec.frame_index,
         spec.width,
         spec.height,
         spec.channels,
-        upload_state.texture,
+        texture,
         bytes);
 
-    if (bind_state.texture != upload_state.texture) {
-        pipeline_dirty = true;
-    }
-    bind_state.texture = upload_state.texture;
-    bind_state.last_w = upload_state.last_w;
-    bind_state.last_h = upload_state.last_h;
-    bind_state.last_channels = upload_state.last_channels;
-    bind_state.last_upload_token = upload_state.last_upload_token;
-    return true;
+    _debug_stats.last_upload_bytes += static_cast<int>(bytes);
+    _debug_stats.last_upload_count++;
+    return texture;
 }
 
 void RhiRenderer::upload_texture(TextureState& state, const FrameSlotSpec& spec, CacheManager* cpu_cache, QRhiResourceUpdateBatch* batch)
@@ -1136,6 +1627,7 @@ void RhiRenderer::upload_texture_3d(OcioLut3D& lut, QRhiResourceUpdateBatch* bat
 }
 
 void RhiRenderer::_release_gpu_resources() {
+    _uploadQueue.clear_with([this](void* tex) { destroy_upload_texture(tex); });
     if (_displayCache.enabled()) {
         _displayCache.clear();
     } else {
@@ -1156,6 +1648,8 @@ void RhiRenderer::_release_gpu_resources() {
         state.texture = nullptr;
     }
     _texturePool.clear();
+    _display_frames_snapshot.clear();
+    _display_stats_snapshot = GpuTextureCache::Stats{};
 
     for (auto& lut : _active_ocio_luts) {
         if (lut.texture) {

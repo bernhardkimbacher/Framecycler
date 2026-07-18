@@ -80,18 +80,11 @@ def realtime_steps(elapsed_seconds: float, fps: float) -> int:
     return int(elapsed_seconds * fps)
 
 
-def every_frame_can_advance(
-    *,
-    next_decode_ready: bool,
-    current_display_ready: bool,
-    display_cache_enabled: bool,
-) -> bool:
+def every_frame_can_advance(*, next_decode_ready: bool) -> bool:
     """Whether Play Every Frame may leave the current playhead.
 
-    Decode readiness alone is not enough: the render thread coalesces pending
-    params, so advancing before the current frame is uploaded leaves gaps in
-    the display cache.
+    Waits only on decode-cache readiness. When the playhead advances, the
+    renderer uploads the presented frame in-batch on a display-cache miss so
+    pixels always draw on the first visit.
     """
-    if display_cache_enabled and not current_display_ready:
-        return False
     return bool(next_decode_ready)

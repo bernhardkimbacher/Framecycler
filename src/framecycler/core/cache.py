@@ -1,11 +1,7 @@
-import heapq
 import threading
-import queue
-import numpy as np
-from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict, Any, List, Set, Tuple
+from typing import Any, Callable, Dict, List, Set
 
-from PySide6.QtCore import QByteArray
+import numpy as np
 
 from ..decoders.base import BaseDecoder
 from .settings import Settings
@@ -19,28 +15,26 @@ except ImportError:
 
 
 class CacheEngine:
+    """Python façade over C++ CacheManager + PrefetchEngine.
+
+    Prefetch scheduling and native OIIO decode run in C++. QuickTime / non-native
+    decode still executes in Python via a GIL-scoped callback scheduled by C++.
+
+    Prefetch does not start until ``start()`` so callers can register frame-ready
+    callbacks first (MediaPool.acquire).
+    """
+
     def __init__(self, decoder: BaseDecoder, settings: Settings, resolution_scale: float = 1.0):
         self.decoder = decoder
         self.settings = settings
         self.resolution_scale = Settings.clamp_resolution_scale(resolution_scale)
 
-        # Instantiate compiled C++ CacheManager (stores half-float pixels in pre-allocated RAM)
         self.native_cache = framecycler_engine.CacheManager(self.settings.decode_cache_limit_gb)
         self.lock = threading.Lock()
-
-        # Priority decode queue: (priority, sequence, frame_index) — lower priority value = sooner
-        self._decode_heap: List[Tuple[int, int, int]] = []
-        self._heap_seq = 0
         self._frame_ready_callbacks: List[Callable[[int], None]] = []
+        self._started = False
 
-        # Asynchronous pre-fetch queue & threads
-        self.request_queue = queue.Queue()
-        self.active_requests: Set[int] = set()
-        self.executor = ThreadPoolExecutor(max_workers=self.settings.reader_threads)
-
-        # Playback states
         meta = self.decoder.get_metadata()
-        meta_fps = meta.get("fps", 24.0)
         start = meta.get("start_frame", 0)
         end = meta.get("end_frame", meta["frame_count"] - 1)
 
@@ -48,9 +42,29 @@ class CacheEngine:
         self.play_direction = 1
         self.playback_range = (start, end)
 
-        self.running = True
-        self.manager_thread = threading.Thread(target=self._manager_loop, daemon=True)
-        self.manager_thread.start()
+        self._prefetch = framecycler_engine.PrefetchEngine(
+            self.native_cache, max(1, int(self.settings.reader_threads))
+        )
+        self._prefetch.set_frame_ready_callback(self._notify_frame_ready)
+        self._prefetch.set_python_decode_callback(self._python_decode_frame)
+        self._sync_prefetch_options()
+        self._sync_path_table()
+        # Stay disabled until start() so no decode races ahead of callbacks.
+        self._prefetch.set_enabled(False)
+
+    def start(self) -> None:
+        """Begin prefetch after frame-ready callbacks are registered."""
+        with self.lock:
+            if self._started:
+                return
+            self._started = True
+            start, end = self.playback_range
+            playhead = self.current_playhead
+            direction = self.play_direction
+            enabled = self.settings.decode_cache_limit_gb > 0.0
+        self._prefetch.set_enabled(enabled)
+        self._prefetch.set_playback_range(start, end)
+        self._prefetch.set_playhead(playhead, direction)
 
     def add_frame_ready_callback(self, callback: Callable[[int], None]) -> None:
         self._frame_ready_callbacks.append(callback)
@@ -74,18 +88,67 @@ class CacheEngine:
             channels = 4
         return img, channels
 
+    def _uses_native_path_decode(self) -> bool:
+        uses_native = getattr(self.decoder, "uses_native_path_decode", None)
+        return bool(uses_native is not None and uses_native())
+
+    def _sync_path_table(self) -> None:
+        if not self._uses_native_path_decode():
+            self._prefetch.set_path_table({}, [])
+            return
+        frame_map = getattr(self.decoder, "frame_map", None) or {}
+        paths = {int(k): str(v) for k, v in frame_map.items()}
+        sorted_frames = sorted(paths.keys())
+        self._prefetch.set_path_table(paths, sorted_frames)
+
+    def _sync_prefetch_options(self) -> None:
+        meta = getattr(self.decoder, "metadata", None) or self.decoder.get_metadata() or {}
+        active_layer = getattr(self.decoder, "active_layer", "") or ""
+        fallback_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
+        self._prefetch.set_options(
+            self.resolution_scale,
+            active_layer,
+            fallback_mode,
+            int(meta.get("width", 0) or 0),
+            int(meta.get("height", 0) or 0),
+            self._uses_native_path_decode(),
+        )
+
+    def _python_decode_frame(self, frame_index: int) -> bool:
+        """Called from C++ PrefetchEngine workers under the GIL for non-native sources."""
+        try:
+            frame_data = self.decoder.read_frame(
+                frame_index, resolution_scale=self.resolution_scale
+            )
+            img, channels = self._prepare_cache_image(frame_data["data"])
+            self.native_cache.write_frame(frame_index, img.shape[1], img.shape[0], channels, img)
+            return True
+        except Exception as exc:
+            print(f"CacheEngine: python decode failed for frame {frame_index}: {exc}")
+            return False
+
+    def _notify_frame_ready(self, frame_index: int) -> None:
+        for callback in list(self._frame_ready_callbacks):
+            try:
+                callback(frame_index)
+            except Exception as exc:
+                print(f"CacheEngine: frame-ready callback failed for frame {frame_index}: {exc}")
+
     def set_playback_range(self, start: int, end: int):
         with self.lock:
             self.playback_range = (start, end)
-            self.native_cache.set_playhead(self.current_playhead, self.play_direction, start, end)
-        self.trigger_prefetch()
+        self._prefetch.set_playback_range(start, end)
 
     def set_playhead(self, frame_index: int, direction: int = 1):
         with self.lock:
             self.current_playhead = frame_index
             self.play_direction = direction
-            self.native_cache.set_playhead(frame_index, direction, self.playback_range[0], self.playback_range[1])
-        self.trigger_prefetch()
+            started = self._started
+        if started:
+            self._prefetch.set_playhead(frame_index, direction)
+        else:
+            # First seek also starts prefetch (covers tests / paths that skip start()).
+            self.start()
 
     def has_frame(self, frame_index: int) -> bool:
         return bool(self.native_cache.has_frame(frame_index))
@@ -104,7 +167,9 @@ class CacheEngine:
                     "timecode": Timecode.frame_to_timecode(frame_index, meta["fps"], 0),
                 }
 
-        self._schedule_frame(frame_index, priority=0)
+        if not self._started:
+            self.start()
+        self._prefetch.schedule(frame_index, 0)
         return None
 
     def get_cached_frames(self) -> Set[int]:
@@ -112,135 +177,30 @@ class CacheEngine:
 
     def set_resolution_scale(self, scale: float) -> None:
         self.resolution_scale = Settings.clamp_resolution_scale(scale)
+        self._sync_prefetch_options()
 
     def update_settings(self):
         with self.lock:
             self.native_cache.set_ram_limit(self.settings.decode_cache_limit_gb)
-
-            new_threads = self.settings.reader_threads
-            if self.executor._max_workers != new_threads:
-                self.executor.shutdown(wait=False)
-                self.executor = ThreadPoolExecutor(max_workers=new_threads)
+            self._prefetch.set_enabled(self.settings.decode_cache_limit_gb > 0.0)
+            self._prefetch.set_max_workers(max(1, int(self.settings.reader_threads)))
+            self._sync_prefetch_options()
+            self._sync_path_table()
 
     def trigger_prefetch(self):
-        self.request_queue.put(None)
-
-    def _schedule_frame(self, frame_index: int, priority: int) -> None:
-        with self.lock:
-            if self.native_cache.has_frame(frame_index):
-                return
-            if frame_index in self.active_requests:
-                return
-            self.active_requests.add(frame_index)
-            heapq.heappush(self._decode_heap, (priority, self._heap_seq, frame_index))
-            self._heap_seq += 1
-        self.trigger_prefetch()
-
-    def _notify_frame_ready(self, frame_index: int) -> None:
-        for callback in list(self._frame_ready_callbacks):
-            try:
-                callback(frame_index)
-            except Exception as exc:
-                print(f"CacheEngine: frame-ready callback failed for frame {frame_index}: {exc}")
-
-    def _manager_loop(self):
-        while self.running:
-            try:
-                self.request_queue.get(timeout=0.1)
-            except queue.Empty:
-                pass
-            if not self.running:
-                break
-            self._fill_cache_requests()
-            self._process_decode_queue()
-
-    def _fill_cache_requests(self):
-        if self.settings.decode_cache_limit_gb <= 0.0:
-            return
-
         with self.lock:
             playhead = self.current_playhead
             direction = self.play_direction
-            start_range, end_range = self.playback_range
-            frame_count = self.decoder.get_metadata()["frame_count"]
-
-        if frame_count <= 0:
-            return
-
-        curr = playhead
-        for distance in range(1, 101):
-            curr += direction
-            if curr > end_range:
-                curr = start_range
-            elif curr < start_range:
-                curr = end_range
-
-            self._schedule_frame(curr, priority=distance)
-
-    def _process_decode_queue(self):
-        to_submit: List[int] = []
-        with self.lock:
-            max_batch = self.settings.reader_threads
-            while self._decode_heap and len(to_submit) < max_batch:
-                _priority, _seq, frame_idx = heapq.heappop(self._decode_heap)
-                if self.native_cache.has_frame(frame_idx):
-                    self.active_requests.discard(frame_idx)
-                    continue
-                if frame_idx not in self.active_requests:
-                    self.active_requests.add(frame_idx)
-                to_submit.append(frame_idx)
-
-        for frame_idx in to_submit:
-            self.executor.submit(self._read_and_cache_worker, frame_idx)
-
-    def _read_and_cache_worker(self, frame_index: int):
-        if not self.running:
-            return
-        try:
-            if self.native_cache.has_frame(frame_index):
-                with self.lock:
-                    self.active_requests.discard(frame_index)
-                return
-
-            uses_native = getattr(self.decoder, "uses_native_path_decode", None)
-            if uses_native is not None and uses_native():
-                fallback_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
-                fallback_nearest = (fallback_mode == "Nearest Frame")
-                path = self.decoder.get_file_path(frame_index, fallback_nearest=fallback_nearest)
-                active_layer = getattr(self.decoder, "active_layer", "") or ""
-                meta = getattr(self.decoder, "metadata", {}) or {}
-                ph_w = meta.get("width", 0)
-                ph_h = meta.get("height", 0)
-                if path is not None:
-                    self.native_cache.decode_and_cache_frame(
-                        frame_index, path, self.resolution_scale, active_layer, fallback_mode, ph_w, ph_h
-                    )
-                else:
-                    self.native_cache.decode_and_cache_frame(
-                        frame_index, "", self.resolution_scale, active_layer, fallback_mode, ph_w, ph_h
-                    )
-            else:
-                frame_data = self.decoder.read_frame(
-                    frame_index, resolution_scale=self.resolution_scale
-                )
-                img, channels = self._prepare_cache_image(frame_data["data"])
-                self.native_cache.write_frame(frame_index, img.shape[1], img.shape[0], channels, img)
-
-            with self.lock:
-                self.active_requests.discard(frame_index)
-            self._notify_frame_ready(frame_index)
-        except Exception as exc:
-            print(f"CacheEngine: decode failed for frame {frame_index}: {exc}")
-            with self.lock:
-                self.active_requests.discard(frame_index)
+        if not self._started:
+            self.start()
+        else:
+            self._prefetch.set_playhead(playhead, direction)
 
     def clear(self):
-        self.native_cache.clear()
-        with self.lock:
-            self.active_requests.clear()
-            self._decode_heap.clear()
+        self._prefetch.clear()
 
     def close(self):
-        self.running = False
-        self.executor.shutdown(wait=False)
-        self.clear()
+        # PrefetchEngine.stop clears Python callbacks under the GIL, then joins
+        # workers with the GIL released.
+        self._prefetch.stop()
+        self.native_cache.clear()

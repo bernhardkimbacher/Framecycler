@@ -59,6 +59,21 @@ std::vector<int> GpuTextureCache::cached_frames_for_source(int source_index) con
     return frames;
 }
 
+bool GpuTextureCache::contains(int source_index, int decoder_frame) const
+{
+    return _entries.find(GpuFrameKey{source_index, decoder_frame}) != _entries.end();
+}
+
+bool GpuTextureCache::playhead_for_source(int source_index, SourcePlayhead& out) const
+{
+    auto it = _playheads.find(source_index);
+    if (it == _playheads.end()) {
+        return false;
+    }
+    out = it->second;
+    return true;
+}
+
 void GpuTextureCache::clear()
 {
     for (auto& pair : _entries) {
