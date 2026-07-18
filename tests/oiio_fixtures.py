@@ -30,6 +30,23 @@ def write_float_exr(path: Path, width: int = 32, height: int = 16, value: float 
     out.close()
 
 
+def write_scattered_channel_exr(path: Path, width: int = 32, height: int = 16) -> None:
+    """Non-contiguous RGB: Z, R, A, G, B — exercises gather fallback."""
+    require_oiio()
+    spec = oiio.ImageSpec(width, height, 5, oiio.FLOAT)
+    spec.channelnames = ("Z", "R", "A", "G", "B")
+    pixels = np.zeros((height, width, 5), dtype=np.float32)
+    pixels[..., 0] = 0.1  # Z
+    pixels[..., 1] = 0.2  # R
+    pixels[..., 2] = 0.9  # A
+    pixels[..., 3] = 0.4  # G
+    pixels[..., 4] = 0.6  # B
+    out = oiio.ImageOutput.create(str(path))
+    if out is None or not out.open(str(path), spec) or not out.write_image(pixels):
+        raise RuntimeError(f"Failed to write scattered EXR: {oiio.geterror()}")
+    out.close()
+
+
 def write_layered_exr(path: Path, width: int = 32, height: int = 16) -> None:
     require_oiio()
     spec = oiio.ImageSpec(width, height, 6, oiio.FLOAT)

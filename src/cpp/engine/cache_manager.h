@@ -1,10 +1,11 @@
 #pragma once
-#include <vector>
 #include <deque>
-#include <unordered_map>
-#include <shared_mutex>
-#include <set>
 #include <cstdint>
+#include <set>
+#include <shared_mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 struct FrameBuffer {
     int width = 0;
@@ -12,6 +13,7 @@ struct FrameBuffer {
     int channels = 0;
     std::vector<uint16_t> data;
     bool active = false;
+    uint64_t epoch = 0;
 };
 
 class CacheManager {
@@ -30,6 +32,13 @@ public:
     void release_decode_claim(int frame_index);
     bool is_decode_claimed(int frame_index) const;
 
+    /// Reserve a slot for ``frame_index`` and return a writable pointer to its
+    /// pixel storage. The frame must already be claimed via try_claim_decode.
+    /// The returned pointer stays valid until commit_write_slot / release, and
+    /// is not visible to readers until commit_write_slot(..., true).
+    uint16_t* acquire_write_slot(int frame_index, int width, int height, int channels);
+    void commit_write_slot(int frame_index, bool success);
+
     const uint16_t* get_frame_data(int frame_index, int& width, int& height, int& channels);
     bool get_frame_dimensions(int frame_index, int& width, int& height, int& channels);
     bool copy_frame_data(int frame_index, uint16_t* dest_ptr, size_t dest_size_elements);
@@ -45,10 +54,14 @@ public:
 
 private:
     size_t _find_slot_to_evict(int frame_count);
+    size_t _find_unmapped_inactive_slot() const;
+    void _unmap_slot(size_t slot_idx);
+    void _release_slot_capacity(size_t slot_idx);
 
     double _ram_limit_gb;
     size_t _max_bytes;
     size_t _allocated_bytes;
+    uint64_t _epoch = 0;
 
     // deque keeps existing FrameBuffer addresses stable across push_back so
     // in-flight readers of other frames are not invalidated by growth.

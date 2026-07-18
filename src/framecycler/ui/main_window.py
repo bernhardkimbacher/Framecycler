@@ -979,6 +979,9 @@ class MainWindow(QMainWindow):
         self.timeline.set_display_options(self.settings.timecode_mode, self.fps)
         self._sync_frame_rate_menu(self.fps)
 
+        # Block signals for the whole repopulation: clear()/addItems() would
+        # otherwise fire currentIndexChanged → cache.clear() mid-prefetch.
+        self.exr_layer_combo.blockSignals(True)
         self.exr_layer_combo.clear()
         layers = meta.get("layers", [])
         if not layers and isinstance(source.decoder, EXRDecoder):
@@ -991,11 +994,10 @@ class MainWindow(QMainWindow):
                 self.viewport.exr_layer_str = self.active_exr_layer
                 layer_idx = self.exr_layer_combo.findText(self.active_exr_layer)
                 if layer_idx >= 0:
-                    self.exr_layer_combo.blockSignals(True)
                     self.exr_layer_combo.setCurrentIndex(layer_idx)
-                    self.exr_layer_combo.blockSignals(False)
         else:
             self.exr_layer_combo.addItem("beauty")
+        self.exr_layer_combo.blockSignals(False)
 
         clip = None
         stacks = otio_model.shot_stacks(self.session.timeline)

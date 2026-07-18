@@ -45,6 +45,8 @@ class CacheEngine:
         self._prefetch = framecycler_engine.PrefetchEngine(
             self.native_cache, max(1, int(self.settings.reader_threads))
         )
+        if hasattr(framecycler_engine, "set_decode_threads"):
+            framecycler_engine.set_decode_threads(max(1, int(self.settings.reader_threads)))
         self._prefetch.set_frame_ready_callback(self._notify_frame_ready)
         self._sync_prefetch_options()
         self._sync_path_table()
@@ -208,7 +210,10 @@ class CacheEngine:
         with self.lock:
             self.native_cache.set_ram_limit(self.settings.decode_cache_limit_gb)
             self._prefetch.set_enabled(self.settings.decode_cache_limit_gb > 0.0)
-            self._prefetch.set_max_workers(max(1, int(self.settings.reader_threads)))
+            threads = max(1, int(self.settings.reader_threads))
+            self._prefetch.set_max_workers(threads)
+            if hasattr(framecycler_engine, "set_decode_threads"):
+                framecycler_engine.set_decode_threads(threads)
             self._sync_prefetch_options()
             self._sync_path_table()
             self._sync_movie_decoder()

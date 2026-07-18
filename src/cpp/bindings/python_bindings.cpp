@@ -4,6 +4,7 @@
 #include <pybind11/stl.h>
 #include "cache_manager.h"
 #include "prefetch_engine.h"
+#include "native_decoder.h"
 #include "native_movie_decoder.h"
 #include "rhi_renderer.h"
 #include "display_upload_queue.h"
@@ -41,6 +42,9 @@ struct GilPyObject {
 
 PYBIND11_MODULE(framecycler_engine, m) {
     m.doc() = "Framecycler High-Performance C++ Review Playback Core Engine";
+
+    m.def("set_decode_threads", &NativeDecoder::set_decode_threads, py::arg("n"),
+          "Configure global OIIO / OpenEXR decode thread pools");
 
     py::enum_<UploadQueuePolicy>(m, "UploadQueuePolicy")
         .value("EveryFrame", UploadQueuePolicy::EveryFrame)
@@ -218,7 +222,35 @@ PYBIND11_MODULE(framecycler_engine, m) {
              py::call_guard<py::gil_scoped_release>())
         .def("try_claim_decode", &CacheManager::try_claim_decode)
         .def("release_decode_claim", &CacheManager::release_decode_claim)
-        .def("is_decode_claimed", &CacheManager::is_decode_claimed);
+        .def("is_decode_claimed", &CacheManager::is_decode_claimed)
+        .def(
+            "acquire_write_slot",
+            [](CacheManager& self, int frame_index, int width, int height, int channels) -> py::object {
+                uint16_t* ptr = nullptr;
+                {
+                    py::gil_scoped_release release;
+                    ptr = self.acquire_write_slot(frame_index, width, height, channels);
+                }
+                if (!ptr) {
+                    return py::none();
+                }
+                // Non-owning view into CacheManager storage. Caller must keep the
+                // decode claim until commit_write_slot; do not use after commit/evict.
+                py::capsule owner(ptr, [](void*) {});
+                return py::array(
+                    py::dtype("float16"),
+                    { height, width, channels },
+                    {
+                        static_cast<py::ssize_t>(width * channels * sizeof(uint16_t)),
+                        static_cast<py::ssize_t>(channels * sizeof(uint16_t)),
+                        static_cast<py::ssize_t>(sizeof(uint16_t))
+                    },
+                    ptr,
+                    owner);
+            },
+            py::arg("frame_index"), py::arg("width"), py::arg("height"), py::arg("channels"))
+        .def("commit_write_slot", &CacheManager::commit_write_slot,
+             py::arg("frame_index"), py::arg("success"));
 
     py::class_<PrefetchEngine, std::shared_ptr<PrefetchEngine>>(m, "PrefetchEngine")
         .def(py::init<std::shared_ptr<CacheManager>, int>(),
