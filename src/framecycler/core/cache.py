@@ -17,8 +17,8 @@ except ImportError:
 class CacheEngine:
     """Python façade over C++ CacheManager + PrefetchEngine.
 
-    Prefetch scheduling and native OIIO decode run in C++. QuickTime / non-native
-    decode still executes in Python via a GIL-scoped callback scheduled by C++.
+    Prefetch scheduling and native OIIO / FFmpeg decode run in C++. PythonFallback
+    decode (test stubs) still executes via a GIL-scoped callback.
 
     Prefetch does not start until ``start()`` so callers can register frame-ready
     callbacks first (MediaPool.acquire).
@@ -46,9 +46,9 @@ class CacheEngine:
             self.native_cache, max(1, int(self.settings.reader_threads))
         )
         self._prefetch.set_frame_ready_callback(self._notify_frame_ready)
-        self._prefetch.set_python_decode_callback(self._python_decode_frame)
         self._sync_prefetch_options()
         self._sync_path_table()
+        self._sync_movie_decoder()
         # Stay disabled until start() so no decode races ahead of callbacks.
         self._prefetch.set_enabled(False)
 
@@ -92,6 +92,17 @@ class CacheEngine:
         uses_native = getattr(self.decoder, "uses_native_path_decode", None)
         return bool(uses_native is not None and uses_native())
 
+    def _uses_native_movie_decode(self) -> bool:
+        uses_movie = getattr(self.decoder, "uses_native_movie_decode", None)
+        return bool(uses_movie is not None and uses_movie())
+
+    def _prefetch_decode_mode(self):
+        if self._uses_native_path_decode():
+            return framecycler_engine.PrefetchDecodeMode.NativePath
+        if self._uses_native_movie_decode():
+            return framecycler_engine.PrefetchDecodeMode.Movie
+        return framecycler_engine.PrefetchDecodeMode.PythonFallback
+
     def _sync_path_table(self) -> None:
         if not self._uses_native_path_decode():
             self._prefetch.set_path_table({}, [])
@@ -100,6 +111,20 @@ class CacheEngine:
         paths = {int(k): str(v) for k, v in frame_map.items()}
         sorted_frames = sorted(paths.keys())
         self._prefetch.set_path_table(paths, sorted_frames)
+
+    def _sync_movie_decoder(self) -> None:
+        mode = self._prefetch_decode_mode()
+        if mode == framecycler_engine.PrefetchDecodeMode.Movie:
+            getter = getattr(self.decoder, "get_native_movie_decoder", None)
+            movie = getter() if callable(getter) else None
+            self._prefetch.set_movie_decoder(movie)
+            self._prefetch.set_python_decode_callback(None)
+        elif mode == framecycler_engine.PrefetchDecodeMode.PythonFallback:
+            self._prefetch.set_movie_decoder(None)
+            self._prefetch.set_python_decode_callback(self._python_decode_frame)
+        else:
+            self._prefetch.set_movie_decoder(None)
+            self._prefetch.set_python_decode_callback(None)
 
     def _sync_prefetch_options(self) -> None:
         meta = getattr(self.decoder, "metadata", None) or self.decoder.get_metadata() or {}
@@ -111,11 +136,11 @@ class CacheEngine:
             fallback_mode,
             int(meta.get("width", 0) or 0),
             int(meta.get("height", 0) or 0),
-            self._uses_native_path_decode(),
+            self._prefetch_decode_mode(),
         )
 
     def _python_decode_frame(self, frame_index: int) -> bool:
-        """Called from C++ PrefetchEngine workers under the GIL for non-native sources."""
+        """Called from C++ PrefetchEngine workers under the GIL for PythonFallback sources."""
         try:
             frame_data = self.decoder.read_frame(
                 frame_index, resolution_scale=self.resolution_scale
@@ -186,6 +211,7 @@ class CacheEngine:
             self._prefetch.set_max_workers(max(1, int(self.settings.reader_threads)))
             self._sync_prefetch_options()
             self._sync_path_table()
+            self._sync_movie_decoder()
 
     def trigger_prefetch(self):
         with self.lock:
@@ -200,7 +226,7 @@ class CacheEngine:
         self._prefetch.clear()
 
     def close(self):
-        # PrefetchEngine.stop clears Python callbacks under the GIL, then joins
-        # workers with the GIL released.
+        # PrefetchEngine.stop joins workers first, then clears Python callbacks
+        # under the GIL (safe py::object teardown).
         self._prefetch.stop()
         self.native_cache.clear()

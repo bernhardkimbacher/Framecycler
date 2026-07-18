@@ -6,8 +6,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(APPLE)
-    list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew" "/opt/homebrew/opt/openimageio" "/usr/local")
+    list(APPEND CMAKE_PREFIX_PATH
+        "/opt/homebrew"
+        "/opt/homebrew/opt/openimageio"
+        "/opt/homebrew/opt/ffmpeg"
+        "/usr/local"
+        "/usr/local/opt/ffmpeg"
+    )
 endif()
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 if(QT_SDK_PATH)
     list(PREPEND CMAKE_PREFIX_PATH "${QT_SDK_PATH}")
@@ -34,6 +42,7 @@ find_package(Qt6 REQUIRED COMPONENTS Gui Widgets ShaderTools)
 find_package(Qt6 COMPONENTS GuiPrivate ShaderToolsPrivate)
 
 find_package(OpenImageIO REQUIRED)
+find_package(FFmpeg REQUIRED)
 
 pybind11_add_module(framecycler_engine
     src/cpp/bindings/python_bindings.cpp
@@ -43,6 +52,7 @@ pybind11_add_module(framecycler_engine
     src/cpp/engine/gpu_texture_cache.cpp
     src/cpp/engine/display_upload_queue.cpp
     src/cpp/engine/native_decoder.cpp
+    src/cpp/engine/native_movie_decoder.cpp
 )
 
 target_include_directories(framecycler_engine PRIVATE src/cpp/engine)
@@ -54,6 +64,7 @@ target_link_libraries(framecycler_engine PRIVATE
     Qt6::GuiPrivate
     Qt6::ShaderToolsPrivate
     OpenImageIO::OpenImageIO
+    FFmpeg::FFmpeg
 )
 
 find_package(Vulkan)

@@ -47,7 +47,7 @@ graph TB
 ```
 
 ### Key Subsystem Division
-* **Python Layer**: Handles UI layouts, transport timer loops, **multi-source timeline coordination** (`media_source.py`), per-source background decode prefetch scheduling (`CacheEngine` per `MediaSource`), and custom extension modules. Decoders resolve sequence file structures, reading EXR/DPX via OpenImageIO and QuickTime via PyAV.
+* **Python Layer**: Handles UI layouts, transport timer loops, **multi-source timeline coordination** (`media_source.py`), per-source background decode prefetch scheduling (`CacheEngine` per `MediaSource`), and custom extension modules. Decoders resolve sequence file structures; EXR/DPX decode via OpenImageIO and QuickTime/MPEG-4 via native FFmpeg in C++.
 * **C++ Core Module (`framecycler_engine`)**: Written in C++20. Manages contiguous half-float frame cache blocks and playhead-aware eviction (`CacheManager`), and handles **native GPU presentation and rendering** (`RhiRenderer`) on a dedicated render thread. GPU rendering interacts directly with PySide6's Qt RHI context to avoid dual-Qt linking crashes.
 
 The viewport renders entirely through the C++ `RhiRenderer` targeting a native `QWindow` container, providing low-overhead, zero-copy texture uploads and parallel execution. The older fixed **Slot A / Slot B** dual-decoder model was replaced in v0.2.4 by the ordered `sources` list and concatenated timeline.
@@ -132,7 +132,7 @@ return py::array(
 
 Located in `src/framecycler/decoders/`.
 
-Supported formats: **EXR** (`exr_decoder.py`, OpenImageIO), **DPX** (`dpx_decoder.py`, OpenImageIO), and **QuickTime/MPEG-4** (`qt_decoder.py`, PyAV/FFmpeg).
+Supported formats: **EXR** (`exr_decoder.py`, OpenImageIO), **DPX** (`dpx_decoder.py`, OpenImageIO), and **QuickTime/MPEG-4** (`qt_decoder.py`, native FFmpeg via `NativeMovieDecoder`).
 
 ### A. Sequence Detection & Drop-in Handlers
 When a single file is opened or dropped onto the application, `_find_sequence_from_single_file` inside `base.py` automatically parses its index pattern (e.g., `MOC_CAS_0010.0993.exr` $\rightarrow$ `MOC_CAS_0010.####.exr`), locates the directory, filters files matching that sequence name, and loads the sequence as a contiguous timeline starting at its absolute frame index.
@@ -282,7 +282,7 @@ Located in `src/framecycler/ui/`.
    ```
 
 ### Compiling C++ Extensions
-Ensure **CMake** is available. On Windows, also install **Visual Studio 2022 Build Tools (MSVC)**.
+Ensure **CMake** is available. On Windows, also install **Visual Studio 2022 Build Tools (MSVC)**. System libraries required for the native engine: **OpenImageIO** and **FFmpeg** (`libavformat`, `libavcodec`, `libavutil`, `libswscale`) — e.g. `brew install openimageio ffmpeg` on macOS, the corresponding `-dev` packages on Linux, or `vcpkg install openimageio ffmpeg` on Windows.
 
 The C++ engine compiles against the **Qt SDK** (version 6.10.3) and **pybind11**. It links against Qt Gui, Widgets, ShaderTools, and private modules to execute the native GPU RhiRenderer:
 

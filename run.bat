@@ -35,7 +35,7 @@ if errorlevel 1 (
 )
 
 REM 4. Check/Install Python dependencies
-python -c "import PySide6, numpy, av, OpenColorIO, OpenImageIO, cmake" 2>nul
+python -c "import PySide6, numpy, OpenColorIO, OpenImageIO, cmake" 2>nul
 if errorlevel 1 (
     echo [INFO] Dependencies missing or incomplete. Installing from requirements.txt...
     pip install -r requirements.txt

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cache_manager.h"
+#include "native_movie_decoder.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -14,6 +15,12 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+enum class PrefetchDecodeMode {
+    NativePath = 0,
+    Movie = 1,
+    PythonFallback = 2,
+};
 
 class PrefetchEngine {
 public:
@@ -35,7 +42,8 @@ public:
         const std::string& fallback_mode,
         int placeholder_width,
         int placeholder_height,
-        bool native_path_decode);
+        PrefetchDecodeMode decode_mode);
+    void set_movie_decoder(std::shared_ptr<NativeMovieDecoder> decoder);
     void set_enabled(bool enabled);
     void set_lookahead(int lookahead);
     void set_max_workers(int max_workers);
@@ -79,6 +87,7 @@ private:
     std::string _resolve_path_locked(int frame_index) const;
     bool _frame_in_lookahead_window_locked(int frame_index) const;
     void _notify_ready(int frame_index);
+    bool _uses_serial_decode_locked() const;
 
     std::shared_ptr<CacheManager> _cache;
 
@@ -99,14 +108,14 @@ private:
     std::string _fallback_mode = "Flat Gray";
     int _placeholder_width = 0;
     int _placeholder_height = 0;
-    bool _native_path_decode = true;
+    PrefetchDecodeMode _decode_mode = PrefetchDecodeMode::NativePath;
     // Disabled until CacheEngine.start() / set_enabled(true).
     bool _enabled = false;
     // 0 = budget-aware fill (default). >0 = explicit test override horizon.
     int _lookahead = 0;
     int _max_workers = 1;
-    int _python_inflight = 0;
-    static constexpr int kMaxPythonDecodeConcurrent = 1;
+    int _serial_inflight = 0;
+    static constexpr int kMaxSerialDecodeConcurrent = 1;
 
     int _playhead = 0;
     int _direction = 1;
@@ -118,6 +127,7 @@ private:
 
     FrameReadyCallback _frame_ready_cb;
     PythonDecodeCallback _python_decode_cb;
+    std::shared_ptr<NativeMovieDecoder> _movie_decoder;
 
     std::thread _planner;
     std::vector<std::thread> _workers;

@@ -83,7 +83,14 @@ class BaseDecoder(ABC):
     def uses_native_path_decode(self) -> bool:
         """
         True when frames are discrete image files decoded via C++ OIIO.
-        False for container media (e.g. QuickTime) that use Python read_frame.
+        False for container media (e.g. QuickTime) that use native movie decode
+        or a PythonFallback callback (tests).
+        """
+        return False
+
+    def uses_native_movie_decode(self) -> bool:
+        """
+        True when frames come from a shared C++ NativeMovieDecoder (FFmpeg).
         """
         return False
 

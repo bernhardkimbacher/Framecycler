@@ -4,6 +4,7 @@
 #include <pybind11/stl.h>
 #include "cache_manager.h"
 #include "prefetch_engine.h"
+#include "native_movie_decoder.h"
 #include "rhi_renderer.h"
 #include "display_upload_queue.h"
 
@@ -13,12 +14,114 @@
 
 namespace py = pybind11;
 
+namespace {
+
+// py::object must be destroyed while the GIL is held. PrefetchEngine worker
+// threads can drop the last std::function copy of a Python callback off-GIL.
+struct GilPyObject {
+    py::object obj;
+    GilPyObject() = default;
+    explicit GilPyObject(py::object o) : obj(std::move(o)) {}
+    GilPyObject(const GilPyObject&) = default;
+    GilPyObject& operator=(const GilPyObject&) = default;
+    GilPyObject(GilPyObject&&) noexcept = default;
+    GilPyObject& operator=(GilPyObject&&) noexcept = default;
+    ~GilPyObject() {
+        if (!obj) {
+            return;
+        }
+        py::gil_scoped_acquire gil;
+        py::object tmp = std::move(obj);
+        // tmp destroyed at end of scope under GIL.
+    }
+    py::object& get() { return obj; }
+};
+
+} // namespace
+
 PYBIND11_MODULE(framecycler_engine, m) {
     m.doc() = "Framecycler High-Performance C++ Review Playback Core Engine";
 
     py::enum_<UploadQueuePolicy>(m, "UploadQueuePolicy")
         .value("EveryFrame", UploadQueuePolicy::EveryFrame)
         .value("Realtime", UploadQueuePolicy::Realtime);
+
+    py::enum_<PrefetchDecodeMode>(m, "PrefetchDecodeMode")
+        .value("NativePath", PrefetchDecodeMode::NativePath)
+        .value("Movie", PrefetchDecodeMode::Movie)
+        .value("PythonFallback", PrefetchDecodeMode::PythonFallback);
+
+    py::class_<NativeMovieDecoder, std::shared_ptr<NativeMovieDecoder>>(m, "NativeMovieDecoder")
+        .def(py::init<>())
+        .def("open", &NativeMovieDecoder::open, py::arg("path"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("close", &NativeMovieDecoder::close, py::call_guard<py::gil_scoped_release>())
+        .def("is_open", &NativeMovieDecoder::is_open)
+        .def_property_readonly("width", &NativeMovieDecoder::width)
+        .def_property_readonly("height", &NativeMovieDecoder::height)
+        .def_property_readonly("fps", &NativeMovieDecoder::fps)
+        .def_property_readonly("frame_count", &NativeMovieDecoder::frame_count)
+        .def_property_readonly("has_alpha", &NativeMovieDecoder::has_alpha)
+        .def_property_readonly("sample_aspect_ratio", &NativeMovieDecoder::sample_aspect_ratio)
+        .def_property_readonly("timecode_start", &NativeMovieDecoder::timecode_start)
+        .def_property_readonly("start_frame", &NativeMovieDecoder::start_frame)
+        .def_property_readonly("end_frame", &NativeMovieDecoder::end_frame)
+        .def_property_readonly("path", &NativeMovieDecoder::path)
+        .def("file_metadata", &NativeMovieDecoder::file_metadata)
+        .def(
+            "decode_frame",
+            [](NativeMovieDecoder& self, int absolute_frame_index, float resolution_scale) -> py::object {
+                NativeDecoder::DecodeResult decoded;
+                {
+                    py::gil_scoped_release release;
+                    decoded = self.decode_frame(absolute_frame_index, resolution_scale);
+                }
+                if (!decoded.success || decoded.pixel_data.empty()) {
+                    return py::none();
+                }
+                auto* data = new std::vector<uint16_t>(std::move(decoded.pixel_data));
+                py::capsule owner(data, [](void* p) {
+                    delete static_cast<std::vector<uint16_t>*>(p);
+                });
+                return py::array(
+                    py::dtype("float16"),
+                    { decoded.height, decoded.width, decoded.channels },
+                    {
+                        static_cast<py::ssize_t>(decoded.width * decoded.channels * sizeof(uint16_t)),
+                        static_cast<py::ssize_t>(decoded.channels * sizeof(uint16_t)),
+                        static_cast<py::ssize_t>(sizeof(uint16_t))
+                    },
+                    data->data(),
+                    owner);
+            },
+            py::arg("absolute_frame_index"),
+            py::arg("resolution_scale") = 1.0f)
+        .def(
+            "probe",
+            [](const NativeMovieDecoder& self) {
+                py::dict d;
+                d["width"] = self.width();
+                d["height"] = self.height();
+                d["fps"] = self.fps();
+                d["frame_count"] = self.frame_count();
+                d["has_alpha"] = self.has_alpha();
+                d["sample_aspect_ratio"] = self.sample_aspect_ratio();
+                d["pixel_aspect_ratio"] = self.sample_aspect_ratio();
+                d["timecode_start"] = self.timecode_start();
+                d["start_frame"] = self.start_frame();
+                d["end_frame"] = self.end_frame();
+                d["path"] = self.path();
+                d["file_metadata"] = self.file_metadata();
+                py::list channels;
+                channels.append("R");
+                channels.append("G");
+                channels.append("B");
+                if (self.has_alpha()) {
+                    channels.append("A");
+                }
+                d["channels"] = channels;
+                return d;
+            });
 
     py::class_<DisplayUploadQueue>(m, "DisplayUploadQueue")
         .def(py::init<>())
@@ -69,17 +172,28 @@ PYBIND11_MODULE(framecycler_engine, m) {
                 self.write_frame(frame_index, width, height, channels, ptr, size);
             }
         })
-        .def("get_frame_data", [](py::object self, int frame_index) -> py::object {
-            auto& self_cpp = self.cast<CacheManager&>();
+        .def("get_frame_data", [](CacheManager& self, int frame_index) -> py::object {
+            // Copy under CacheManager locks. Returning a view into _slots is unsafe:
+            // concurrent write_frame can reallocate the slot vector and dangling
+            // pointers segfault (observed on Ubuntu/libstdc++ during prefetch tests).
             int width = 0, height = 0, channels = 0;
-            const uint16_t* ptr = nullptr;
+            auto* owned = new std::vector<uint16_t>();
+            bool ok = false;
             {
                 py::gil_scoped_release release;
-                ptr = self_cpp.get_frame_data(frame_index, width, height, channels);
+                if (self.get_frame_dimensions(frame_index, width, height, channels)
+                    && width > 0 && height > 0 && channels > 0) {
+                    owned->resize(static_cast<size_t>(width) * height * channels);
+                    ok = self.copy_frame_data(frame_index, owned->data(), owned->size());
+                }
             }
-            if (!ptr) {
+            if (!ok) {
+                delete owned;
                 return py::none();
             }
+            py::capsule owner(owned, [](void* p) {
+                delete static_cast<std::vector<uint16_t>*>(p);
+            });
             return py::array(
                 py::dtype("float16"),
                 { height, width, channels },
@@ -88,9 +202,8 @@ PYBIND11_MODULE(framecycler_engine, m) {
                     static_cast<py::ssize_t>(channels * sizeof(uint16_t)),
                     static_cast<py::ssize_t>(sizeof(uint16_t))
                 },
-                const_cast<uint16_t*>(ptr),
-                self
-            );
+                owned->data(),
+                owner);
         })
         .def("get_cached_frames", &CacheManager::get_cached_frames)
         .def("clear", &CacheManager::clear)
@@ -126,7 +239,13 @@ PYBIND11_MODULE(framecycler_engine, m) {
             py::arg("fallback_mode") = "Flat Gray",
             py::arg("placeholder_width") = 0,
             py::arg("placeholder_height") = 0,
-            py::arg("native_path_decode") = true)
+            py::arg("decode_mode") = PrefetchDecodeMode::NativePath)
+        .def(
+            "set_movie_decoder",
+            [](PrefetchEngine& self, std::shared_ptr<NativeMovieDecoder> decoder) {
+                self.set_movie_decoder(std::move(decoder));
+            },
+            py::arg("decoder") = py::none())
         .def("set_enabled", &PrefetchEngine::set_enabled)
         .def("set_lookahead", &PrefetchEngine::set_lookahead)
         .def("set_max_workers", &PrefetchEngine::set_max_workers)
@@ -142,11 +261,11 @@ PYBIND11_MODULE(framecycler_engine, m) {
                     self.set_frame_ready_callback(nullptr);
                     return;
                 }
-                auto holder = std::make_shared<py::object>(std::move(cb));
+                auto holder = std::make_shared<GilPyObject>(std::move(cb));
                 self.set_frame_ready_callback([holder](int frame_index) {
                     py::gil_scoped_acquire gil;
                     try {
-                        (*holder)(frame_index);
+                        holder->get()(frame_index);
                     } catch (py::error_already_set& e) {
                         std::cerr << "PrefetchEngine: frame-ready Python callback failed: "
                                   << e.what() << std::endl;
@@ -162,11 +281,11 @@ PYBIND11_MODULE(framecycler_engine, m) {
                     self.set_python_decode_callback(nullptr);
                     return;
                 }
-                auto holder = std::make_shared<py::object>(std::move(cb));
+                auto holder = std::make_shared<GilPyObject>(std::move(cb));
                 self.set_python_decode_callback([holder](int frame_index) -> bool {
                     py::gil_scoped_acquire gil;
                     try {
-                        py::object result = (*holder)(frame_index);
+                        py::object result = holder->get()(frame_index);
                         if (result.is_none()) {
                             return false;
                         }
@@ -181,15 +300,17 @@ PYBIND11_MODULE(framecycler_engine, m) {
             },
             py::arg("callback"))
         .def("clear", &PrefetchEngine::clear, py::call_guard<py::gil_scoped_release>())
-        // Clear Python callbacks under the GIL, then join workers with GIL released
-        // so in-flight callbacks can finish without deadlocking.
+        // Join workers first (callbacks may still run and need the GIL), then
+        // tear down Python callables under the GIL. Clearing before join races:
+        // a worker's local std::function copy can destroy py::object off-GIL.
         .def("stop", [](PrefetchEngine& self) {
-            self.set_frame_ready_callback(nullptr);
-            self.set_python_decode_callback(nullptr);
             {
                 py::gil_scoped_release release;
                 self.stop();
             }
+            self.set_frame_ready_callback(nullptr);
+            self.set_python_decode_callback(nullptr);
+            self.set_movie_decoder(nullptr);
         });
 
     py::class_<FrameSlotSpec>(m, "FrameSlotSpec")

@@ -18,7 +18,7 @@ class TestCppCache(unittest.TestCase):
         self.assertTrue(cache.has_frame(10))
         self.assertEqual(cache.get_cached_frames(), [10])
         
-        # 4. Fetch zero-copy array back and check content
+        # 4. Fetch array back and check content (copied out of the cache)
         retrieved_data = cache.get_frame_data(10)
         self.assertIsNotNone(retrieved_data)
         self.assertEqual(retrieved_data.shape, (h, w, c))
@@ -77,6 +77,49 @@ class TestCppCache(unittest.TestCase):
         self.assertAlmostEqual(bg_pixel[0], 0.1, places=2)
         self.assertAlmostEqual(bg_pixel[1], 0.1, places=2)
         self.assertAlmostEqual(bg_pixel[2], 0.1, places=2)
+
+    def test_get_frame_data_safe_under_concurrent_writes(self):
+        """Regression: views must not dangle when write_frame grows the slot table."""
+        import threading
+        import time
+
+        cache = framecycler_engine.CacheManager(0.5)
+        w, h, c = 64, 32, 4
+        stop = threading.Event()
+        errors = []
+
+        def writer():
+            frame = 0
+            while not stop.is_set() and frame < 200:
+                data = np.full((h, w, c), np.float16(frame % 17), dtype=np.float16)
+                try:
+                    cache.write_frame(frame, w, h, c, data)
+                except Exception as exc:
+                    errors.append(exc)
+                    return
+                frame += 1
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    view = cache.get_frame_data(0)
+                    if view is not None:
+                        _ = float(view[0, 0, 0])
+                        _ = view.copy()
+                except Exception as exc:
+                    errors.append(exc)
+                    return
+                time.sleep(0.0005)
+
+        threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
+        for t in threads:
+            t.start()
+        time.sleep(0.3)
+        stop.set()
+        for t in threads:
+            t.join(timeout=2.0)
+        self.assertEqual(errors, [])
+        self.assertTrue(cache.has_frame(0))
 
 if __name__ == "__main__":
     unittest.main()

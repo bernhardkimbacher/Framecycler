@@ -654,9 +654,11 @@ class Viewport(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # Always refresh RenderParams: fit/tile scales depend on widget size.
+        # Skipping update() left stale scale uniforms after swapchain resize.
         if self.zoom_mode != "fit" and self.compare_mode != COMPARE_TILE:
             self._apply_zoom_mode()
-            self.update()
+        self.update()
 
     def mousePressEvent(self, event):
         if self.adjustment_mode and event.button() == Qt.LeftButton:

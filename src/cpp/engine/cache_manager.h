@@ -1,5 +1,6 @@
 #pragma once
 #include <vector>
+#include <deque>
 #include <unordered_map>
 #include <shared_mutex>
 #include <set>
@@ -49,7 +50,9 @@ private:
     size_t _max_bytes;
     size_t _allocated_bytes;
 
-    std::vector<FrameBuffer> _slots;
+    // deque keeps existing FrameBuffer addresses stable across push_back so
+    // in-flight readers of other frames are not invalidated by growth.
+    std::deque<FrameBuffer> _slots;
     std::unordered_map<int, size_t> _frame_to_slot;
     std::unordered_map<size_t, int> _slot_to_frame;
     std::set<int> _inflight_decodes;

@@ -67,7 +67,7 @@ void PrefetchEngine::stop()
     }
     _queued.clear();
     _decoding.clear();
-    _python_inflight = 0;
+    _serial_inflight = 0;
 }
 
 void PrefetchEngine::set_path_table(
@@ -87,7 +87,7 @@ void PrefetchEngine::set_options(
     const std::string& fallback_mode,
     int placeholder_width,
     int placeholder_height,
-    bool native_path_decode)
+    PrefetchDecodeMode decode_mode)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _resolution_scale = resolution_scale;
@@ -95,9 +95,23 @@ void PrefetchEngine::set_options(
     _fallback_mode = fallback_mode;
     _placeholder_width = placeholder_width;
     _placeholder_height = placeholder_height;
-    _native_path_decode = native_path_decode;
+    _decode_mode = decode_mode;
     _wake = true;
     _wake_cv.notify_one();
+}
+
+void PrefetchEngine::set_movie_decoder(std::shared_ptr<NativeMovieDecoder> decoder)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _movie_decoder = std::move(decoder);
+    _wake = true;
+    _wake_cv.notify_one();
+}
+
+bool PrefetchEngine::_uses_serial_decode_locked() const
+{
+    return _decode_mode == PrefetchDecodeMode::Movie
+        || _decode_mode == PrefetchDecodeMode::PythonFallback;
 }
 
 void PrefetchEngine::set_enabled(bool enabled)
@@ -376,7 +390,7 @@ bool PrefetchEngine::_can_take_job_locked() const
     if (static_cast<int>(_decoding.size()) >= _max_workers) {
         return false;
     }
-    if (!_native_path_decode && _python_inflight >= kMaxPythonDecodeConcurrent) {
+    if (_uses_serial_decode_locked() && _serial_inflight >= kMaxSerialDecodeConcurrent) {
         return false;
     }
     return true;
@@ -399,8 +413,8 @@ bool PrefetchEngine::_pop_job_locked(Job& out)
             continue;
         }
         _decoding.insert(out.frame_index);
-        if (!_native_path_decode) {
-            ++_python_inflight;
+        if (_uses_serial_decode_locked()) {
+            ++_serial_inflight;
         }
         return true;
     }
@@ -438,10 +452,16 @@ void PrefetchEngine::_process_job(const Job& job)
     const int frame_index = job.frame_index;
     bool ok = false;
 
+    PrefetchDecodeMode mode = PrefetchDecodeMode::NativePath;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        mode = _decode_mode;
+    }
+
     try {
         if (_cache->has_frame(frame_index)) {
             ok = true;
-        } else if (_native_path_decode) {
+        } else if (mode == PrefetchDecodeMode::NativePath) {
             std::string path;
             float scale = 1.0f;
             std::string layer;
@@ -461,6 +481,36 @@ void PrefetchEngine::_process_job(const Job& job)
                 frame_index, path, scale, layer, fallback, ph_w, ph_h);
             // Placeholder paths still write pixels even when success is false.
             ok = ok || _cache->has_frame(frame_index);
+        } else if (mode == PrefetchDecodeMode::Movie) {
+            std::shared_ptr<NativeMovieDecoder> movie;
+            float scale = 1.0f;
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                movie = _movie_decoder;
+                scale = _resolution_scale;
+            }
+            if (movie && _cache->try_claim_decode(frame_index)) {
+                try {
+                    auto decoded = movie->decode_frame(frame_index, scale);
+                    if (decoded.success && !decoded.pixel_data.empty()) {
+                        _cache->write_frame(
+                            frame_index,
+                            decoded.width,
+                            decoded.height,
+                            decoded.channels,
+                            decoded.pixel_data.data(),
+                            decoded.pixel_data.size());
+                        ok = true;
+                    }
+                } catch (...) {
+                    _cache->release_decode_claim(frame_index);
+                    throw;
+                }
+                _cache->release_decode_claim(frame_index);
+                ok = ok || _cache->has_frame(frame_index);
+            } else {
+                ok = _cache->has_frame(frame_index);
+            }
         } else {
             PythonDecodeCallback cb;
             {
@@ -495,8 +545,8 @@ void PrefetchEngine::_process_job(const Job& job)
     {
         std::lock_guard<std::mutex> lock(_mutex);
         _decoding.erase(frame_index);
-        if (!_native_path_decode) {
-            _python_inflight = std::max(0, _python_inflight - 1);
+        if (_uses_serial_decode_locked()) {
+            _serial_inflight = std::max(0, _serial_inflight - 1);
         }
     }
     _job_cv.notify_all();
@@ -524,4 +574,8 @@ void PrefetchEngine::_notify_ready(int frame_index)
                       << frame_index << std::endl;
         }
     }
+    // Drop the local copy before returning so any Python-owned state inside the
+    // std::function is released while the calling worker still exists; stop()
+    // joins workers before clearing the shared callback under the GIL.
+    cb = nullptr;
 }

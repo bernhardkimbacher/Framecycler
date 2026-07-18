@@ -234,6 +234,9 @@ class MainWindow(QMainWindow):
         self.viewer_splitter.setStretchFactor(1, 1)
         self._source_panel_sizes = [220, 900]
         self.viewer_splitter.setSizes(self._source_panel_sizes)
+        # Hidden by default; isVisible() is False until the window is shown, so
+        # hide() must be called explicitly during construction.
+        self.source_panel.hide()
         viewer_layout.addWidget(self.viewer_splitter, stretch=1)
 
         readout_widget = QWidget()
@@ -364,9 +367,10 @@ class MainWindow(QMainWindow):
         add_menu_section(view_menu, "Panels")
         self.act_media_sources = QAction("Shots", self)
         self.act_media_sources.setCheckable(True)
-        self.act_media_sources.setChecked(True)
+        self.act_media_sources.setChecked(False)
         self.act_media_sources.triggered.connect(self._toggle_source_panel)
         view_menu.addAction(self.act_media_sources)
+        self._set_source_panel_visible(False)
 
         add_menu_section(view_menu, "Zoom")
         self.zoom_actions = []
@@ -681,7 +685,10 @@ class MainWindow(QMainWindow):
         self._set_source_panel_visible(self.act_media_sources.isChecked())
 
     def _set_source_panel_visible(self, visible: bool):
-        if visible == self.source_panel.isVisible():
+        # Use isHidden() (not isVisible()): during __init__ the widget is not yet
+        # shown, so isVisible() is False and would skip hide() incorrectly.
+        currently_shown = not self.source_panel.isHidden()
+        if visible == currently_shown:
             if hasattr(self, "act_media_sources"):
                 self.act_media_sources.blockSignals(True)
                 self.act_media_sources.setChecked(visible)

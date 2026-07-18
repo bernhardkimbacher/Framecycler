@@ -37,11 +37,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0 libxkbcommon-dev libxcb-cursor0 libopenimageio-dev openimageio-tools libopencv-dev libvulkan-dev
+          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0 libxkbcommon-dev libxcb-cursor0 libopenimageio-dev openimageio-tools libopencv-dev libvulkan-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install openimageio
+        run: brew install openimageio ffmpeg
 
       - name: Cache vcpkg (Windows)
         if: runner.os == 'Windows'
@@ -59,7 +59,7 @@ jobs:
         shell: bash
         run: |
           echo "set(VCPKG_BUILD_TYPE release)" >> "$VCPKG_INSTALLATION_ROOT/triplets/x64-windows.cmake"
-          vcpkg install openimageio:x64-windows
+          vcpkg install openimageio:x64-windows ffmpeg:x64-windows
 
       - name: Cache Qt SDK
         uses: actions/cache@v4

@@ -194,7 +194,7 @@ class TestPrefetchEngine(unittest.TestCase):
         engine = framecycler_engine.PrefetchEngine(cache, 2)
         try:
             engine.set_frame_ready_callback(lambda f: ready.append(f))
-            engine.set_options(1.0, "", "Flat Gray", 8, 4, True)
+            engine.set_options(1.0, "", "Flat Gray", 8, 4, framecycler_engine.PrefetchDecodeMode.NativePath)
             engine.set_path_table({}, [])
             engine.set_enabled(True)
             engine.set_playback_range(0, 3)
@@ -204,6 +204,23 @@ class TestPrefetchEngine(unittest.TestCase):
             self.assertTrue(_wait_until(lambda: 2 in ready))
         finally:
             engine.stop()
+
+    def test_python_fallback_mode_explicit(self):
+        settings = Settings()
+        settings.decode_cache_limit_gb = 0.1
+        settings.reader_threads = 1
+        decoder = _ContainerDecoder(frame_count=3)
+        engine = CacheEngine(decoder, settings)
+        try:
+            self.assertEqual(
+                engine._prefetch_decode_mode(),
+                framecycler_engine.PrefetchDecodeMode.PythonFallback,
+            )
+            engine.start()
+            self.assertTrue(_wait_until(lambda: engine.has_frame(0)))
+            self.assertGreaterEqual(len(decoder.read_calls), 1)
+        finally:
+            engine.close()
 
     def test_cache_manager_budget_bytes(self):
         cache = framecycler_engine.CacheManager(0.01)
