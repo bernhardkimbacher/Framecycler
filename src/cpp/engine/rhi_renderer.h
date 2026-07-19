@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <array>
 #include <memory>
+#include <optional>
 
 #include "gpu_texture_cache.h"
 #include "display_upload_queue.h"
@@ -61,6 +62,17 @@ struct GradingParams {
     std::unordered_map<std::string, std::array<float, 3>> vec3s;
 };
 
+struct PerFrameUboData {
+    float scale_x = 1.0f;
+    float scale_y = 1.0f;
+    float pan_x = 0.0f;
+    float pan_y = 0.0f;
+    int compare_mode = 0;
+    float wipe_pos = 0.5f;
+    int channel_mask = 0;
+    int padding = 0;
+};
+
 class RhiRenderer {
 public:
     RhiRenderer();
@@ -102,6 +114,10 @@ public:
     UploadQueueStats get_upload_queue_stats() const;
     bool is_fallback_null_backend() const { return _is_fallback_null_backend.load(); }
 
+    /// Prefer Null RHI (set before initialize). Also auto-enabled for offscreen /
+    /// FRAMECYCLER_FORCE_NULL_RHI when initialize() runs on the GUI thread.
+    void set_force_null_backend(bool enabled);
+
     struct DebugStats {
         int begin_frame_ok = 0;
         int begin_frame_fail = 0;
@@ -124,6 +140,11 @@ public:
         int last_upload_count = 0;
         int gpu_cache_hits = 0;
         int gpu_cache_misses = 0;
+        int pipeline_rebuilds = 0;
+        int srb_updates = 0;
+        int staging_waits = 0;
+        int textures_created = 0;
+        int textures_pooled_reuses = 0;
     };
     DebugStats get_debug_stats() const;
 
@@ -169,6 +190,11 @@ private:
     void render_frame();
     void update_rhi_resources(QRhiResourceUpdateBatch* batch);
     void build_pipeline(QRhiRenderPassDescriptor* rpDesc, bool force_rebuild = false);
+    void update_srb_resources();
+    void clear_tile_srb_cache();
+    QRhiShaderResourceBindings* get_or_create_tile_srb(QRhiTexture* tex_a);
+    void ensure_per_frame_ubo(int slot_count);
+    quint32 per_frame_ubo_stride() const;
     bool bake_shaders(const std::string& vert_src, const std::string& frag_src);
     void parse_ocio_ubo_layout(const std::string& fragment_source);
     std::vector<char> pack_ocio_ubo();
@@ -182,7 +208,7 @@ private:
         const FrameSlotSpec& spec,
         TextureState& bind_state,
         QRhiResourceUpdateBatch* batch,
-        bool& pipeline_dirty);
+        bool& bindings_dirty);
     void apply_pending_display_cache_ops();
     void publish_display_cache_snapshot();
     void destroy_upload_texture(void* texture);
@@ -197,6 +223,10 @@ private:
     bool gpu_warmup_work_remaining() const;
     void _release_gpu_resources();
 
+    // Staging ring: returns slot index, or nullopt if all slots still in flight.
+    std::optional<size_t> acquire_staging_slot();
+    QRhiTexture* acquire_frame_texture(int width, int height, int channels);
+
     // Threading / state sync
     void start_render_thread();
     void stop_render_thread();
@@ -205,6 +235,10 @@ private:
     void shutdown_rhi_on_thread();
     void sync_and_render_on_thread(bool resize, const QSize& target_size);
     void _wake_render_thread();
+
+    std::vector<QRhiShaderResourceBinding> build_srb_bindings(
+        QRhiTexture* tex_a,
+        QRhiTexture* tex_b) const;
 
     std::thread _render_thread;
     mutable std::mutex _mutex;
@@ -243,11 +277,14 @@ private:
     QRhiRenderPassDescriptor* _fallbackRpDesc = nullptr;
     QRhiBuffer* _vertexBuffer = nullptr;
     QRhiBuffer* _perFrameUbo = nullptr;
+    int _perFrameUboSlots = 0; // capacity in dynamic-offset slots
     QRhiBuffer* _ocioUbo = nullptr;
     QRhiSampler* _sampler = nullptr;
     QRhiSampler* _lutSampler = nullptr;
     QRhiShaderResourceBindings* _srb = nullptr;
     QRhiGraphicsPipeline* _pipeline = nullptr;
+    QRhiTexture* _placeholderTex2D = nullptr;
+    QRhiTexture* _placeholderLut3D = nullptr;
 
     QShader _vertexShader;
     QShader _fragmentShader;
@@ -258,6 +295,10 @@ private:
     TextureState _texBState;
     std::vector<TextureState> _texturePool;
     std::vector<OcioLut3D> _active_ocio_luts;
+    int _pipeline_lut_count = 0; // LUT slots baked into current SRB layout
+
+    // Per-source (per texA) SRBs for tile compare — layout-compatible with _pipeline
+    std::unordered_map<QRhiTexture*, QRhiShaderResourceBindings*> _tileSrbCache;
 
     // Shader binding layouts
     OcioUboLayout _ocioUboLayout;
@@ -284,4 +325,5 @@ private:
     QRhiTexture* _last_bound_tex_a = nullptr;
     QRhiTexture* _last_bound_tex_b = nullptr;
     std::atomic<bool> _is_fallback_null_backend{false};
+    bool _force_null_backend = false;
 };

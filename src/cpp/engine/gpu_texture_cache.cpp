@@ -23,6 +23,8 @@ void GpuTextureCache::set_limit_gb(double limit_gb)
         return;
     }
     _max_bytes = static_cast<size_t>(limit_gb * 1024.0 * 1024.0 * 1024.0);
+    // Free pooled textures first when shrinking budget.
+    clear_pool();
     evict_before_insert(0, -1);
 }
 
@@ -80,16 +82,80 @@ void GpuTextureCache::clear()
         destroy_entry(pair.second);
     }
     _entries.clear();
+    clear_pool();
     _resident_bytes = 0;
     _stats.resident_bytes = 0;
     _stats.resident_frames = 0;
 }
 
+void GpuTextureCache::destroy_texture(QRhiTexture* texture)
+{
+    if (!texture) {
+        return;
+    }
+    texture->destroy();
+    delete texture;
+}
+
+void GpuTextureCache::clear_pool()
+{
+    for (auto& pair : _pool) {
+        for (QRhiTexture* tex : pair.second) {
+            destroy_texture(tex);
+        }
+    }
+    _pool.clear();
+    _pooled_count = 0;
+    _stats.textures_pooled = 0;
+}
+
+QRhiTexture* GpuTextureCache::acquire(int width, int height, QRhiTexture::Format format)
+{
+    if (!_rhi || width <= 0 || height <= 0) {
+        return nullptr;
+    }
+    TexturePoolKey key{width, height, format};
+    auto it = _pool.find(key);
+    if (it != _pool.end() && !it->second.empty()) {
+        QRhiTexture* tex = it->second.back();
+        it->second.pop_back();
+        --_pooled_count;
+        _stats.textures_pooled = static_cast<int>(_pooled_count);
+        _stats.textures_pooled_reuses++;
+        return tex;
+    }
+
+    QRhiTexture* texture = _rhi->newTexture(format, QSize(width, height));
+    if (!texture || !texture->create()) {
+        delete texture;
+        return nullptr;
+    }
+    _stats.textures_created++;
+    return texture;
+}
+
+void GpuTextureCache::release_to_pool(
+    QRhiTexture* texture, int width, int height, QRhiTexture::Format format)
+{
+    if (!texture) {
+        return;
+    }
+    if (_pooled_count >= kMaxPooledTextures || width <= 0 || height <= 0) {
+        destroy_texture(texture);
+        return;
+    }
+    TexturePoolKey key{width, height, format};
+    _pool[key].push_back(texture);
+    ++_pooled_count;
+    _stats.textures_pooled = static_cast<int>(_pooled_count);
+}
+
 void GpuTextureCache::destroy_entry(GpuCacheEntry& entry)
 {
     if (entry.texture) {
-        entry.texture->destroy();
-        delete entry.texture;
+        QRhiTexture::Format format =
+            (entry.channels == 1) ? QRhiTexture::R16F : QRhiTexture::RGBA16F;
+        release_to_pool(entry.texture, entry.width, entry.height, format);
         entry.texture = nullptr;
     }
     entry.bytes = 0;

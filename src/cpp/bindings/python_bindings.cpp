@@ -380,6 +380,7 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("initialize", &RhiRenderer::initialize)
         .def("shutdown", &RhiRenderer::shutdown)
         .def("is_fallback_null_backend", &RhiRenderer::is_fallback_null_backend)
+        .def("set_force_null_backend", &RhiRenderer::set_force_null_backend)
         .def("update_render_params", &RhiRenderer::update_render_params)
         .def("set_grading_uniform", &RhiRenderer::set_grading_uniform)
         .def("set_grading_uniform_vec3", &RhiRenderer::set_grading_uniform_vec3)
@@ -445,6 +446,11 @@ PYBIND11_MODULE(framecycler_engine, m) {
             d["last_upload_count"] = s.last_upload_count;
             d["gpu_cache_hits"] = s.gpu_cache_hits;
             d["gpu_cache_misses"] = s.gpu_cache_misses;
+            d["pipeline_rebuilds"] = s.pipeline_rebuilds;
+            d["srb_updates"] = s.srb_updates;
+            d["staging_waits"] = s.staging_waits;
+            d["textures_created"] = s.textures_created;
+            d["textures_pooled_reuses"] = s.textures_pooled_reuses;
             return d;
         });
 }

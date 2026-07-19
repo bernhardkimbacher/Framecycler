@@ -10,6 +10,8 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <cstring>
+#include <optional>
 
 #if defined(Q_OS_MACOS)
 #include <QtGui/rhi/qrhi_platform.h>
@@ -42,11 +44,26 @@ bool RhiRenderer::initialize(uintptr_t window_ptr)
         return false;
     }
 
+    // Resolve Null preference on the GUI thread — QGuiApplication::platformName()
+    // is not safe to call from the dedicated render thread.
+    const QByteArray forceNull = qgetenv("FRAMECYCLER_FORCE_NULL_RHI");
+    if (forceNull == "1" || forceNull.compare("true", Qt::CaseInsensitive) == 0) {
+        _force_null_backend = true;
+    }
+    if (QGuiApplication::platformName() == QLatin1String("offscreen")) {
+        _force_null_backend = true;
+    }
+
     _pending_size = _window->size();
     _resize_pending = true;
 
     start_render_thread();
     return true;
+}
+
+void RhiRenderer::set_force_null_backend(bool enabled)
+{
+    _force_null_backend = enabled;
 }
 
 void RhiRenderer::shutdown()
@@ -119,23 +136,23 @@ bool RhiRenderer::initialize_rhi_on_thread()
 
     _is_fallback_null_backend = false;
 
-#if defined(Q_OS_MACOS)
-    QRhiMetalInitParams params;
-    _rhi = QRhi::create(QRhi::Metal, &params);
-#elif defined(Q_OS_WIN)
-    QRhiD3D11InitParams params;
-    _rhi = QRhi::create(QRhi::D3D11, &params);
-#else
-    if (QGuiApplication::platformName() == QLatin1String("offscreen")) {
-        qWarning() << "RhiRenderer: offscreen platform detected, bypassing Vulkan to use Null backend directly.";
+    if (_force_null_backend) {
+        qWarning() << "RhiRenderer: using Null backend (forced/offscreen)";
         QRhiNullInitParams nullParams;
         _rhi = QRhi::create(QRhi::Null, &nullParams);
         _is_fallback_null_backend = true;
     } else {
+#if defined(Q_OS_MACOS)
+        QRhiMetalInitParams params;
+        _rhi = QRhi::create(QRhi::Metal, &params);
+#elif defined(Q_OS_WIN)
+        QRhiD3D11InitParams params;
+        _rhi = QRhi::create(QRhi::D3D11, &params);
+#else
         QRhiVulkanInitParams params;
         _rhi = QRhi::create(QRhi::Vulkan, &params);
-    }
 #endif
+    }
 
     if (!_rhi) {
         qWarning() << "RhiRenderer: Failed to initialize primary QRhi backend! Falling back to Null backend.";
@@ -163,6 +180,8 @@ bool RhiRenderer::initialize_rhi_on_thread()
 
 void RhiRenderer::shutdown_rhi_on_thread()
 {
+    clear_tile_srb_cache();
+
     if (_pipeline) {
         _pipeline->destroy();
         delete _pipeline;
@@ -183,6 +202,7 @@ void RhiRenderer::shutdown_rhi_on_thread()
         delete _perFrameUbo;
         _perFrameUbo = nullptr;
     }
+    _perFrameUboSlots = 0;
     if (_ocioUbo) {
         _ocioUbo->destroy();
         delete _ocioUbo;
@@ -197,6 +217,16 @@ void RhiRenderer::shutdown_rhi_on_thread()
         _lutSampler->destroy();
         delete _lutSampler;
         _lutSampler = nullptr;
+    }
+    if (_placeholderTex2D) {
+        _placeholderTex2D->destroy();
+        delete _placeholderTex2D;
+        _placeholderTex2D = nullptr;
+    }
+    if (_placeholderLut3D) {
+        _placeholderLut3D->destroy();
+        delete _placeholderLut3D;
+        _placeholderLut3D = nullptr;
     }
     if (_swapChain) {
         _swapChain->destroy();
@@ -345,11 +375,11 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
 
     if (_clear_cache_pending.exchange(false)) {
         if (!_displayCache.enabled()) {
-            if (_texAState.texture) {
+            if (_texAState.texture && _texAState.texture != _placeholderTex2D) {
                 _texAState.texture->destroy();
                 delete _texAState.texture;
             }
-            if (_texBState.texture) {
+            if (_texBState.texture && _texBState.texture != _placeholderTex2D) {
                 _texBState.texture->destroy();
                 delete _texBState.texture;
             }
@@ -369,6 +399,7 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
         for (auto& state : _texturePool) {
             state.texture = nullptr;
         }
+        clear_tile_srb_cache();
         if (_pipeline) {
             _pipeline->destroy();
             delete _pipeline;
@@ -426,6 +457,7 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
 
     if (shaders_dirty && !frag_src_for_layout.empty()) {
         parse_ocio_ubo_layout(frag_src_for_layout);
+        clear_tile_srb_cache();
         if (_pipeline) {
             _pipeline->destroy();
             delete _pipeline;
@@ -585,7 +617,7 @@ void RhiRenderer::render_frame()
 
     // Present: bind from display cache (or sync upload when cache disabled).
     const int compare_mode = _active_render_params.compare_mode;
-    bool pipeline_dirty = false;
+    bool bindings_dirty = false;
     for (auto slot : _active_render_params.slots) {
         CacheManager* cpu_cache = nullptr;
         {
@@ -614,7 +646,7 @@ void RhiRenderer::render_frame()
                         slot,
                         _texturePool[slot.source_index],
                         batch,
-                        pipeline_dirty);
+                        bindings_dirty);
                 } else if (compare_mode == 0) {
                     if (slot.source_index == _active_render_params.sequence_index) {
                         resolve_display_texture(
@@ -623,7 +655,7 @@ void RhiRenderer::render_frame()
                             slot,
                             _texAState,
                             batch,
-                            pipeline_dirty);
+                            bindings_dirty);
                     }
                 } else {
                     if (slot.source_index == 0) {
@@ -633,7 +665,7 @@ void RhiRenderer::render_frame()
                             slot,
                             _texAState,
                             batch,
-                            pipeline_dirty);
+                            bindings_dirty);
                     } else if (slot.source_index == 1) {
                         resolve_display_texture(
                             slot.source_index,
@@ -641,7 +673,7 @@ void RhiRenderer::render_frame()
                             slot,
                             _texBState,
                             batch,
-                            pipeline_dirty);
+                            bindings_dirty);
                     }
                 }
             } else {
@@ -654,14 +686,16 @@ void RhiRenderer::render_frame()
         auto display_stats = _displayCache.stats();
         _debug_stats.gpu_cache_hits = display_stats.hits;
         _debug_stats.gpu_cache_misses = display_stats.misses;
+        if (_displayCache.enabled()) {
+            _debug_stats.textures_created = display_stats.textures_created;
+            _debug_stats.textures_pooled_reuses = display_stats.textures_pooled_reuses;
+        }
         std::lock_guard<std::mutex> lock(_mutex);
         _display_stats_snapshot = display_stats;
     }
 
-    if (pipeline_dirty || _texAState.texture != _last_bound_tex_a || _texBState.texture != _last_bound_tex_b) {
-        build_pipeline(_swapChain->renderPassDescriptor(), true);
-        _last_bound_tex_a = _texAState.texture;
-        _last_bound_tex_b = _texBState.texture;
+    if (bindings_dirty || _texAState.texture != _last_bound_tex_a || _texBState.texture != _last_bound_tex_b) {
+        update_srb_resources();
     }
 
     const auto upload_end = Clock::now();
@@ -683,29 +717,44 @@ void RhiRenderer::render_frame()
         }
     }
 
-    // 3. Update dynamic uniform buffers
-    struct PerFrameUboData {
-        float scale_x;
-        float scale_y;
-        float pan_x;
-        float pan_y;
-        int compare_mode;
-        float wipe_pos;
-        int channel_mask;
-        int padding;
-    };
-
-    PerFrameUboData perFrame;
-    perFrame.scale_x = _active_render_params.scale_x;
-    perFrame.scale_y = _active_render_params.scale_y;
-    perFrame.pan_x = _active_render_params.pan_x;
-    perFrame.pan_y = _active_render_params.pan_y;
-    perFrame.compare_mode = _active_render_params.compare_mode;
-    perFrame.wipe_pos = _active_render_params.wipe_pos;
-    perFrame.channel_mask = _active_render_params.channel_mask;
-    perFrame.padding = 0;
-
-    batch->updateDynamicBuffer(_perFrameUbo, 0, sizeof(perFrame), &perFrame);
+    // 3. Update dynamic uniform buffers (packed before beginPass)
+    const bool tile_compare = (_active_render_params.compare_mode == 3);
+    if (tile_compare) {
+        const int slot_count = std::max(1, static_cast<int>(_active_render_params.tiles.size()));
+        ensure_per_frame_ubo(slot_count);
+        const quint32 stride = per_frame_ubo_stride();
+        std::vector<char> uboBlob(static_cast<size_t>(slot_count) * stride, 0);
+        for (int i = 0; i < static_cast<int>(_active_render_params.tiles.size()); ++i) {
+            const auto& tile = _active_render_params.tiles[i];
+            PerFrameUboData tileFrame;
+            tileFrame.scale_x = tile.scale_x;
+            tileFrame.scale_y = tile.scale_y;
+            tileFrame.pan_x = tile.offset_x;
+            tileFrame.pan_y = tile.offset_y;
+            tileFrame.compare_mode = 0;
+            tileFrame.wipe_pos = 0.5f;
+            tileFrame.channel_mask = _active_render_params.channel_mask;
+            tileFrame.padding = 0;
+            std::memcpy(uboBlob.data() + static_cast<size_t>(i) * stride, &tileFrame, sizeof(tileFrame));
+        }
+        if (_perFrameUbo) {
+            batch->updateDynamicBuffer(_perFrameUbo, 0, uboBlob.size(), uboBlob.data());
+        }
+    } else {
+        ensure_per_frame_ubo(1);
+        PerFrameUboData perFrame;
+        perFrame.scale_x = _active_render_params.scale_x;
+        perFrame.scale_y = _active_render_params.scale_y;
+        perFrame.pan_x = _active_render_params.pan_x;
+        perFrame.pan_y = _active_render_params.pan_y;
+        perFrame.compare_mode = _active_render_params.compare_mode;
+        perFrame.wipe_pos = _active_render_params.wipe_pos;
+        perFrame.channel_mask = _active_render_params.channel_mask;
+        perFrame.padding = 0;
+        if (_perFrameUbo) {
+            batch->updateDynamicBuffer(_perFrameUbo, 0, sizeof(perFrame), &perFrame);
+        }
+    }
 
     if (_ocioUbo && _ocioUboLayout.size > 0) {
         std::vector<char> ocioData = pack_ocio_ubo();
@@ -721,14 +770,16 @@ void RhiRenderer::render_frame()
     QRhiRenderTarget* rt = _swapChain->currentFrameRenderTarget();
     QColor clearColor(0, 0, 0, 1);
 
-    if (_active_render_params.compare_mode == 3) {
-        // Tile Layout Compare Mode: Multiple Draw passes
+    if (tile_compare) {
+        // Tile Layout Compare Mode: Multiple Draw passes, shared pipeline + per-tile SRBs
         cb->beginPass(rt, clearColor, {1.0f, 0}, batch);
         
         QSize outputSize = rt->pixelSize();
         cb->setViewport(QRhiViewport(0, 0, outputSize.width(), outputSize.height()));
 
-        for (const auto& tile : _active_render_params.tiles) {
+        const quint32 stride = per_frame_ubo_stride();
+        for (int i = 0; i < static_cast<int>(_active_render_params.tiles.size()); ++i) {
+            const auto& tile = _active_render_params.tiles[i];
             if (tile.source_index < 0 || tile.source_index >= static_cast<int>(_texturePool.size())) {
                 continue;
             }
@@ -737,30 +788,18 @@ void RhiRenderer::render_frame()
                 continue;
             }
 
-            // Temporarily swap TexA to point to this source texture for this draw call
-            _texAState.texture = texState.texture;
-            build_pipeline(_swapChain->renderPassDescriptor(), true);
-
-            PerFrameUboData tileFrame;
-            tileFrame.scale_x = tile.scale_x;
-            tileFrame.scale_y = tile.scale_y;
-            tileFrame.pan_x = tile.offset_x;
-            tileFrame.pan_y = tile.offset_y;
-            tileFrame.compare_mode = 0;
-            tileFrame.wipe_pos = 0.5f;
-            tileFrame.channel_mask = _active_render_params.channel_mask;
-            tileFrame.padding = 0;
-
-            QRhiResourceUpdateBatch* tileBatch = _rhi->nextResourceUpdateBatch();
-            tileBatch->updateDynamicBuffer(_perFrameUbo, 0, sizeof(tileFrame), &tileFrame);
+            QRhiShaderResourceBindings* tileSrb = get_or_create_tile_srb(texState.texture);
+            if (!_pipeline || !tileSrb) {
+                continue;
+            }
 
             cb->setGraphicsPipeline(_pipeline);
-            cb->setShaderResources();
+            QRhiCommandBuffer::DynamicOffset dynOffset{0, static_cast<quint32>(i) * stride};
+            cb->setShaderResources(tileSrb, 1, &dynOffset);
             
             QRhiCommandBuffer::VertexInput vInput(_vertexBuffer, 0);
             cb->setVertexInput(0, 1, &vInput);
             
-            cb->resourceUpdate(tileBatch);
             cb->draw(4);
         }
         cb->endPass();
@@ -771,7 +810,8 @@ void RhiRenderer::render_frame()
             QSize outputSize = rt->pixelSize();
             cb->setViewport(QRhiViewport(0, 0, outputSize.width(), outputSize.height()));
             cb->setGraphicsPipeline(_pipeline);
-            cb->setShaderResources();
+            QRhiCommandBuffer::DynamicOffset dynOffset{0, 0};
+            cb->setShaderResources(_srb, 1, &dynOffset);
             
             QRhiCommandBuffer::VertexInput vInput(_vertexBuffer, 0);
             cb->setVertexInput(0, 1, &vInput);
@@ -816,10 +856,7 @@ void RhiRenderer::update_rhi_resources(QRhiResourceUpdateBatch* batch)
         }
     }
 
-    if (!_perFrameUbo) {
-        _perFrameUbo = _rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(float) * 8);
-        _perFrameUbo->create();
-    }
+    ensure_per_frame_ubo(1);
 
     if (!_sampler) {
         _sampler = _rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge);
@@ -831,19 +868,182 @@ void RhiRenderer::update_rhi_resources(QRhiResourceUpdateBatch* batch)
         _lutSampler->create();
     }
 
-    if (!_texBState.texture) {
-        _texBState.texture = _rhi->newTexture(QRhiTexture::RGBA16F, QSize(1, 1));
-        _texBState.texture->create();
-        
+    if (!_placeholderTex2D) {
+        _placeholderTex2D = _rhi->newTexture(QRhiTexture::RGBA16F, QSize(1, 1));
+        _placeholderTex2D->create();
         if (batch) {
-            std::vector<uint16_t> black(4, 0);
-            QByteArray arr(reinterpret_cast<const char*>(black.data()), static_cast<int>(black.size() * sizeof(uint16_t)));
+            static const uint16_t kBlackRgba16F[4] = {0, 0, 0, 0};
+            QByteArray arr = QByteArray::fromRawData(
+                reinterpret_cast<const char*>(kBlackRgba16F),
+                static_cast<int>(sizeof(kBlackRgba16F)));
             batch->uploadTexture(
-                _texBState.texture,
+                _placeholderTex2D,
                 QRhiTextureUploadDescription(
                     QRhiTextureUploadEntry(0, 0, QRhiTextureSubresourceUploadDescription(arr))));
         }
     }
+
+    if (!_placeholderLut3D) {
+        _placeholderLut3D = _rhi->newTexture(QRhiTexture::RGBA32F, 1, 1, 1);
+        _placeholderLut3D->create();
+        if (batch) {
+            static const float kBlackRgba32F[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            QByteArray arr = QByteArray::fromRawData(
+                reinterpret_cast<const char*>(kBlackRgba32F),
+                static_cast<int>(sizeof(kBlackRgba32F)));
+            batch->uploadTexture(
+                _placeholderLut3D,
+                QRhiTextureUploadDescription(
+                    QRhiTextureUploadEntry(0, 0, QRhiTextureSubresourceUploadDescription(arr))));
+        }
+    }
+
+    if (!_texAState.texture) {
+        _texAState.texture = _placeholderTex2D;
+    }
+    if (!_texBState.texture) {
+        _texBState.texture = _placeholderTex2D;
+    }
+}
+
+std::vector<QRhiShaderResourceBinding> RhiRenderer::build_srb_bindings(
+    QRhiTexture* tex_a,
+    QRhiTexture* tex_b) const
+{
+    std::vector<QRhiShaderResourceBinding> bindings;
+    if (!_perFrameUbo) {
+        return bindings;
+    }
+
+    bindings.push_back(QRhiShaderResourceBinding::uniformBufferWithDynamicOffset(
+        0,
+        QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage,
+        _perFrameUbo,
+        static_cast<quint32>(sizeof(PerFrameUboData))));
+
+    QRhiTexture* a = tex_a ? tex_a : _placeholderTex2D;
+    QRhiTexture* b = tex_b ? tex_b : _placeholderTex2D;
+    if (a && _sampler) {
+        bindings.push_back(QRhiShaderResourceBinding::sampledTexture(
+            1, QRhiShaderResourceBinding::FragmentStage, a, _sampler));
+    }
+    if (b && _sampler) {
+        bindings.push_back(QRhiShaderResourceBinding::sampledTexture(
+            2, QRhiShaderResourceBinding::FragmentStage, b, _sampler));
+    }
+
+    for (int i = 0; i < _pipeline_lut_count; ++i) {
+        QRhiTexture* lutTex = _placeholderLut3D;
+        if (i < static_cast<int>(_active_ocio_luts.size()) && _active_ocio_luts[i].texture) {
+            lutTex = _active_ocio_luts[i].texture;
+        }
+        if (lutTex && _lutSampler) {
+            bindings.push_back(QRhiShaderResourceBinding::sampledTexture(
+                3 + i, QRhiShaderResourceBinding::FragmentStage, lutTex, _lutSampler));
+        }
+    }
+
+    if (_ocioUbo && _ocioUboLayout.binding >= 0) {
+        bindings.push_back(QRhiShaderResourceBinding::uniformBuffer(
+            _ocioUboLayout.binding,
+            QRhiShaderResourceBinding::FragmentStage,
+            _ocioUbo));
+    }
+
+    return bindings;
+}
+
+void RhiRenderer::clear_tile_srb_cache()
+{
+    for (auto& pair : _tileSrbCache) {
+        if (pair.second) {
+            pair.second->destroy();
+            delete pair.second;
+        }
+    }
+    _tileSrbCache.clear();
+}
+
+QRhiShaderResourceBindings* RhiRenderer::get_or_create_tile_srb(QRhiTexture* tex_a)
+{
+    if (!_rhi || !tex_a) {
+        return nullptr;
+    }
+
+    auto it = _tileSrbCache.find(tex_a);
+    if (it != _tileSrbCache.end() && it->second) {
+        return it->second;
+    }
+
+    auto bindings = build_srb_bindings(tex_a, _texBState.texture);
+    QRhiShaderResourceBindings* srb = _rhi->newShaderResourceBindings();
+    srb->setBindings(bindings.begin(), bindings.end());
+    if (!srb->create()) {
+        delete srb;
+        return nullptr;
+    }
+    _tileSrbCache[tex_a] = srb;
+    return srb;
+}
+
+quint32 RhiRenderer::per_frame_ubo_stride() const
+{
+    const quint32 size = static_cast<quint32>(sizeof(PerFrameUboData));
+    if (!_rhi) {
+        return size;
+    }
+    const quint32 align = static_cast<quint32>(_rhi->ubufAlignment());
+    if (align <= 1) {
+        return size;
+    }
+    return (size + align - 1u) / align * align;
+}
+
+void RhiRenderer::ensure_per_frame_ubo(int slot_count)
+{
+    if (!_rhi || slot_count <= 0) {
+        return;
+    }
+    if (_perFrameUbo && _perFrameUboSlots >= slot_count) {
+        return;
+    }
+
+    const bool had_ubo = (_perFrameUbo != nullptr);
+    if (_perFrameUbo) {
+        _perFrameUbo->destroy();
+        delete _perFrameUbo;
+        _perFrameUbo = nullptr;
+    }
+
+    const quint32 stride = per_frame_ubo_stride();
+    _perFrameUbo = _rhi->newBuffer(
+        QRhiBuffer::Dynamic,
+        QRhiBuffer::UniformBuffer,
+        static_cast<quint32>(slot_count) * stride);
+    _perFrameUbo->create();
+    _perFrameUboSlots = slot_count;
+
+    // SRB holds the buffer pointer — force a full rebuild when replacing.
+    if (had_ubo && _swapChain) {
+        build_pipeline(_swapChain->renderPassDescriptor(), true);
+    }
+}
+
+void RhiRenderer::update_srb_resources()
+{
+    if (!_srb) {
+        if (_swapChain) {
+            build_pipeline(_swapChain->renderPassDescriptor());
+        }
+        return;
+    }
+
+    auto bindings = build_srb_bindings(_texAState.texture, _texBState.texture);
+    _srb->setBindings(bindings.begin(), bindings.end());
+    _srb->updateResources();
+    _debug_stats.srb_updates++;
+    _last_bound_tex_a = _texAState.texture;
+    _last_bound_tex_b = _texBState.texture;
 }
 
 void RhiRenderer::build_pipeline(QRhiRenderPassDescriptor* rpDesc, bool force_rebuild)
@@ -866,29 +1066,11 @@ void RhiRenderer::build_pipeline(QRhiRenderPassDescriptor* rpDesc, bool force_re
         delete _srb;
         _srb = nullptr;
     }
+    clear_tile_srb_cache();
 
-    std::vector<QRhiShaderResourceBinding> bindings;
-    bindings.push_back(QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, _perFrameUbo));
-    
-    if (_texAState.texture) {
-        bindings.push_back(QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, _texAState.texture, _sampler));
-    }
-    
-    if (_texBState.texture) {
-        bindings.push_back(QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage, _texBState.texture, _sampler));
-    }
+    _pipeline_lut_count = std::max(_pipeline_lut_count, static_cast<int>(_active_ocio_luts.size()));
 
-    int lutBinding = 3;
-    for (auto& lut : _active_ocio_luts) {
-        if (lut.texture) {
-            bindings.push_back(QRhiShaderResourceBinding::sampledTexture(lutBinding, QRhiShaderResourceBinding::FragmentStage, lut.texture, _lutSampler));
-            lutBinding++;
-        }
-    }
-
-    if (_ocioUbo && _ocioUboLayout.binding >= 0) {
-        bindings.push_back(QRhiShaderResourceBinding::uniformBuffer(_ocioUboLayout.binding, QRhiShaderResourceBinding::FragmentStage, _ocioUbo));
-    }
+    auto bindings = build_srb_bindings(_texAState.texture, _texBState.texture);
 
     _srb = _rhi->newShaderResourceBindings();
     _srb->setBindings(bindings.begin(), bindings.end());
@@ -914,6 +1096,10 @@ void RhiRenderer::build_pipeline(QRhiRenderPassDescriptor* rpDesc, bool force_re
     _pipeline->setTopology(QRhiGraphicsPipeline::Topology::TriangleStrip);
     _pipeline->setRenderPassDescriptor(rpDesc);
     _pipeline->create();
+
+    _debug_stats.pipeline_rebuilds++;
+    _last_bound_tex_a = _texAState.texture;
+    _last_bound_tex_b = _texBState.texture;
 }
 
 bool RhiRenderer::bake_shaders(const std::string& vert_src, const std::string& frag_src)
@@ -1101,6 +1287,52 @@ void RhiRenderer::destroy_upload_texture(void* texture)
     }
     tex->destroy();
     delete tex;
+}
+
+std::optional<size_t> RhiRenderer::acquire_staging_slot()
+{
+    if (_stagingRing.empty()) {
+        _debug_stats.staging_waits++;
+        return std::nullopt;
+    }
+
+    const size_t n = _stagingRing.size();
+    for (size_t attempt = 0; attempt < n; ++attempt) {
+        const size_t i = (_stagingRingIndex + attempt) % n;
+        if (_stagingGeneration[i] != 0 && _stagingGeneration[i] > _completed_upload_generation) {
+            continue;
+        }
+        _stagingRingIndex = (i + 1) % n;
+        _stagingGeneration[i] = _upload_generation;
+        return i;
+    }
+
+    _debug_stats.staging_waits++;
+    return std::nullopt;
+}
+
+QRhiTexture* RhiRenderer::acquire_frame_texture(int width, int height, int channels)
+{
+    if (!_rhi || width <= 0 || height <= 0) {
+        return nullptr;
+    }
+
+    const QRhiTexture::Format format = (channels == 1) ? QRhiTexture::R16F : QRhiTexture::RGBA16F;
+    if (_displayCache.enabled()) {
+        QRhiTexture* tex = _displayCache.acquire(width, height, format);
+        auto stats = _displayCache.stats();
+        _debug_stats.textures_created = stats.textures_created;
+        _debug_stats.textures_pooled_reuses = stats.textures_pooled_reuses;
+        return tex;
+    }
+
+    QRhiTexture* texture = _rhi->newTexture(format, QSize(width, height));
+    if (!texture || !texture->create()) {
+        delete texture;
+        return nullptr;
+    }
+    _debug_stats.textures_created++;
+    return texture;
 }
 
 void RhiRenderer::put_ready_upload_jobs()
@@ -1357,52 +1589,48 @@ void RhiRenderer::drain_upload_queue(QRhiResourceUpdateBatch* batch)
             continue;
         }
 
-        size_t staging_slot = _stagingRingIndex;
-        // Avoid reusing a staging slot still referenced by an in-flight generation.
-        if (_stagingGeneration[staging_slot] != 0
-            && _stagingGeneration[staging_slot] > _completed_upload_generation) {
-            // Slot still live; retry this job next frame.
+        auto staging_slot = acquire_staging_slot();
+        if (!staging_slot) {
+            // All staging slots in flight; retry remaining jobs next frame.
             break;
         }
 
         QRhiTexture::Format texFormat = (channels == 1) ? QRhiTexture::R16F : QRhiTexture::RGBA16F;
-        QRhiTexture* texture = _rhi->newTexture(texFormat, QSize(w, h));
-        if (!texture || !texture->create()) {
-            delete texture;
+        QRhiTexture* texture = acquire_frame_texture(w, h, channels);
+        if (!texture) {
             std::lock_guard<std::mutex> lock(_mutex);
             _uploadQueue.mark_failed(job);
             continue;
         }
 
-        StagingBuffer& ringBuf = _stagingRing[staging_slot];
+        StagingBuffer& ringBuf = _stagingRing[*staging_slot];
         const size_t reqElements = static_cast<size_t>(w) * static_cast<size_t>(h) * static_cast<size_t>(channels);
         if (ringBuf.data.size() < reqElements) {
             ringBuf.data.resize(reqElements);
         }
         if (!cpu_cache->copy_frame_data(job->decoder_frame, ringBuf.data.data(), reqElements)) {
-            destroy_upload_texture(texture);
+            _displayCache.release_to_pool(texture, w, h, texFormat);
             continue; // remain Queued
         }
 
-        QByteArray wrappedData(
+        const int byte_size = static_cast<int>(reqElements * sizeof(uint16_t));
+        QByteArray wrappedData = QByteArray::fromRawData(
             reinterpret_cast<const char*>(ringBuf.data.data()),
-            static_cast<int>(reqElements * sizeof(uint16_t)));
+            byte_size);
         QRhiTextureSubresourceUploadDescription subres(wrappedData);
         subres.setDataStride(w * channels * static_cast<int>(sizeof(uint16_t)));
         QRhiTextureUploadDescription desc(QRhiTextureUploadEntry(0, 0, subres));
         batch->uploadTexture(texture, desc);
 
-        _stagingRingIndex = (_stagingRingIndex + 1) % _stagingRing.size();
         job->width = w;
         job->height = h;
         job->channels = channels;
         job->texture = texture;
         {
             std::lock_guard<std::mutex> lock(_mutex);
-            _uploadQueue.mark_uploading(job, _upload_generation, staging_slot);
+            _uploadQueue.mark_uploading(job, _upload_generation, *staging_slot);
         }
-        _stagingGeneration[staging_slot] = _upload_generation;
-        _debug_stats.last_upload_bytes += static_cast<int>(reqElements * sizeof(uint16_t));
+        _debug_stats.last_upload_bytes += byte_size;
         _debug_stats.last_upload_count++;
     }
 }
@@ -1413,7 +1641,7 @@ bool RhiRenderer::resolve_display_texture(
     const FrameSlotSpec& spec,
     TextureState& bind_state,
     QRhiResourceUpdateBatch* batch,
-    bool& pipeline_dirty)
+    bool& bindings_dirty)
 {
     if (spec.width <= 0 || spec.height <= 0) {
         return false;
@@ -1423,7 +1651,7 @@ bool RhiRenderer::resolve_display_texture(
         QRhiTexture* previous = bind_state.texture;
         upload_texture(bind_state, spec, cpu_cache, batch);
         if (bind_state.texture != previous) {
-            pipeline_dirty = true;
+            bindings_dirty = true;
         }
         return bind_state.texture != nullptr;
     }
@@ -1437,7 +1665,7 @@ bool RhiRenderer::resolve_display_texture(
         cpu_cache);
     if (cached) {
         if (bind_state.texture != cached) {
-            pipeline_dirty = true;
+            bindings_dirty = true;
         }
         bind_state.texture = cached;
         bind_state.last_w = spec.width;
@@ -1457,7 +1685,7 @@ bool RhiRenderer::resolve_display_texture(
                 _uploadQueue.discard_queued(source_index, spec.frame_index);
             }
             if (bind_state.texture != tex) {
-                pipeline_dirty = true;
+                bindings_dirty = true;
             }
             bind_state.texture = tex;
             bind_state.last_w = spec.width;
@@ -1492,15 +1720,18 @@ QRhiTexture* RhiRenderer::upload_present_to_display_cache(
             source_index, spec.frame_index, spec.width, spec.height, spec.channels, cpu_cache);
     }
 
-    QRhiTexture::Format texFormat = (spec.channels == 1) ? QRhiTexture::R16F : QRhiTexture::RGBA16F;
-    QRhiTexture* texture = _rhi->newTexture(texFormat, QSize(spec.width, spec.height));
-    if (!texture || !texture->create()) {
-        delete texture;
+    auto staging_slot = acquire_staging_slot();
+    if (!staging_slot) {
         return nullptr;
     }
 
-    StagingBuffer& ringBuf = _stagingRing[_stagingRingIndex];
-    _stagingRingIndex = (_stagingRingIndex + 1) % _stagingRing.size();
+    QRhiTexture::Format texFormat = (spec.channels == 1) ? QRhiTexture::R16F : QRhiTexture::RGBA16F;
+    QRhiTexture* texture = acquire_frame_texture(spec.width, spec.height, spec.channels);
+    if (!texture) {
+        return nullptr;
+    }
+
+    StagingBuffer& ringBuf = _stagingRing[*staging_slot];
     size_t reqElements = static_cast<size_t>(spec.width) * static_cast<size_t>(spec.height)
         * static_cast<size_t>(spec.channels);
     if (spec.data_size > 0) {
@@ -1510,19 +1741,20 @@ QRhiTexture* RhiRenderer::upload_present_to_display_cache(
         ringBuf.data.resize(reqElements);
     }
     if (!cpu_cache->copy_frame_data(spec.frame_index, ringBuf.data.data(), reqElements)) {
-        destroy_upload_texture(texture);
+        _displayCache.release_to_pool(texture, spec.width, spec.height, texFormat);
         return nullptr;
     }
 
-    QByteArray wrappedData(
+    const int byte_size = static_cast<int>(reqElements * sizeof(uint16_t));
+    QByteArray wrappedData = QByteArray::fromRawData(
         reinterpret_cast<const char*>(ringBuf.data.data()),
-        static_cast<int>(reqElements * sizeof(uint16_t)));
+        byte_size);
     QRhiTextureSubresourceUploadDescription subres(wrappedData);
     subres.setDataStride(spec.width * spec.channels * static_cast<int>(sizeof(uint16_t)));
     QRhiTextureUploadDescription desc(QRhiTextureUploadEntry(0, 0, subres));
     batch->uploadTexture(texture, desc);
 
-    const size_t bytes = reqElements * sizeof(uint16_t);
+    const size_t bytes = static_cast<size_t>(byte_size);
     _displayCache.put(
         source_index,
         spec.frame_index,
@@ -1532,7 +1764,7 @@ QRhiTexture* RhiRenderer::upload_present_to_display_cache(
         texture,
         bytes);
 
-    _debug_stats.last_upload_bytes += static_cast<int>(bytes);
+    _debug_stats.last_upload_bytes += byte_size;
     _debug_stats.last_upload_count++;
     return texture;
 }
@@ -1544,10 +1776,11 @@ void RhiRenderer::upload_texture(TextureState& state, const FrameSlotSpec& spec,
     }
 
     QRhiTexture::Format texFormat = (spec.channels == 1) ? QRhiTexture::R16F : QRhiTexture::RGBA16F;
-    bool sizeChanged = !state.texture || state.last_w != spec.width || state.last_h != spec.height || state.last_channels != spec.channels;
+    bool sizeChanged = !state.texture || state.texture == _placeholderTex2D
+        || state.last_w != spec.width || state.last_h != spec.height || state.last_channels != spec.channels;
     
     if (sizeChanged) {
-        if (state.texture) {
+        if (state.texture && state.texture != _placeholderTex2D) {
             state.texture->destroy();
             delete state.texture;
         }
@@ -1556,16 +1789,20 @@ void RhiRenderer::upload_texture(TextureState& state, const FrameSlotSpec& spec,
         state.last_w = spec.width;
         state.last_h = spec.height;
         state.last_channels = spec.channels;
-        build_pipeline(_swapChain->renderPassDescriptor(), true);
+        _debug_stats.textures_created++;
+        // Do not rebuild pipeline here — bindings_dirty / update_srb_resources handles it.
     }
 
     if (state.last_upload_token == spec.upload_token && !sizeChanged) {
         return;
     }
 
-    // Dynamic sizing of the local ring buffer
-    StagingBuffer& ringBuf = _stagingRing[_stagingRingIndex];
-    _stagingRingIndex = (_stagingRingIndex + 1) % _stagingRing.size();
+    auto staging_slot = acquire_staging_slot();
+    if (!staging_slot) {
+        return;
+    }
+
+    StagingBuffer& ringBuf = _stagingRing[*staging_slot];
 
     size_t reqElements = spec.data_size;
     if (ringBuf.data.size() < reqElements) {
@@ -1580,7 +1817,10 @@ void RhiRenderer::upload_texture(TextureState& state, const FrameSlotSpec& spec,
         return;
     }
 
-    QByteArray wrappedData(reinterpret_cast<const char*>(ringBuf.data.data()), static_cast<int>(reqElements * sizeof(uint16_t)));
+    const int byte_size = static_cast<int>(reqElements * sizeof(uint16_t));
+    QByteArray wrappedData = QByteArray::fromRawData(
+        reinterpret_cast<const char*>(ringBuf.data.data()),
+        byte_size);
     QRhiTextureSubresourceUploadDescription subres(wrappedData);
     subres.setDataStride(spec.width * spec.channels * sizeof(uint16_t));
 
@@ -1588,7 +1828,7 @@ void RhiRenderer::upload_texture(TextureState& state, const FrameSlotSpec& spec,
     batch->uploadTexture(state.texture, desc);
 
     state.last_upload_token = spec.upload_token;
-    _debug_stats.last_upload_bytes += static_cast<int>(reqElements * sizeof(uint16_t));
+    _debug_stats.last_upload_bytes += byte_size;
     _debug_stats.last_upload_count++;
 }
 
@@ -1613,7 +1853,9 @@ void RhiRenderer::upload_texture_3d(OcioLut3D& lut, QRhiResourceUpdateBatch* bat
 
     for (int layer = 0; layer < lut.size; ++layer) {
         size_t sliceOffset = layer * lut.size * lut.size * 4;
-        QByteArray sliceData = QByteArray::fromRawData(reinterpret_cast<const char*>(lut.rgba_data.data() + sliceOffset), lut.size * lut.size * 4 * sizeof(float));
+        QByteArray sliceData = QByteArray::fromRawData(
+            reinterpret_cast<const char*>(lut.rgba_data.data() + sliceOffset),
+            lut.size * lut.size * 4 * sizeof(float));
         QRhiTextureSubresourceUploadDescription subres(sliceData);
         subres.setDataStride(rowStride);
         entries.push_back(QRhiTextureUploadEntry(layer, 0, subres));
@@ -1622,20 +1864,27 @@ void RhiRenderer::upload_texture_3d(OcioLut3D& lut, QRhiResourceUpdateBatch* bat
     QRhiTextureUploadDescription desc;
     desc.setEntries(entries.begin(), entries.end());
     batch->uploadTexture(lut.texture, desc);
-    
-    build_pipeline(_swapChain->renderPassDescriptor(), true);
+
+    const int needed = static_cast<int>(_active_ocio_luts.size());
+    if (needed > _pipeline_lut_count) {
+        _pipeline_lut_count = needed;
+        build_pipeline(_swapChain->renderPassDescriptor(), true);
+    } else {
+        update_srb_resources();
+    }
 }
 
 void RhiRenderer::_release_gpu_resources() {
     _uploadQueue.clear_with([this](void* tex) { destroy_upload_texture(tex); });
+    clear_tile_srb_cache();
     if (_displayCache.enabled()) {
         _displayCache.clear();
     } else {
-        if (_texAState.texture) {
+        if (_texAState.texture && _texAState.texture != _placeholderTex2D) {
             _texAState.texture->destroy();
             delete _texAState.texture;
         }
-        if (_texBState.texture) {
+        if (_texBState.texture && _texBState.texture != _placeholderTex2D) {
             _texBState.texture->destroy();
             delete _texBState.texture;
         }
@@ -1658,4 +1907,6 @@ void RhiRenderer::_release_gpu_resources() {
         }
     }
     _active_ocio_luts.clear();
+
+    // Placeholders are destroyed in shutdown_rhi_on_thread after this.
 }

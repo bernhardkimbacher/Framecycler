@@ -38,14 +38,37 @@ struct SourcePlayhead {
     int out_point = 0;
 };
 
+struct TexturePoolKey {
+    int width = 0;
+    int height = 0;
+    QRhiTexture::Format format = QRhiTexture::RGBA16F;
+
+    bool operator==(const TexturePoolKey& other) const {
+        return width == other.width && height == other.height && format == other.format;
+    }
+};
+
+struct TexturePoolKeyHash {
+    std::size_t operator()(const TexturePoolKey& key) const noexcept {
+        return (static_cast<std::size_t>(key.width) * 1315423911u)
+            ^ (static_cast<std::size_t>(key.height) * 2654435761u)
+            ^ static_cast<std::size_t>(key.format);
+    }
+};
+
 class GpuTextureCache {
 public:
+    static constexpr size_t kMaxPooledTextures = 8;
+
     struct Stats {
         int hits = 0;
         int misses = 0;
         int evictions = 0;
         size_t resident_bytes = 0;
         int resident_frames = 0;
+        int textures_created = 0;
+        int textures_pooled_reuses = 0;
+        int textures_pooled = 0;
     };
 
     GpuTextureCache() = default;
@@ -90,10 +113,17 @@ public:
     size_t resident_bytes() const { return _resident_bytes; }
     bool playhead_for_source(int source_index, SourcePlayhead& out) const;
 
+    /// Acquire a texture of the given size/format from the free-list, or create one.
+    QRhiTexture* acquire(int width, int height, QRhiTexture::Format format);
+    /// Return a texture to the free-list (or destroy if the pool is full / mismatched).
+    void release_to_pool(QRhiTexture* texture, int width, int height, QRhiTexture::Format format);
+    void clear_pool();
+
 private:
     void destroy_entry(GpuCacheEntry& entry);
     void erase_key(const GpuFrameKey& key);
     int playhead_distance(const GpuFrameKey& key, int source_index) const;
+    void destroy_texture(QRhiTexture* texture);
 
     QRhi* _rhi = nullptr;
     double _limit_gb = 0.0;
@@ -102,4 +132,6 @@ private:
     Stats _stats;
     std::unordered_map<GpuFrameKey, GpuCacheEntry, GpuFrameKeyHash> _entries;
     std::unordered_map<int, SourcePlayhead> _playheads;
+    std::unordered_map<TexturePoolKey, std::vector<QRhiTexture*>, TexturePoolKeyHash> _pool;
+    size_t _pooled_count = 0;
 };

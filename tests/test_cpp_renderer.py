@@ -53,6 +53,22 @@ class TestCppRenderer(unittest.TestCase):
         stats = renderer.get_upload_queue_stats()
         self.assertEqual(stats["pending"], 0)
 
+    def test_debug_stats_include_churn_counters(self):
+        """GPU churn counters from finding #2 must be exposed to Python."""
+        renderer = framecycler_engine.RhiRenderer()
+        stats = renderer.get_debug_stats()
+        for key in (
+            "pipeline_rebuilds",
+            "srb_updates",
+            "staging_waits",
+            "textures_created",
+            "textures_pooled_reuses",
+            "last_upload_ms",
+            "last_render_ms",
+        ):
+            self.assertIn(key, stats)
+            self.assertIsInstance(stats[key], (int, float))
+
 
 if __name__ == "__main__":
     unittest.main()
