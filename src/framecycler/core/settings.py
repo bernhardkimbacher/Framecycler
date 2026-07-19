@@ -34,6 +34,8 @@ class Settings:
         self.missing_frame_mode = "Nearest Frame"
         # Package id -> enabled override; absent means use manifest enabled_by_default
         self.package_enabled: dict[str, bool] = {}
+        # Per-package JSON settings keyed by package id
+        self.package_settings: dict[str, dict] = {}
         # Vertical main splitter: [viewer_area, timeline_pane]
         self.timeline_splitter_sizes: list[int] = [700, 96]
         # QMainWindow.saveState / saveGeometry as base64 (dock layout + window geom)
@@ -97,6 +99,14 @@ class Settings:
                     }
                 else:
                     self.package_enabled = {}
+                raw_pkg_settings = data.get("package_settings", self.package_settings)
+                if isinstance(raw_pkg_settings, dict):
+                    self.package_settings = {
+                        str(pid): dict(vals) if isinstance(vals, dict) else {}
+                        for pid, vals in raw_pkg_settings.items()
+                    }
+                else:
+                    self.package_settings = {}
                 raw_sizes = data.get("timeline_splitter_sizes", self.timeline_splitter_sizes)
                 if (
                     isinstance(raw_sizes, list)
@@ -127,6 +137,7 @@ class Settings:
                 "recent_files": self.recent_files,
                 "missing_frame_mode": self.missing_frame_mode,
                 "package_enabled": self.package_enabled,
+                "package_settings": self.package_settings,
                 "timeline_splitter_sizes": self.timeline_splitter_sizes,
                 "main_window_state": self.main_window_state,
                 "main_window_geometry": self.main_window_geometry,

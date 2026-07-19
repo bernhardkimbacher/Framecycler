@@ -3,9 +3,9 @@
 from PySide6.QtGui import QAction
 
 try:
-    from src.framecycler.packages.api import Package, PackageContext
-except ImportError:
     from framecycler.packages.api import Package, PackageContext
+except ImportError:
+    from src.framecycler.packages.api import Package, PackageContext
 
 
 class ExampleApplyCdlPackage(Package):

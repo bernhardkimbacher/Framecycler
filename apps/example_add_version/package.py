@@ -11,9 +11,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter
 
 try:
-    from src.framecycler.packages.api import Package, PackageContext
-except ImportError:
     from framecycler.packages.api import Package, PackageContext
+except ImportError:
+    from src.framecycler.packages.api import Package, PackageContext
 
 
 def _write_example_exr(path: Path, width: int = 1280, height: int = 720) -> None:

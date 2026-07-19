@@ -50,6 +50,7 @@ from .widgets import WideComboBox, add_menu_section
 from .fonts import ui_font
 from .source_list_panel import SourceListPanel
 from .panel_host import PanelHost
+from .keybind_registry import KeybindRegistry
 from .drag_drop_overlay import DragDropOverlay
 
 PRESET_FRAME_RATES = [
@@ -147,13 +148,12 @@ class MainWindow(QMainWindow):
         
         self.package_manager = PackageManager(self, config_dir=self.settings.config_dir)
         self.panel_host = PanelHost()
+        self.keybind_registry = KeybindRegistry(self)
         self.source_panel: SourceListPanel | None = None
+        self.session.media_pool.set_decoder_resolver(self.package_manager.resolve_decoder)
 
-        # Build UI layout
+        # Build UI layout (hotkeys reserved before packages register keybinds)
         self._init_ui()
-        
-        # Apply hotkeys
-        self._setup_hotkeys()
         
         # Cross-thread bridge: CacheEngine worker threads emit through this signal
         # so Qt can safely queue the update onto the GUI thread.
@@ -245,6 +245,10 @@ class MainWindow(QMainWindow):
 
         # Viewport stays central; Shots and package panels dock via PanelHost.
         viewer_layout.addWidget(self.viewport_panel, stretch=1)
+        self.viewport_panel._hud_overlay.set_package_hud_hooks(
+            lambda: self.package_manager.hud_painter_specs,
+            lambda: int(self.current_frame),
+        )
 
         self.panel_host.register_builtin(
             "shots",
@@ -337,6 +341,7 @@ class MainWindow(QMainWindow):
 
         self.timeline.set_display_options(self.settings.timecode_mode, self.fps)
         self._update_readout_display()
+        self._setup_hotkeys()
         self._build_menu()
         self.statusBar().showMessage("Ready.")
 
@@ -376,10 +381,12 @@ class MainWindow(QMainWindow):
         # View menu
         view_menu = menubar.addMenu("&View")
         self.view_menu = view_menu
-        act_hud = QAction("Toggle HUD", self)
-        act_hud.setShortcut(QKeySequence("Ctrl+H"))
-        act_hud.triggered.connect(self.viewport.toggle_hud)
-        view_menu.addAction(act_hud)
+        self.act_hud = QAction("Toggle HUD", self)
+        self.act_hud.setCheckable(True)
+        self.act_hud.setChecked(bool(self.viewport.hud_visible))
+        self.act_hud.setShortcut(QKeySequence("Ctrl+H"))
+        self.act_hud.toggled.connect(self._on_hud_toggled)
+        view_menu.addAction(self.act_hud)
 
         view_menu.addSeparator()
         self._panels_menu = view_menu.addMenu("Panels")
@@ -506,6 +513,8 @@ class MainWindow(QMainWindow):
             self, self.view_menu, self.settings, panels_menu=self._panels_menu
         )
         self.source_panel = self.panel_host.widget("builtin.shots")
+        for spec in self.package_manager.keybind_specs:
+            self.keybind_registry.register_package_keybind(spec)
         self._rebuild_plugins_menu()
 
         # Tools menu (grading and compare)
@@ -606,6 +615,14 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, name=d: self._set_display_output(name))
             self.display_output_menu.addAction(act)
 
+        self.ocio_menu.addSeparator()
+        act_reload_ocio = QAction("Reload OCIO Config", self)
+        act_reload_ocio.setToolTip(
+            "Re-read the OCIO config from disk (env / settings / bundled) and rebuild shaders."
+        )
+        act_reload_ocio.triggered.connect(self._reload_ocio_config)
+        self.ocio_menu.addAction(act_reload_ocio)
+
         self._populate_look_combo()
 
     def _setup_hotkeys(self):
@@ -643,12 +660,48 @@ class MainWindow(QMainWindow):
             context=Qt.ShortcutContext.ApplicationShortcut,
         )
 
+        # Reserve built-in and common menu shortcuts so packages cannot steal them.
+        self.keybind_registry.reserve_many(
+            [
+                "Left",
+                "Right",
+                "Shift+Left",
+                "Shift+Right",
+                "[",
+                "]",
+                "Space",
+                "T",
+                "R",
+                "G",
+                "B",
+                "A",
+                "Ctrl+Left",
+                "Ctrl+Right",
+                "Ctrl+H",
+                "E",
+                "Y",
+                "O",
+                "Home",
+                "F",
+                "1",
+                "2",
+                "3",
+                "4",
+                "Shift+X",
+            ]
+        )
+
     def _add_shortcut(self, key_str: str, callback, context=Qt.ShortcutContext.WindowShortcut):
         action = QAction(self)
         action.setShortcut(QKeySequence(key_str))
         action.setShortcutContext(context)
         action.triggered.connect(callback)
         self.addAction(action)
+        self.keybind_registry.reserve(key_str)
+
+    def _request_package_hud_repaint(self) -> None:
+        if hasattr(self, "viewport_panel"):
+            self.viewport_panel._hud_overlay.update()
 
     def _make_transport_button(self, label: str, font: QFont) -> QPushButton:
         btn = QPushButton(label)
@@ -699,6 +752,10 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self.look_combo.setCurrentIndex(idx)
         self.look_combo.blockSignals(False)
+
+    def _on_hud_toggled(self, visible: bool) -> None:
+        self.viewport.hud_visible = bool(visible)
+        self.viewport.update()
 
     def _on_shots_panel_created(self, panel: QWidget) -> None:
         if not isinstance(panel, SourceListPanel):
@@ -1295,8 +1352,9 @@ class MainWindow(QMainWindow):
             self._update_readout_display()
             if hasattr(self, "package_manager"):
                 self.package_manager.emit_frame_changed(
-                    frame, self.viewport.current_timecode
+                    frame, self.viewport.current_timecode, coalesce=True
                 )
+            self._request_package_hud_repaint()
             return
 
         self._apply_cached_frames(frame)
@@ -1307,6 +1365,7 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "package_manager"):
             self.package_manager.emit_frame_changed(frame, self.viewport.current_timecode)
+        self._request_package_hud_repaint()
 
     def _seek_heavy(self, frame: int, segment, shot_key: tuple) -> None:
         """Shot/version change path: cache re-register, CDL/CS, labels."""
@@ -1894,7 +1953,23 @@ class MainWindow(QMainWindow):
             self._populate_look_combo()
             self._build_ocio_submenu()
             self._update_ocio_info_label()
-        
+
+    def _reload_ocio_config(self):
+        """Re-read OCIO config from disk; in-memory config is not watched for edits."""
+        path = self.ocio_manager.reload_config(self.settings.ocio_config_path)
+        # Force a full GPU rebuild even if the look/display names are unchanged
+        # (pipeline_key includes config mtime; clear viewport early-out state).
+        self.viewport._last_ocio_pipeline_key = None
+        self.viewport._ocio_pipeline_ready = False
+        self.viewport.update_ocio_pipeline()
+        self._populate_look_combo()
+        self._build_ocio_submenu()
+        self._update_ocio_info_label()
+        if path:
+            self.statusBar().showMessage(f"Reloaded OCIO config: {path}", 5000)
+        else:
+            self.statusBar().showMessage("Failed to reload OCIO config", 5000)
+
     def _update_ocio_info_label(self):
         if hasattr(self, "lbl_ocio_info") and self.lbl_ocio_info:
             info = f"IN: {self.ocio_manager.input_colorspace} | OUT: {self.ocio_manager.display_output}"
@@ -1997,9 +2072,10 @@ class MainWindow(QMainWindow):
         self._sync_upload_queue_policy()
 
     def _open_settings_dialog(self):
-        dialog = SettingsDialog(self.settings, self)
+        dialog = SettingsDialog(self.settings, self, package_manager=self.package_manager)
         old_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
         old_timing = normalize_playback_timing(self.settings.playback_timing)
+        old_package_enabled = dict(self.settings.package_enabled)
         if dialog.exec():
             # Apply changes
             self.settings.save()
@@ -2024,6 +2100,9 @@ class MainWindow(QMainWindow):
             self._build_ocio_submenu()
             if old_mode != new_mode:
                 self.seek_to_frame(self.current_frame)
+            if self.settings.package_enabled != old_package_enabled:
+                self.package_manager.reload_enabled()
+            self._request_package_hud_repaint()
 
     def _update_ui_states(self):
         self._populate_look_combo()
@@ -2054,5 +2133,13 @@ class MainWindow(QMainWindow):
         self.settings.save()
         self._transport_poll_timer.stop()
         self._close_all_sources()
+        # Floating HUD is a Tool window; detach before tearing down the Metal surface.
+        panel = getattr(self, "viewport_panel", None)
+        if panel is not None:
+            self.removeEventFilter(panel)
+            hud = getattr(panel, "_hud_overlay", None)
+            if hud is not None:
+                hud.hide()
+                hud.setParent(None)
         self.viewport.cleanup()
         event.accept()

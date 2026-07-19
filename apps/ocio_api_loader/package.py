@@ -4,9 +4,9 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 try:
-    from src.framecycler.packages.api import Package, PackageContext
-except ImportError:
     from framecycler.packages.api import Package, PackageContext
+except ImportError:
+    from src.framecycler.packages.api import Package, PackageContext
 
 
 class OcioApiLoaderPackage(Package):

@@ -1,6 +1,6 @@
 id = "framecycler.example_session_panel"
 name = "Example Session Panel"
-version = "0.1.0"
-description = "Dockable panel that shows the last SESSION_CHANGED event (register_panel demo)."
+version = "0.2.0"
+description = "Demo package: dock panel, coalesced FRAME_CHANGED, Ctrl+Shift+S keybind, HUD badge, settings, and .fcpanel decoder."
 entry = "package:ExampleSessionPanelPackage"
 enabled_by_default = false

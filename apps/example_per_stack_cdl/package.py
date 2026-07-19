@@ -7,11 +7,11 @@ import os
 from PySide6.QtGui import QAction
 
 try:
-    from src.framecycler.core import otio_model
-    from src.framecycler.packages.api import Package, PackageContext
-except ImportError:
     from framecycler.core import otio_model
     from framecycler.packages.api import Package, PackageContext
+except ImportError:
+    from src.framecycler.core import otio_model
+    from src.framecycler.packages.api import Package, PackageContext
 
 # Alternating per-stack tints (slope RGB). Easy to see when scrubbing shots.
 _STACK_TINTS = (

@@ -96,39 +96,78 @@ class ViewportFrameSlot:
 
 
 class ViewportHudOverlay(QWidget):
-    """Transparent overlay sibling for HUD compositing.
+    """Transparent HUD compositing layer above the native QRhi surface.
 
-    Must not be a child of QWindow container — that combination segfaults on macOS.
-    Parent should be ViewportContainer.
-
-    Uses WA_TransparentForMouseEvents so viewport mouse interactions reach the
-    embedded render surface. File drag-and-drop over the native render surface
-    is handled via an event filter on RhiViewportWindow (QWindow) plus a
-    floating drag overlay window (this widget must stay mouse-transparent).
+    Must not be a child of the QWindow container — that combination segfaults on
+    macOS. Must also not be a sibling QWidget under the same parent as
+    ``createWindowContainer``: on Metal/D3D the native surface stacks above
+    Qt siblings, so the HUD would paint once then vanish after the first
+    real frames. Use a floating Tool window parented to the main window
+    (same pattern as DragDropOverlay, without WindowStaysOnTopHint).
     """
 
-    def __init__(self, viewport: "Viewport", parent: QWidget):
-        super().__init__(parent)
+    def __init__(self, viewport: "Viewport", parent: QWidget, *, floating: bool = False):
+        if floating:
+            super().__init__(
+                parent,
+                Qt.WindowType.Tool
+                | Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowDoesNotAcceptFocus,
+            )
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setAttribute(Qt.WA_ShowWithoutActivating)
+            self.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
+        else:
+            super().__init__(parent)
+            self.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self.setAttribute(Qt.WA_NoSystemBackground)
+            self.setAttribute(Qt.WA_TranslucentBackground)
         self._viewport = viewport
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WA_NoSystemBackground)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self._package_painters_provider = None
+        self._frame_provider = None
+        self._floating = floating
+
+    def set_package_hud_hooks(self, painters_provider, frame_provider) -> None:
+        """Optional hooks: painters_provider() -> list[HudPainterSpec], frame_provider() -> int."""
+        self._package_painters_provider = painters_provider
+        self._frame_provider = frame_provider
 
     def paintEvent(self, event):
         viewport = self._viewport
+        painter = QPainter(self)
+        if self._floating:
+            # Translucent top-level windows retain prior pixels unless cleared.
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
         if not viewport.hud_visible and not viewport.adjustment_mode:
+            painter.end()
             return
 
-        painter = QPainter(self)
         if viewport.hud_visible:
             viewport._draw_hud(painter)
+            if self._package_painters_provider is not None:
+                frame = 0
+                if self._frame_provider is not None:
+                    try:
+                        frame = int(self._frame_provider())
+                    except Exception:
+                        frame = 0
+                rect = self.rect()
+                for spec in self._package_painters_provider():
+                    try:
+                        spec.paint(painter, rect, frame)
+                    except Exception:
+                        pass
         if viewport.adjustment_mode:
             viewport._draw_adjustment_overlay(painter)
         painter.end()
 
 
 class ViewportContainer(QWidget):
-    """Hosts the QRhi viewport and transparent HUD overlay; drag overlay is a floating window."""
+    """Hosts the QRhi viewport; HUD and drag overlays are floating windows."""
 
     def __init__(self, ocio_manager: OCIOManager, main_window=None, parent=None):
         super().__init__(parent)
@@ -137,9 +176,14 @@ class ViewportContainer(QWidget):
         self._drag_drop_zone = DragDropOverlay.ZONE_SEQUENCE
         self.setAcceptDrops(True)
         self.viewport = Viewport(ocio_manager, main_window, self)
-        self._hud_overlay = ViewportHudOverlay(self.viewport, self)
+        # Parent HUD to the main window so it stacks above the Metal/D3D surface.
+        hud_parent = main_window if main_window is not None else self
+        self._hud_overlay = ViewportHudOverlay(
+            self.viewport,
+            hud_parent,
+            floating=main_window is not None,
+        )
         self._drag_overlay = DragDropOverlay(main_window, main_window=main_window, floating=True)
-        self._hud_overlay.raise_()
         self._sync_geometry()
 
         viewport_update = self.viewport.update
@@ -150,11 +194,37 @@ class ViewportContainer(QWidget):
 
         self.viewport.update = update_viewport
 
+        if main_window is not None:
+            main_window.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        main = getattr(self, "_main_window", None)
+        if (
+            main is not None
+            and obj is main
+            and hasattr(self, "_hud_overlay")
+            and event.type()
+            in (
+                QEvent.Type.Move,
+                QEvent.Type.Resize,
+                QEvent.Type.WindowStateChange,
+            )
+        ):
+            self._position_hud_overlay()
+        return super().eventFilter(obj, event)
+
     def _sync_geometry(self):
         rect = self.rect()
         self.viewport.setGeometry(rect)
-        self._hud_overlay.setGeometry(rect)
+        self._position_hud_overlay()
         self._position_drag_overlay()
+
+    def _position_hud_overlay(self):
+        if self._hud_overlay._floating:
+            top_left = self.mapToGlobal(QPoint(0, 0))
+            self._hud_overlay.setGeometry(QRect(top_left, self.size()))
+        else:
+            self._hud_overlay.setGeometry(self.rect())
 
     def _position_drag_overlay(self):
         if self._main_window is None:
@@ -228,6 +298,18 @@ class ViewportContainer(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._sync_geometry()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._position_hud_overlay()
+        if self._hud_overlay._floating:
+            self._hud_overlay.show()
+            self._hud_overlay.raise_()
+
+    def hideEvent(self, event):
+        if self._hud_overlay._floating:
+            self._hud_overlay.hide()
+        super().hideEvent(event)
 
     def update(self, *args, **kwargs):
         super().update(*args, **kwargs)
@@ -304,7 +386,8 @@ class Viewport(QWidget):
         self._ocio_pipeline_ready = False
 
     def eventFilter(self, obj, event):
-        if obj is self.viewport_window:
+        viewport_window = getattr(self, "viewport_window", None)
+        if viewport_window is not None and obj is viewport_window:
             et = event.type()
             if et in (QEvent.DragEnter, QEvent.DragMove, QEvent.DragLeave, QEvent.Drop):
                 return self._handle_viewport_drag(et, event)
@@ -419,7 +502,18 @@ class Viewport(QWidget):
         self.update()
 
     def toggle_hud(self):
+        """Flip HUD visibility; keep View menu checkmark in sync when present."""
         self.hud_visible = not self.hud_visible
+        mw = self.main_window
+        act = getattr(mw, "act_hud", None) if mw is not None else None
+        if act is not None and act.isChecked() != self.hud_visible:
+            act.blockSignals(True)
+            act.setChecked(self.hud_visible)
+            act.blockSignals(False)
+        self.update()
+
+    def set_hud_visible(self, visible: bool) -> None:
+        self.hud_visible = bool(visible)
         self.update()
 
     def _primary_slot(self) -> ViewportFrameSlot | None:
@@ -691,6 +785,29 @@ class Viewport(QWidget):
     def _draw_hud(self, painter: QPainter):
         painter.setRenderHint(QPainter.Antialiasing)
         metrics_rect = self.rect()
+
+        # Always-visible frame readout so Toggle HUD is obvious outside wipe mode.
+        mw = self.main_window
+        frame = int(getattr(mw, "current_frame", self.current_frame) if mw is not None else self.current_frame)
+        tc = self.current_timecode or "—"
+        label = f"FR {frame}   TC {tc}"
+        if self.resolution_str and self.resolution_str != "0x0":
+            label = f"{label}   {self.resolution_str}"
+
+        font = mono_font(11, QFont.Weight.Bold)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        pad_x, pad_y = 8, 5
+        text_w = fm.horizontalAdvance(label)
+        text_h = fm.height()
+        box = QRect(8, 8, text_w + pad_x * 2, text_h + pad_y * 2)
+        painter.fillRect(box, QColor(0, 0, 0, 160))
+        painter.setPen(QPen(QColor(0, 255, 120)))
+        painter.drawText(
+            box.adjusted(pad_x, pad_y, -pad_x, -pad_y),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            label,
+        )
 
         if self.compare_mode == COMPARE_WIPE:
             wipe_x = int(self.wipe_pos * metrics_rect.width())

@@ -14,6 +14,9 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QScrollArea,
     QFrame,
+    QGroupBox,
+    QSpinBox,
+    QDoubleSpinBox,
 )
 from PySide6.QtCore import Qt
 
@@ -35,15 +38,17 @@ from ..packages.paths import ensure_user_packages_dir, package_search_roots
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: Settings, parent=None):
+    def __init__(self, settings: Settings, parent=None, package_manager=None):
         super().__init__(parent)
         self.settings = settings
+        self.package_manager = package_manager
         self.limits = get_platform_cache_limits()
         self._coupling = False
         self._package_checks: dict[str, QCheckBox] = {}
         self._package_manifests = []
+        self._setting_widgets: dict[tuple[str, str], QWidget] = {}
         self.setWindowTitle("Preferences")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
         self._init_ui()
 
     def _init_ui(self):
@@ -142,7 +147,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(QLabel("Missing Frame Handling:"))
         self.missing_frame_combo = QComboBox()
         self.missing_frame_combo.addItems(["Nearest Frame", "Red X", "Flat Gray"])
-        self.missing_frame_combo.setCurrentText(getattr(self.settings, "missing_frame_mode", "Nearest Frame"))
+        self.missing_frame_combo.setCurrentText(
+            getattr(self.settings, "missing_frame_mode", "Nearest Frame")
+        )
         layout.addWidget(self.missing_frame_combo)
 
         layout.addWidget(QLabel("Custom OCIO Configuration File (.ocio):"))
@@ -164,10 +171,13 @@ class SettingsDialog(QDialog):
 
         ensure_user_packages_dir(self.settings.config_dir)
 
-        restart_note = QLabel("Package enable/disable changes apply after restart.")
-        restart_note.setWordWrap(True)
-        restart_note.setStyleSheet("color: #aaa;")
-        layout.addWidget(restart_note)
+        note = QLabel(
+            "Enable/disable and package settings apply when you click OK "
+            "(no application restart required)."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #aaa;")
+        layout.addWidget(note)
 
         roots_lines = []
         for source, root in package_search_roots(self.settings.config_dir):
@@ -185,6 +195,11 @@ class SettingsDialog(QDialog):
 
         self._package_manifests = discover_packages(self.settings.config_dir)
         self._package_checks.clear()
+        self._setting_widgets.clear()
+        schemas = {}
+        if self.package_manager is not None:
+            schemas = self.package_manager.settings_schemas
+
         if not self._package_manifests:
             list_layout.addWidget(QLabel("No packages found."))
         else:
@@ -204,10 +219,68 @@ class SettingsDialog(QDialog):
                 meta.setStyleSheet("color: #888; margin-left: 18px;")
                 list_layout.addWidget(meta)
 
+                fields = schemas.get(manifest.id) or []
+                if fields:
+                    group = QGroupBox(f"Settings — {manifest.name}")
+                    group_layout = QVBoxLayout(group)
+                    pkg_vals = (self.settings.package_settings or {}).get(manifest.id, {})
+                    for field in fields:
+                        row = QHBoxLayout()
+                        row.addWidget(QLabel(field.label))
+                        value = pkg_vals.get(field.key, field.default)
+                        widget = self._make_setting_widget(field, value)
+                        self._setting_widgets[(manifest.id, field.key)] = widget
+                        row.addWidget(widget, stretch=1)
+                        group_layout.addLayout(row)
+                    list_layout.addWidget(group)
+
         list_layout.addStretch(1)
         scroll.setWidget(list_host)
         layout.addWidget(scroll, 1)
         return page
+
+    def _make_setting_widget(self, field, value):
+        if field.type == "bool":
+            w = QCheckBox()
+            w.setChecked(bool(value) if value is not None else bool(field.default))
+            return w
+        if field.type == "int":
+            w = QSpinBox()
+            w.setRange(-10_000_000, 10_000_000)
+            w.setValue(int(value if value is not None else (field.default or 0)))
+            return w
+        if field.type == "float":
+            w = QDoubleSpinBox()
+            w.setRange(-1e9, 1e9)
+            w.setDecimals(4)
+            w.setValue(float(value if value is not None else (field.default or 0.0)))
+            return w
+        if field.type == "enum":
+            w = QComboBox()
+            choices = field.choices or []
+            for choice in choices:
+                w.addItem(str(choice), choice)
+            current = value if value is not None else field.default
+            idx = w.findData(current)
+            if idx < 0:
+                idx = w.findText(str(current))
+            if idx >= 0:
+                w.setCurrentIndex(idx)
+            return w
+        w = QLineEdit("" if value is None else str(value))
+        return w
+
+    def _read_setting_widget(self, field, widget):
+        if field.type == "bool":
+            return bool(widget.isChecked())
+        if field.type == "int":
+            return int(widget.value())
+        if field.type == "float":
+            return float(widget.value())
+        if field.type == "enum":
+            data = widget.currentData()
+            return data if data is not None else widget.currentText()
+        return widget.text()
 
     @staticmethod
     def _format_gb_label(value_gb: float, max_gb: float) -> str:
@@ -294,4 +367,16 @@ class SettingsDialog(QDialog):
             if checked != manifest.enabled_by_default:
                 overrides[manifest.id] = checked
         self.settings.package_enabled = overrides
+
+        schemas = {}
+        if self.package_manager is not None:
+            schemas = self.package_manager.settings_schemas
+        pkg_settings = dict(self.settings.package_settings or {})
+        for (package_id, key), widget in self._setting_widgets.items():
+            fields = schemas.get(package_id) or []
+            field = next((f for f in fields if f.key == key), None)
+            if field is None:
+                continue
+            pkg_settings.setdefault(package_id, {})[key] = self._read_setting_widget(field, widget)
+        self.settings.package_settings = pkg_settings
         self.accept()

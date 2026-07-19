@@ -362,6 +362,10 @@ Panels appear under **View → Panels**. They can dock to any edge or float (inc
 | `add_media(paths, mode="sequence"\|"stack")` | Load media onto the session |
 | `add_menu_actions([...])` | Contribute to **Plugins** |
 | `register_panel(panel_id, *, title, factory, default_area="right", visible_by_default=False)` | Dockable panel; id becomes `{package_id}.{panel_id}` |
+| `register_keybind(id, *, sequence, callback, context="app")` | App shortcut (built-ins always win on conflict) |
+| `register_hud_painter(id, *, paint, z=0)` | Paint-only HUD overlay when View → Toggle HUD is on |
+| `define_settings_schema([...])` / `get_setting` / `set_setting` | Per-package settings (Settings → Packages) |
+| `register_decoder(id, *, extensions, factory, priority=0)` | Still decoder for unique extensions (not movies) |
 | `status(message)` | Status bar |
 | `parent_widget()` | `MainWindow` as Qt parent |
 | `update_ocio_pipeline()` | Refresh viewer OCIO |
@@ -373,6 +377,8 @@ Panels appear under **View → Panels**. They can dock to any edge or float (inc
 
 **Events**: `media_loaded` `(source_index, path, metadata)`, `frame_changed` `(frame_index, timecode)`, `session_changed` (no payload). Constants: `PackageEvents` in [`api.py`](src/framecycler/packages/api.py).
 
+During playback, `frame_changed` is **coalesced** (latest-wins per GUI event-loop turn) so packages cannot stall transport. Scrubbing / paused seeks emit every frame immediately. Package enable/disable and settings apply on Settings OK without restart.
+
 ### Shipped example packages
 
 All under [`apps/`](apps/):
@@ -382,7 +388,7 @@ All under [`apps/`](apps/):
 | [`example_apply_cdl`](apps/example_apply_cdl/) | `framecycler.example_apply_cdl` | off | Plugins → “Apply Example CDL”: hardcoded viewer CDL via `ctx.apply_cdl` (stub for ShotGrid/ftrack fetch) |
 | [`example_add_version`](apps/example_add_version/) | `framecycler.example_add_version` | off | Writes a grey EXR and `ctx.add_media(..., mode="stack")` onto the playhead shot |
 | [`example_per_stack_cdl`](apps/example_per_stack_cdl/) | `framecycler.example_per_stack_cdl` | off | Alternating R/G/B slopes per shot stack via session stack CDL APIs |
-| [`example_session_panel`](apps/example_session_panel/) | `framecycler.example_session_panel` | off | View → Panels → “Session Events”: `register_panel` + `SESSION_CHANGED` |
+| [`example_session_panel`](apps/example_session_panel/) | `framecycler.example_session_panel` | off | Full API demo: panel, coalesced `FRAME_CHANGED`, `Ctrl+Shift+S`, HUD badge, settings, `.fcpanel` decoder |
 | [`ocio_api_loader`](apps/ocio_api_loader/) | `framecycler.ocio_api_loader` | **on** | Mock “Load OCIO from External API…” → `ctx.ocio.load_config(...)` |
 
 Enable the examples under **Settings → Packages**, restart, then use **Plugins** / **View → Panels**.

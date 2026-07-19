@@ -1,6 +1,14 @@
 """Discoverable Framecycler packages (plugins)."""
 
-from .api import Package, PackageContext, PackageEvents, PanelSpec
+from .api import (
+    HudPainterSpec,
+    KeybindSpec,
+    Package,
+    PackageContext,
+    PackageEvents,
+    PanelSpec,
+    SettingsField,
+)
 from .manager import PackageManager
 from .manifest import PackageManifest, discover_packages
 
@@ -9,6 +17,9 @@ __all__ = [
     "PackageContext",
     "PackageEvents",
     "PanelSpec",
+    "KeybindSpec",
+    "HudPainterSpec",
+    "SettingsField",
     "PackageManager",
     "PackageManifest",
     "discover_packages",

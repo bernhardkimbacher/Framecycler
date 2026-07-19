@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import Callable, Dict, Optional, Tuple
 
+from ..decoders.base import BaseDecoder
 from ..decoders.dpx_decoder import DPXDecoder
 from ..decoders.exr_decoder import EXRDecoder
 from ..decoders.image_io import SQUARE_PIXEL_ASPECT
@@ -14,6 +15,8 @@ from .media_source import MediaSource
 from .settings import Settings
 
 FrameReadyCallback = Callable[[str, int], None]
+DecoderFactory = Callable[[str], BaseDecoder]
+DecoderResolver = Callable[[str], Optional[DecoderFactory]]
 
 
 class MediaPool:
@@ -23,9 +26,13 @@ class MediaPool:
         self.settings = settings
         self._entries: Dict[str, Tuple[MediaSource, int]] = {}
         self._frame_ready_callback: Optional[FrameReadyCallback] = None
+        self._decoder_resolver: Optional[DecoderResolver] = None
 
     def set_frame_ready_callback(self, callback: Optional[FrameReadyCallback]) -> None:
         self._frame_ready_callback = callback
+
+    def set_decoder_resolver(self, resolver: Optional[DecoderResolver]) -> None:
+        self._decoder_resolver = resolver
 
     def get(self, path: str) -> Optional[MediaSource]:
         key = self._key(path)
@@ -82,12 +89,18 @@ class MediaPool:
 
     def _load_source(self, path: str) -> MediaSource:
         ext = os.path.splitext(path)[1].lower()
-        if ext == ".exr":
-            decoder = EXRDecoder(path)
-        elif ext == ".dpx":
-            decoder = DPXDecoder(path)
-        else:
-            decoder = QuickTimeDecoder(path)
+        decoder = None
+        if self._decoder_resolver is not None:
+            factory = self._decoder_resolver(ext)
+            if factory is not None:
+                decoder = factory(path)
+        if decoder is None:
+            if ext == ".exr":
+                decoder = EXRDecoder(path)
+            elif ext == ".dpx":
+                decoder = DPXDecoder(path)
+            else:
+                decoder = QuickTimeDecoder(path)
 
         cache = CacheEngine(decoder, self.settings, resolution_scale=1.0)
         meta = decoder.get_metadata()
