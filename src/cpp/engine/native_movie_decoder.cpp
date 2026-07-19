@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <vector>
 
@@ -210,11 +211,20 @@ enum AVPixelFormat hw_get_format_callback(AVCodecContext* ctx, const enum AVPixe
 // Allow the C callback to call the private method.
 int NativeMovieDecoder::_get_hw_format(const int* pix_fmts) const
 {
-    if (_hw_pix_fmt < 0 || !pix_fmts) {
+    if (!pix_fmts) {
         return static_cast<int>(AV_PIX_FMT_NONE);
     }
+    if (_hw_pix_fmt >= 0) {
+        for (const int* p = pix_fmts; *p != -1; ++p) {
+            if (*p == _hw_pix_fmt) {
+                return *p;
+            }
+        }
+    }
+    // Never return NONE when software formats remain — a null/failed get_format
+    // aborts decode (and nullptr callbacks segfault).
     for (const int* p = pix_fmts; *p != -1; ++p) {
-        if (*p == _hw_pix_fmt) {
+        if (*p != _hw_pix_fmt) {
             return *p;
         }
     }
@@ -364,8 +374,9 @@ bool NativeMovieDecoder::_try_open_hw(AVCodecContext* codec_ctx, const AVCodec* 
     AVBufferRef* device_ctx = nullptr;
     int err = av_hwdevice_ctx_create(&device_ctx, type, nullptr, nullptr, 0);
 #if !defined(__APPLE__) && !defined(_WIN32)
-    // Linux VAAPI: try render node then default.
-    if (err < 0) {
+    // Linux VAAPI: only retry a render node when the default device failed and
+    // the node exists — avoids noisy failures on headless CI runners.
+    if (err < 0 && std::filesystem::exists("/dev/dri/renderD128")) {
         err = av_hwdevice_ctx_create(&device_ctx, type, "/dev/dri/renderD128", nullptr, 0);
     }
 #endif
@@ -647,9 +658,14 @@ bool NativeMovieDecoder::_open_unlocked(const std::string& path, bool allow_hw)
         codec_ctx->thread_count = 0; // auto
         if (try_hw) {
             if (!_try_open_hw(codec_ctx, codec)) {
+                // _try_open_hw only mutates the context after a successful device
+                // create. Do NOT assign get_format=nullptr here: that overwrites
+                // FFmpeg's default get_format and causes a null-call segfault in
+                // the H.264 worker on Linux/Windows when VAAPI/D3D11VA is absent.
                 _release_hw();
-                codec_ctx->hw_device_ctx = nullptr;
-                codec_ctx->get_format = nullptr;
+                if (codec_ctx->hw_device_ctx) {
+                    av_buffer_unref(&codec_ctx->hw_device_ctx);
+                }
                 codec_ctx->opaque = nullptr;
             }
         }
