@@ -114,6 +114,48 @@ class OCIOManager:
             print("No OCIO Config file loaded, falling back to passthrough mode.")
         self.invalidate_shader_cache()
 
+    def reload_config(self, custom_config_path: str = "") -> str:
+        """Re-read the OCIO config from disk and invalidate the GPU shader cache.
+
+        Preserves input colorspace, look (including custom LUT), and display/view
+        when they still exist in the reloaded config. Returns the loaded path
+        (or empty string on failure) for status UI.
+        """
+        prev_input = self.input_colorspace
+        prev_look = self.look
+        prev_custom = self._custom_lut_path
+        prev_display = self.display_name
+        prev_view = self.view_name
+        prev_output = self.display_output
+
+        self.load_config(custom_config_path)
+
+        if not self.config:
+            return ""
+
+        colorspaces = self.get_colorspaces()
+        if prev_input in colorspaces:
+            self.input_colorspace = prev_input
+
+        if prev_custom and os.path.exists(prev_custom):
+            self.load_custom_lut(prev_custom)
+        elif prev_look and prev_look in [
+            l.getName() for l in self.config.getLooks()
+        ]:
+            self.look = prev_look
+
+        if prev_output == "Raw":
+            self.display_name = ""
+            self.view_name = ""
+        elif prev_display and prev_view:
+            views = self.get_views(prev_display)
+            if prev_display in self.get_displays() and prev_view in views:
+                self.display_name = prev_display
+                self.view_name = prev_view
+
+        self.invalidate_shader_cache()
+        return self.config_path or ""
+
     def _set_default_display_view(self) -> None:
         displays = self.get_displays()
         if not displays:
@@ -488,14 +530,32 @@ class OCIOManager:
         look_key = self.look or ""
         custom_lut = self._custom_lut_path or ""
         display_key = f"{self.display_name}|{self.view_name}"
+        # Include config mtime/size so edits to looks/colorspaces invalidate the
+        # on-disk QSB cache (keyed only by this string in RhiRenderer::bake_shaders).
+        config_stamp = ""
+        if self.config_path and os.path.isfile(self.config_path):
+            try:
+                st = os.stat(self.config_path)
+                config_stamp = f"{st.st_mtime_ns}:{st.st_size}"
+            except OSError:
+                config_stamp = ""
+        custom_stamp = ""
+        if custom_lut and os.path.isfile(custom_lut):
+            try:
+                st = os.stat(custom_lut)
+                custom_stamp = f"{st.st_mtime_ns}:{st.st_size}"
+            except OSError:
+                custom_stamp = ""
         # Salt busts stale QSB disk caches when the fragment UBO/template changes.
         return hash_pipeline_state(
-            "ocio_frag_v6_ubo_layout",
+            "ocio_frag_v7_config_mtime",
             self.input_colorspace,
             look_key,
             display_key,
             custom_lut,
-            self.config_path,
+            custom_stamp,
+            self.config_path or "",
+            config_stamp,
         )
 
     @staticmethod

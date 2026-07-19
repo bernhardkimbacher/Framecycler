@@ -9,6 +9,7 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
+#include <QCryptographicHash>
 #include <regex>
 #include <cmath>
 #include <algorithm>
@@ -842,7 +843,10 @@ void RhiRenderer::register_cache(int source_index, CacheManager* cache)
 void RhiRenderer::set_shader_sources(const std::string& pipeline_key, const std::string& vert_src, const std::string& frag_src)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    if (_cached_pipeline_key == pipeline_key) {
+    // Key alone is not enough: OCIO config edits can reuse a look name while the
+    // generated GLSL changes. Also compare sources so we never keep a stale bake.
+    if (_cached_pipeline_key == pipeline_key
+        && _pending_frag_src_for_layout == frag_src) {
         return;
     }
     
@@ -1571,11 +1575,17 @@ bool RhiRenderer::bake_shaders(
     const std::string& vert_src,
     const std::string& frag_src)
 {
-    // Disk cache: QStandardPaths::CacheLocation/framecycler/qsb/<pipeline_key>/{vert,frag}.qsb
+    // Disk cache: .../framecycler/qsb/<pipeline_key>_<fragHash>/{vert,frag}.qsb
+    // Fragment hash prevents loading a stale QSB when pipeline_key is reused but
+    // OCIO-generated GLSL changed (e.g. look definition edited on disk).
+    const QByteArray fragHash = QCryptographicHash::hash(
+        QByteArray::fromStdString(frag_src), QCryptographicHash::Sha256).toHex().left(16);
     QString cacheDir;
     if (!pipeline_key.empty()) {
         const QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-        cacheDir = base + QStringLiteral("/framecycler/qsb/") + QString::fromStdString(pipeline_key);
+        cacheDir = base + QStringLiteral("/framecycler/qsb/")
+            + QString::fromStdString(pipeline_key) + QLatin1Char('_')
+            + QString::fromUtf8(fragHash);
         const QString vertPath = cacheDir + QStringLiteral("/vert.qsb");
         const QString fragPath = cacheDir + QStringLiteral("/frag.qsb");
         QFile vertFile(vertPath);

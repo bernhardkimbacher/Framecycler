@@ -37,6 +37,8 @@ looks:
       children:
         - !<ColorSpaceTransform> {src: ACEScg, dst: ARRI Alexa LogC3}
         - !<FileTransform> {src: ARRI_LogC3_to_Rec709.cube, interpolation: linear}
+        # Show LUT exits display-referred Rec.709; return to scene-linear working space.
+        - !<ColorSpaceTransform> {src: Rec.709 - Texture, dst: ACEScg}
 
   - !<Look>
     name: ARRI LogC4 to Rec709
@@ -45,6 +47,7 @@ looks:
       children:
         - !<ColorSpaceTransform> {src: ACEScg, dst: ARRI LogC4}
         - !<FileTransform> {src: ARRI_LogC4_to_Rec709.cube, interpolation: linear}
+        - !<ColorSpaceTransform> {src: Rec.709 - Texture, dst: ACEScg}
 
 colorspaces:
   - !<ColorSpace>

@@ -272,6 +272,85 @@ class TestOCIOManager(unittest.TestCase):
         self.assertIn("ocio_exposure_contrast_exposureVal", bundle.fragment_source)
         self.assertIn("ocio_grading_primary_brightness", bundle.fragment_source)
 
+    def test_reload_config_preserves_look_and_display(self):
+        self.ocio_mgr.set_look("ARRI LogC3 to Rec709")
+        self.ocio_mgr.set_display_output("sRGB / sRGB View")
+        self.ocio_mgr.input_colorspace = "ARRI Alexa LogC3"
+        path = self.ocio_mgr.reload_config("")
+        self.assertTrue(path)
+        self.assertTrue(os.path.exists(path))
+        self.assertEqual(self.ocio_mgr.look, "ARRI LogC3 to Rec709")
+        self.assertEqual(self.ocio_mgr.display_output, "sRGB / sRGB View")
+        self.assertEqual(self.ocio_mgr.input_colorspace, "ARRI Alexa LogC3")
+
+    def test_pipeline_key_changes_when_config_mtime_changes(self):
+        """QSB disk cache is keyed by pipeline_key; config edits must change it."""
+        self.ocio_mgr.set_look("ARRI LogC3 to Rec709")
+        self.ocio_mgr.set_display_output("sRGB / sRGB View")
+        key_before = self.ocio_mgr.get_pipeline_key()
+        path = self.ocio_mgr.config_path
+        self.assertTrue(path and os.path.isfile(path))
+        os.utime(path, None)  # bump mtime
+        key_after = self.ocio_mgr.get_pipeline_key()
+        self.assertNotEqual(key_before, key_after)
+
+    def test_arri_look_roundtrips_to_acescg_before_display(self):
+        """Look must exit true ACEScg so sRGB View encodes once (not double display)."""
+        import numpy as np
+        import PyOpenColorIO as OCIO
+
+        def apply_group(group, rgb):
+            cpu = self.ocio_mgr.config.getProcessor(group).getDefaultCPUProcessor()
+            pixel = np.array(rgb, dtype=np.float32)
+            cpu.applyRGB(pixel)
+            return pixel
+
+        # Mid-grey ACEScg sample (working space; input convert is identity).
+        sample = [0.18, 0.18, 0.18]
+
+        self.ocio_mgr.input_colorspace = "ACEScg"
+        self.ocio_mgr.set_look("ARRI LogC3 to Rec709")
+        self.ocio_mgr.set_display_output("sRGB / sRGB View")
+        with_display = apply_group(self.ocio_mgr._build_post_cdl_group(), sample)
+
+        self.ocio_mgr.set_display_output("Raw")
+        look_only = apply_group(self.ocio_mgr._build_post_cdl_group(), sample)
+
+        # Explicit ACEScg → sRGB after look-only path (proves look exited scene-linear).
+        display_only = OCIO.GroupTransform()
+        display_only.appendTransform(
+            OCIO.ColorSpaceTransform(src="ACEScg", dst="sRGB - Texture")
+        )
+        look_then_display = apply_group(display_only, look_only.tolist())
+
+        np.testing.assert_allclose(
+            with_display,
+            look_then_display,
+            rtol=1e-4,
+            atol=1e-4,
+            err_msg="Look+sRGB View must match Look+Raw then ACEScg→sRGB",
+        )
+        # Regression: without Rec.709→ACEScg return, Look+sRGB ≈ Look+Raw (show LUT).
+        self.assertFalse(
+            np.allclose(with_display, look_only, rtol=1e-3, atol=1e-3),
+            "Look+sRGB View must differ from Look+Raw (display encode must run once)",
+        )
+
+        # LogC4 look must also round-trip (same structural check on mid sample).
+        self.ocio_mgr.set_look("ARRI LogC4 to Rec709")
+        self.ocio_mgr.set_display_output("sRGB / sRGB View")
+        with_display_c4 = apply_group(self.ocio_mgr._build_post_cdl_group(), sample)
+        self.ocio_mgr.set_display_output("Raw")
+        look_only_c4 = apply_group(self.ocio_mgr._build_post_cdl_group(), sample)
+        look_then_display_c4 = apply_group(display_only, look_only_c4.tolist())
+        np.testing.assert_allclose(
+            with_display_c4,
+            look_then_display_c4,
+            rtol=1e-4,
+            atol=1e-4,
+            err_msg="LogC4 Look+sRGB View must match Look+Raw then ACEScg→sRGB",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
