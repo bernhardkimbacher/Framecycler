@@ -155,6 +155,8 @@ Located in [`src/framecycler/decoders/`](src/framecycler/decoders/).
 | DPX | `dpx_decoder.py` | OIIO (`NativeDecoder`) |
 | QuickTime / MPEG-4 | `qt_decoder.py` (thin shell) | FFmpeg (`NativeMovieDecoder`) |
 
+**Movies (`NativeMovieDecoder`):** Builds a packet/keyframe index for frame-accurate scrub; converts via high-bit `RGBA64` (or `RGBAF32`) into float16 for the RAM cache (no forced 8-bit). Hardware decode is tried automatically — VideoToolbox (macOS), D3D11VA (Windows), VAAPI (Linux) — with silent software fallback if HW init/decode fails. ProRes/DNx/HW support depends on the linked FFmpeg build and OS drivers. Movie prefetch remains serial (one shared decoder).
+
 ### Sequence detection
 
 Opening or dropping a single file runs `_find_sequence_from_single_file` in `base.py`: it parses the index pattern (e.g. `MOC_CAS_0010.0993.exr` → `MOC_CAS_0010.####.exr`), gathers matching files, and builds a timeline on absolute frame indices. Missing frames can fall back to the nearest available index (or a Flat Gray / Red X placeholder depending on settings).

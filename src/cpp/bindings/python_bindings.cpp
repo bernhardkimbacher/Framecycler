@@ -72,6 +72,9 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def_property_readonly("start_frame", &NativeMovieDecoder::start_frame)
         .def_property_readonly("end_frame", &NativeMovieDecoder::end_frame)
         .def_property_readonly("path", &NativeMovieDecoder::path)
+        .def_property_readonly("hw_type", &NativeMovieDecoder::hw_type)
+        .def_property_readonly("bits_per_raw_sample", &NativeMovieDecoder::bits_per_raw_sample)
+        .def_property_readonly("pix_fmt_name", &NativeMovieDecoder::pix_fmt_name)
         .def("file_metadata", &NativeMovieDecoder::file_metadata)
         .def(
             "decode_frame",
@@ -117,6 +120,9 @@ PYBIND11_MODULE(framecycler_engine, m) {
                 d["end_frame"] = self.end_frame();
                 d["path"] = self.path();
                 d["file_metadata"] = self.file_metadata();
+                d["hw_type"] = self.hw_type();
+                d["bits_per_raw_sample"] = self.bits_per_raw_sample();
+                d["pix_fmt"] = self.pix_fmt_name();
                 py::list channels;
                 channels.append("R");
                 channels.append("G");
