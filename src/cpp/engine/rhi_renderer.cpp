@@ -61,6 +61,78 @@ bool RhiRenderer::initialize(uintptr_t window_ptr)
     return true;
 }
 
+void RhiRenderer::set_present_timing_enabled(bool enabled)
+{
+    _present_timing_enabled.store(enabled);
+}
+
+void RhiRenderer::clear_present_timings()
+{
+    std::lock_guard<std::mutex> lock(_present_timing_mutex);
+    _present_timing_ring.clear();
+    _present_timing_ring.resize(kPresentTimingCapacity);
+    _present_timing_write = 0;
+    _present_timing_count = 0;
+}
+
+std::vector<RhiRenderer::PresentTimingSample> RhiRenderer::drain_present_timings()
+{
+    std::lock_guard<std::mutex> lock(_present_timing_mutex);
+    std::vector<PresentTimingSample> out;
+    if (_present_timing_count == 0 || _present_timing_ring.empty()) {
+        return out;
+    }
+    out.reserve(_present_timing_count);
+    const size_t cap = _present_timing_ring.size();
+    const size_t start = (_present_timing_count < cap)
+        ? 0
+        : _present_timing_write;
+    for (size_t i = 0; i < _present_timing_count; ++i) {
+        out.push_back(_present_timing_ring[(start + i) % cap]);
+    }
+    _present_timing_write = 0;
+    _present_timing_count = 0;
+    return out;
+}
+
+void RhiRenderer::_record_present_timing(bool drew_frame)
+{
+    if (!drew_frame || !_present_timing_enabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    PresentTimingSample sample;
+    sample.steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch())
+                           .count();
+    sample.frames_drawn = _debug_stats.frames_drawn;
+    if (_transport.is_playing()) {
+        sample.global_frame = _transport.current_frame();
+    } else if (!_active_render_params.slots.empty()) {
+        // Prefer the sequence/primary slot when present.
+        int primary = _active_render_params.sequence_index;
+        sample.global_frame = _active_render_params.slots[0].frame_index;
+        for (const auto& slot : _active_render_params.slots) {
+            if (slot.source_index == primary) {
+                sample.global_frame = slot.frame_index;
+                break;
+            }
+        }
+    } else {
+        sample.global_frame = -1;
+    }
+
+    std::lock_guard<std::mutex> lock(_present_timing_mutex);
+    if (_present_timing_ring.empty()) {
+        _present_timing_ring.resize(kPresentTimingCapacity);
+    }
+    _present_timing_ring[_present_timing_write] = sample;
+    _present_timing_write = (_present_timing_write + 1) % _present_timing_ring.size();
+    if (_present_timing_count < _present_timing_ring.size()) {
+        ++_present_timing_count;
+    }
+}
+
 void RhiRenderer::set_force_null_backend(bool enabled)
 {
     _force_null_backend = enabled;
@@ -398,6 +470,8 @@ void RhiRenderer::_apply_transport_frame_to_params(RenderParams& params, int glo
 
 void RhiRenderer::_update_transport_playheads(int global_frame, int direction)
 {
+    // Caller must hold _mutex. Only updates _pending_playheads — CacheManager
+    // playhead writes happen after the lock is released (see _tick_transport_and_prepare).
     const auto prog = _transport.program();
     for (const auto& mapping : prog.slots) {
         const int decoder_frame =
@@ -411,12 +485,6 @@ void RhiRenderer::_update_transport_playheads(int global_frame, int direction)
         ph.in_point = mapping.playback_in;
         ph.out_point = mapping.playback_out;
         _pending_playheads[mapping.source_index] = ph;
-
-        auto it = _caches.find(mapping.source_index);
-        if (it != _caches.end() && it->second) {
-            it->second->set_playhead(
-                decoder_frame, direction, mapping.playback_in, mapping.playback_out);
-        }
     }
 }
 
@@ -461,6 +529,14 @@ void RhiRenderer::_tick_transport_and_prepare()
     bool should_emit_stop = false;
     int emit_frame = 0;
     int emit_direction = 1;
+    struct PlayheadApply {
+        CacheManager* cache = nullptr;
+        int playhead = 0;
+        int direction = 1;
+        int in_point = 0;
+        int out_point = 0;
+    };
+    std::vector<PlayheadApply> playhead_applies;
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if (_transport_program_dirty.exchange(false)) {
@@ -493,6 +569,28 @@ void RhiRenderer::_tick_transport_and_prepare()
                 _active_render_params, _transport.current_frame());
             _render_params_dirty = true;
             _update_transport_playheads(_transport.current_frame(), _transport.direction());
+
+            // Collect CacheManager updates while we hold the map lock; apply after.
+            const auto prog = _transport.program();
+            const int direction = _transport.direction();
+            for (const auto& mapping : prog.slots) {
+                const int decoder_frame =
+                    _transport.decoder_frame_for_source(
+                        mapping.source_index, _transport.current_frame());
+                if (decoder_frame < 0) {
+                    continue;
+                }
+                auto it = _caches.find(mapping.source_index);
+                if (it == _caches.end() || !it->second) {
+                    continue;
+                }
+                playhead_applies.push_back(PlayheadApply{
+                    it->second,
+                    decoder_frame,
+                    direction,
+                    mapping.playback_in,
+                    mapping.playback_out});
+            }
         }
 
         emit_frame = advanced.frame;
@@ -500,6 +598,11 @@ void RhiRenderer::_tick_transport_and_prepare()
         should_emit_boundary = advanced.segment_boundary;
         should_emit_move = advanced.moved;
         should_emit_stop = advanced.stop;
+    }
+
+    for (const auto& apply : playhead_applies) {
+        apply.cache->set_playhead(
+            apply.playhead, apply.direction, apply.in_point, apply.out_point);
     }
 
     if (should_emit_boundary) {
@@ -849,6 +952,8 @@ void RhiRenderer::render_frame()
     _debug_stats.tex_a_ready = _texAState.texture != nullptr;
     _debug_stats.last_upload_bytes = 0;
     _debug_stats.last_upload_count = 0;
+    _debug_stats.last_upload_jobs = 0;
+    _reset_present_upload_budget();
 
     QRhi::FrameOpResult result = _rhi->beginFrame(_swapChain);
     if (result != QRhi::FrameOpSuccess) {
@@ -1024,6 +1129,7 @@ void RhiRenderer::render_frame()
     build_pipeline(_swapChain->renderPassDescriptor());
 
     const auto draw_start = Clock::now();
+    bool drew_this_frame = false;
 
     QRhiCommandBuffer* cb = _swapChain->currentFrameCommandBuffer();
     QRhiRenderTarget* rt = _swapChain->currentFrameRenderTarget();
@@ -1037,6 +1143,7 @@ void RhiRenderer::render_frame()
         cb->setViewport(QRhiViewport(0, 0, outputSize.width(), outputSize.height()));
 
         const quint32 stride = per_frame_ubo_stride();
+        bool drew_tile = false;
         for (int i = 0; i < static_cast<int>(_active_render_params.tiles.size()); ++i) {
             const auto& tile = _active_render_params.tiles[i];
             if (tile.source_index < 0 || tile.source_index >= static_cast<int>(_texturePool.size())) {
@@ -1060,8 +1167,15 @@ void RhiRenderer::render_frame()
             cb->setVertexInput(0, 1, &vInput);
             
             cb->draw(4);
+            drew_tile = true;
         }
         cb->endPass();
+        if (drew_tile) {
+            _debug_stats.frames_drawn++;
+            drew_this_frame = true;
+        } else {
+            _debug_stats.frames_cleared_only++;
+        }
     } else {
         // Normal rendering pass
         cb->beginPass(rt, clearColor, {1.0f, 0}, batch);
@@ -1077,6 +1191,7 @@ void RhiRenderer::render_frame()
             
             cb->draw(4);
             _debug_stats.frames_drawn++;
+            drew_this_frame = true;
         } else {
             _debug_stats.frames_cleared_only++;
         }
@@ -1084,7 +1199,18 @@ void RhiRenderer::render_frame()
     }
 
     _debug_stats.pipeline_ready = _pipeline != nullptr;
-    _rhi->endFrame(_swapChain);
+    {
+        const auto end_frame_start = Clock::now();
+        _rhi->endFrame(_swapChain);
+        const auto end_frame_end = Clock::now();
+        const double end_ms =
+            std::chrono::duration<double, std::milli>(end_frame_end - end_frame_start).count();
+        _debug_stats.last_end_frame_ms = end_ms;
+        if (end_ms > _debug_stats.end_frame_ms_max) {
+            _debug_stats.end_frame_ms_max = end_ms;
+        }
+    }
+    _record_present_timing(drew_this_frame);
     // Staging/GPU uploads submitted this frame are safe to treat as complete next frame.
     _completed_upload_generation = _upload_generation;
     ++_upload_generation;
@@ -1097,6 +1223,8 @@ void RhiRenderer::render_frame()
     _debug_stats.last_upload_ms = std::chrono::duration<double, std::milli>(upload_end - upload_start).count();
     _debug_stats.last_draw_ms = std::chrono::duration<double, std::milli>(frame_end - draw_start).count();
     _debug_stats.last_render_ms = std::chrono::duration<double, std::milli>(frame_end - frame_start).count();
+    _debug_stats.last_upload_jobs = _debug_stats.last_upload_count;
+    _debug_stats.upload_ms_total += _debug_stats.last_upload_ms;
 
     // Idle GPU warming: keep rendering while the display cache can still absorb
     // CPU-cached frames ahead of the playhead.
@@ -1642,8 +1770,18 @@ void RhiRenderer::enqueue_gpu_lookahead()
         return;
     }
 
-    // Bound how many new jobs we enqueue per pass (staging ring depth).
-    const size_t max_enqueue = _stagingRing.empty() ? 0 : _stagingRing.size();
+    // Bound how many new jobs we enqueue per pass (staging ring depth / present budget).
+    size_t max_enqueue = _present_upload_job_cap();
+    if (max_enqueue == 0) {
+        return;
+    }
+    // While playing, reserve one slot for present sync; enqueue at most the rest.
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_transport.is_playing() && max_enqueue > 0) {
+            --max_enqueue;
+        }
+    }
     if (max_enqueue == 0) {
         return;
     }
@@ -1804,17 +1942,60 @@ bool RhiRenderer::gpu_warmup_work_remaining() const
     return false;
 }
 
+void RhiRenderer::_reset_present_upload_budget()
+{
+    _present_upload_jobs_done = 0;
+    _present_upload_job_limit = _present_upload_job_cap();
+}
+
+size_t RhiRenderer::_present_upload_job_cap() const
+{
+    const size_t ring = _stagingRing.empty() ? 0 : _stagingRing.size();
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_transport.is_playing()) {
+        return ring;
+    }
+    // Bound inline GPU transfers while the clock advances content at realtime.
+    return std::min(ring, kPlayingUploadJobsPerPresent);
+}
+
+bool RhiRenderer::_try_consume_upload_job()
+{
+    if (_present_upload_job_limit == 0) {
+        return false;
+    }
+    if (_present_upload_jobs_done >= _present_upload_job_limit) {
+        return false;
+    }
+    ++_present_upload_jobs_done;
+    return true;
+}
+
 void RhiRenderer::drain_upload_queue(QRhiResourceUpdateBatch* batch)
 {
     if (!_displayCache.enabled() || !batch || !_rhi) {
         return;
     }
 
+    // Reserve one budget slot for a possible present-authoritative sync upload
+    // later in this frame when transport is playing.
+    size_t remaining = (_present_upload_jobs_done < _present_upload_job_limit)
+        ? (_present_upload_job_limit - _present_upload_jobs_done)
+        : 0;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_transport.is_playing() && remaining > 0) {
+            --remaining;
+        }
+    }
+    if (remaining == 0) {
+        return;
+    }
+
     std::vector<UploadJob*> jobs;
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        const size_t max_k = _stagingRing.empty() ? 0 : _stagingRing.size();
-        jobs = _uploadQueue.take_queued_for_submit(max_k);
+        jobs = _uploadQueue.take_queued_for_submit(remaining);
     }
 
     for (UploadJob* job : jobs) {
@@ -1854,11 +2035,18 @@ void RhiRenderer::drain_upload_queue(QRhiResourceUpdateBatch* batch)
             break;
         }
 
+        if (!_try_consume_upload_job()) {
+            break;
+        }
+
         QRhiTexture::Format texFormat = (channels == 1) ? QRhiTexture::R16F : QRhiTexture::RGBA16F;
         QRhiTexture* texture = acquire_frame_texture(w, h, channels);
         if (!texture) {
             std::lock_guard<std::mutex> lock(_mutex);
             _uploadQueue.mark_failed(job);
+            if (_present_upload_jobs_done > 0) {
+                --_present_upload_jobs_done;
+            }
             continue;
         }
 
@@ -1869,6 +2057,9 @@ void RhiRenderer::drain_upload_queue(QRhiResourceUpdateBatch* batch)
         }
         if (!cpu_cache->copy_frame_data(job->decoder_frame, ringBuf.data.data(), reqElements)) {
             _displayCache.release_to_pool(texture, w, h, texFormat);
+            if (_present_upload_jobs_done > 0) {
+                --_present_upload_jobs_done;
+            }
             continue; // remain Queued
         }
 
@@ -2023,6 +2214,9 @@ QRhiTexture* RhiRenderer::upload_present_to_display_cache(
         texture,
         bytes);
 
+    // Present-authoritative upload always proceeds; still count against the
+    // per-present budget so lookahead does not pile on after a sync upload.
+    ++_present_upload_jobs_done;
     _debug_stats.last_upload_bytes += byte_size;
     _debug_stats.last_upload_count++;
     return texture;

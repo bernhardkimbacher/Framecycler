@@ -509,6 +509,23 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("get_transport_direction", &RhiRenderer::get_transport_direction)
         .def("is_transport_playing", &RhiRenderer::is_transport_playing)
         .def("ack_transport_frame_notify", &RhiRenderer::ack_transport_frame_notify)
+        .def("set_present_timing_enabled", &RhiRenderer::set_present_timing_enabled,
+             py::arg("enabled"))
+        .def("clear_present_timings", &RhiRenderer::clear_present_timings)
+        .def(
+            "drain_present_timings",
+            [](RhiRenderer& self) {
+                auto samples = self.drain_present_timings();
+                py::list out;
+                for (const auto& s : samples) {
+                    py::dict d;
+                    d["steady_ns"] = s.steady_ns;
+                    d["global_frame"] = s.global_frame;
+                    d["frames_drawn"] = s.frames_drawn;
+                    out.append(d);
+                }
+                return out;
+            })
         .def(
             "poll_transport_frame_notify",
             [](RhiRenderer& self) -> py::object {
@@ -616,6 +633,10 @@ PYBIND11_MODULE(framecycler_engine, m) {
             d["last_draw_ms"] = s.last_draw_ms;
             d["last_upload_bytes"] = s.last_upload_bytes;
             d["last_upload_count"] = s.last_upload_count;
+            d["last_upload_jobs"] = s.last_upload_jobs;
+            d["upload_ms_total"] = s.upload_ms_total;
+            d["last_end_frame_ms"] = s.last_end_frame_ms;
+            d["end_frame_ms_max"] = s.end_frame_ms_max;
             d["gpu_cache_hits"] = s.gpu_cache_hits;
             d["gpu_cache_misses"] = s.gpu_cache_misses;
             d["pipeline_rebuilds"] = s.pipeline_rebuilds;

@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <functional>
+#include <cstdint>
 
 #include "gpu_texture_cache.h"
 #include "display_upload_queue.h"
@@ -138,6 +139,16 @@ public:
     bool poll_transport_frame_notify(int& frame_out, int& direction_out);
     bool poll_transport_boundary_notify(int& frame_out, int& direction_out);
 
+    /// Authoritative present-interval samples (render-thread timestamps).
+    struct PresentTimingSample {
+        int64_t steady_ns = 0;
+        int global_frame = -1;
+        int frames_drawn = 0;
+    };
+    void set_present_timing_enabled(bool enabled);
+    void clear_present_timings();
+    std::vector<PresentTimingSample> drain_present_timings();
+
     struct DebugStats {
         int begin_frame_ok = 0;
         int begin_frame_fail = 0;
@@ -158,6 +169,13 @@ public:
         double last_draw_ms = 0.0;
         int last_upload_bytes = 0;
         int last_upload_count = 0;
+        /// Jobs submitted into this present's resource batch (lookahead + present sync).
+        int last_upload_jobs = 0;
+        /// Cumulative upload-section milliseconds across presents.
+        double upload_ms_total = 0.0;
+        /// Last / max `endFrame` duration (captures GPU transfer stalls).
+        double last_end_frame_ms = 0.0;
+        double end_frame_ms_max = 0.0;
         int gpu_cache_hits = 0;
         int gpu_cache_misses = 0;
         int pipeline_rebuilds = 0;
@@ -243,6 +261,11 @@ private:
     bool gpu_warmup_work_remaining() const;
     void _release_gpu_resources();
 
+    /// While transport is playing, bound uploads per present (~1–2 frames).
+    void _reset_present_upload_budget();
+    size_t _present_upload_job_cap() const;
+    bool _try_consume_upload_job();
+
     // Staging ring: returns slot index, or nullopt if all slots still in flight.
     std::optional<size_t> acquire_staging_slot();
     QRhiTexture* acquire_frame_texture(int width, int height, int channels);
@@ -263,6 +286,7 @@ private:
     void _emit_transport_frame_changed(int frame, int direction);
     void _emit_transport_segment_boundary(int frame, int direction);
     void _tick_transport_and_prepare();
+    void _record_present_timing(bool drew_frame);
 
     std::vector<QRhiShaderResourceBinding> build_srb_bindings(
         QRhiTexture* tex_a,
@@ -337,6 +361,10 @@ private:
     std::vector<uint64_t> _stagingGeneration; // generation that last used each slot
     uint64_t _upload_generation = 1;
     uint64_t _completed_upload_generation = 0;
+    /// Per-present upload job budget (reset each render_frame).
+    size_t _present_upload_job_limit = 0;
+    size_t _present_upload_jobs_done = 0;
+    static constexpr size_t kPlayingUploadJobsPerPresent = 2;
 
     std::unordered_map<int, CacheManager*> _caches;
     GpuTextureCache _displayCache;
@@ -366,4 +394,11 @@ private:
     std::atomic<bool> _boundary_notify_pending{false};
     std::atomic<bool> _transport_program_dirty{false};
     TransportProgram _pending_transport_program;
+
+    static constexpr size_t kPresentTimingCapacity = 4096;
+    std::atomic<bool> _present_timing_enabled{false};
+    std::mutex _present_timing_mutex;
+    std::vector<PresentTimingSample> _present_timing_ring;
+    size_t _present_timing_write = 0;
+    size_t _present_timing_count = 0;
 };
