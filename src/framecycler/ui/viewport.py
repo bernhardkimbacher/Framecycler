@@ -3,12 +3,13 @@ import numpy as np
 from dataclasses import dataclass
 import shiboken6
 from PySide6.QtWidgets import QWidget, QVBoxLayout
-from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QByteArray, QEvent
+from PySide6.QtCore import Qt, QPoint, QRect, QRectF, Signal, QTimer, QByteArray, QEvent
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QWindow, QExposeEvent, QResizeEvent
 from ..color.ocio_manager import OCIOManager
 from ..core.tile_layout import TileLayout, compute_tile_layouts
 from .fonts import mono_font, ui_font
 from .drag_drop_overlay import DragDropOverlay
+from .overlay_geometry import aspect_mask_rect, displayed_image_rect, safe_inset_rect
 from .translucent_window import FLOATING_OVERLAY_FLAGS, clear_translucent_backdrop
 
 try:
@@ -20,6 +21,7 @@ COMPARE_SEQUENCE = 0
 COMPARE_WIPE = 1
 COMPARE_DIFFERENCE = 2
 COMPARE_TILE = 3
+COMPARE_BLEND = 4
 
 
 @dataclass
@@ -135,7 +137,12 @@ class ViewportHudOverlay(QWidget):
         if self._floating:
             clear_translucent_backdrop(painter, self.rect())
 
-        if not viewport.hud_visible and not viewport.adjustment_mode:
+        need_paint = (
+            viewport.hud_visible
+            or viewport.adjustment_mode
+            or viewport.has_review_overlays()
+        )
+        if not need_paint:
             painter.end()
             return
 
@@ -154,6 +161,7 @@ class ViewportHudOverlay(QWidget):
                         spec.paint(painter, rect, frame)
                     except Exception:
                         pass
+        viewport._draw_review_overlays(painter)
         if viewport.adjustment_mode:
             viewport._draw_adjustment_overlay(painter)
         painter.end()
@@ -176,6 +184,16 @@ class ViewportContainer(QWidget):
             hud_parent,
             floating=main_window is not None,
         )
+        from .annotations.overlay import AnnotationOverlay
+
+        self._annotation_overlay = AnnotationOverlay(
+            self.viewport,
+            hud_parent,
+            floating=main_window is not None,
+        )
+        self._annotation_overlay.set_blocked_provider(
+            lambda: bool(getattr(self.viewport, "dragging_wipe", False))
+        )
         self._drag_overlay = DragDropOverlay(main_window, main_window=main_window, floating=True)
         self._sync_geometry()
 
@@ -184,6 +202,7 @@ class ViewportContainer(QWidget):
         def update_viewport(*args, **kwargs):
             viewport_update(*args, **kwargs)
             self._hud_overlay.update()
+            self._annotation_overlay.update()
 
         self.viewport.update = update_viewport
 
@@ -204,12 +223,14 @@ class ViewportContainer(QWidget):
             )
         ):
             self._position_hud_overlay()
+            self._position_annotation_overlay()
         return super().eventFilter(obj, event)
 
     def _sync_geometry(self):
         rect = self.rect()
         self.viewport.setGeometry(rect)
         self._position_hud_overlay()
+        self._position_annotation_overlay()
         self._position_drag_overlay()
 
     def _position_hud_overlay(self):
@@ -218,6 +239,16 @@ class ViewportContainer(QWidget):
             self._hud_overlay.setGeometry(QRect(top_left, self.size()))
         else:
             self._hud_overlay.setGeometry(self.rect())
+
+    def _position_annotation_overlay(self):
+        overlay = getattr(self, "_annotation_overlay", None)
+        if overlay is None:
+            return
+        if overlay._floating:
+            top_left = self.mapToGlobal(QPoint(0, 0))
+            overlay.setGeometry(QRect(top_left, self.size()))
+        else:
+            overlay.setGeometry(self.rect())
 
     def _position_drag_overlay(self):
         if self._main_window is None:
@@ -295,6 +326,11 @@ class ViewportContainer(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._position_hud_overlay()
+        self._position_annotation_overlay()
+        annot = getattr(self, "_annotation_overlay", None)
+        if annot is not None and annot._floating:
+            annot.show()
+            annot.raise_()
         if self._hud_overlay._floating:
             self._hud_overlay.show()
             self._hud_overlay.raise_()
@@ -302,11 +338,20 @@ class ViewportContainer(QWidget):
     def hideEvent(self, event):
         if self._hud_overlay._floating:
             self._hud_overlay.hide()
+        annot = getattr(self, "_annotation_overlay", None)
+        if annot is not None and annot._floating:
+            annot.hide()
         super().hideEvent(event)
 
     def update(self, *args, **kwargs):
         super().update(*args, **kwargs)
         self._hud_overlay.update()
+        annot = getattr(self, "_annotation_overlay", None)
+        if annot is not None:
+            annot.update()
+
+    def annotation_overlay(self):
+        return getattr(self, "_annotation_overlay", None)
 
 
 class Viewport(QWidget):
@@ -516,7 +561,7 @@ class Viewport(QWidget):
             if 0 <= self.sequence_index < len(self.frame_slots):
                 return self.frame_slots[self.sequence_index]
             return self.frame_slots[0]
-        if self.compare_mode in (COMPARE_WIPE, COMPARE_DIFFERENCE):
+        if self.compare_mode in (COMPARE_WIPE, COMPARE_DIFFERENCE, COMPARE_BLEND):
             return self.frame_slots[0]
         return self.frame_slots[0]
 
@@ -775,6 +820,88 @@ class Viewport(QWidget):
             return f"{self.source_labels[0]} | {self.source_labels[1]}"
         return "1 | 2"
 
+    def has_review_overlays(self) -> bool:
+        settings = getattr(self.main_window, "settings", None) if self.main_window else None
+        if settings is None:
+            return False
+        return bool(
+            settings.overlay_mask_aspect > 0.0
+            or settings.overlay_action_safe > 0.0
+            or settings.overlay_title_safe > 0.0
+        )
+
+    def _image_rect_for_overlays(self) -> QRect:
+        scale_x, scale_y = self._fit_scales()
+        zoom = 1.0 if self.compare_mode == COMPARE_TILE else self.zoom
+        rectf = displayed_image_rect(
+            float(self.width()),
+            float(self.height()),
+            scale_x,
+            scale_y,
+            zoom,
+            float(self.pan_offset.x()),
+            float(self.pan_offset.y()),
+        )
+        return rectf.toRect()
+
+    def _draw_review_overlays(self, painter: QPainter) -> None:
+        if not self.has_review_overlays():
+            return
+        settings = self.main_window.settings
+        image_rect = self._image_rect_for_overlays()
+        if image_rect.isEmpty():
+            return
+
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        if settings.overlay_mask_aspect > 0.0:
+            mask = aspect_mask_rect(QRectF(image_rect), settings.overlay_mask_aspect).toRect()
+            opacity = max(0.0, min(1.0, float(settings.overlay_mask_opacity)))
+            dim = QColor(0, 0, 0, int(round(255 * opacity)))
+            # Dim regions of the image outside the aspect mask.
+            if mask.top() > image_rect.top():
+                painter.fillRect(
+                    QRect(image_rect.left(), image_rect.top(), image_rect.width(), mask.top() - image_rect.top()),
+                    dim,
+                )
+            if mask.bottom() < image_rect.bottom():
+                painter.fillRect(
+                    QRect(
+                        image_rect.left(),
+                        mask.bottom() + 1,
+                        image_rect.width(),
+                        image_rect.bottom() - mask.bottom(),
+                    ),
+                    dim,
+                )
+            if mask.left() > image_rect.left():
+                painter.fillRect(
+                    QRect(image_rect.left(), mask.top(), mask.left() - image_rect.left(), mask.height()),
+                    dim,
+                )
+            if mask.right() < image_rect.right():
+                painter.fillRect(
+                    QRect(
+                        mask.right() + 1,
+                        mask.top(),
+                        image_rect.right() - mask.right(),
+                        mask.height(),
+                    ),
+                    dim,
+                )
+
+        if settings.overlay_action_safe > 0.0:
+            action = safe_inset_rect(QRectF(image_rect), settings.overlay_action_safe).toRect()
+            painter.setPen(QPen(QColor(0, 220, 80, 200), 1, Qt.SolidLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(action)
+
+        if settings.overlay_title_safe > 0.0:
+            title = safe_inset_rect(QRectF(image_rect), settings.overlay_title_safe).toRect()
+            painter.setPen(QPen(QColor(80, 180, 255, 200), 1, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(title)
+
     def _draw_hud(self, painter: QPainter):
         painter.setRenderHint(QPainter.Antialiasing)
         metrics_rect = self.rect()
@@ -802,14 +929,18 @@ class Viewport(QWidget):
             label,
         )
 
-        if self.compare_mode == COMPARE_WIPE:
+        if self.compare_mode in (COMPARE_WIPE, COMPARE_BLEND):
             wipe_x = int(self.wipe_pos * metrics_rect.width())
-            painter.setPen(QPen(QColor(255, 165, 0, 180), 2, Qt.DashLine))
+            color = QColor(80, 200, 255, 200) if self.compare_mode == COMPARE_BLEND else QColor(255, 165, 0, 180)
+            painter.setPen(QPen(color, 2, Qt.DashLine))
             painter.drawLine(wipe_x, 0, wipe_x, metrics_rect.height())
-            painter.setPen(QPen(QColor(255, 165, 0, 220), 1))
+            painter.setPen(QPen(color, 1))
             font = mono_font(10, QFont.Weight.Bold)
             painter.setFont(font)
-            painter.drawText(wipe_x + 5, metrics_rect.height() // 2, self._wipe_label())
+            tag = "Blend" if self.compare_mode == COMPARE_BLEND else self._wipe_label()
+            if self.compare_mode == COMPARE_BLEND:
+                tag = f"{tag} {int(round(self.wipe_pos * 100))}%"
+            painter.drawText(wipe_x + 5, metrics_rect.height() // 2, tag)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -818,6 +949,12 @@ class Viewport(QWidget):
         if self.zoom_mode != "fit" and self.compare_mode != COMPARE_TILE:
             self._apply_zoom_mode()
         self.update()
+
+    def _annotation_overlay(self):
+        container = getattr(self, "viewport_container", None)
+        if container is None:
+            return None
+        return getattr(container, "_annotation_overlay", None)
 
     def mousePressEvent(self, event):
         if self.adjustment_mode and event.button() == Qt.LeftButton:
@@ -833,12 +970,27 @@ class Viewport(QWidget):
             return
 
         if event.button() == Qt.LeftButton:
-            if self.compare_mode == COMPARE_WIPE:
+            if self.compare_mode in (COMPARE_WIPE, COMPARE_BLEND):
                 click_x_ratio = event.position().x() / self.width()
                 if abs(click_x_ratio - self.wipe_pos) < 0.02:
                     self.dragging_wipe = True
                     self.setCursor(Qt.SizeHorCursor)
                     return
+
+            annot = self._annotation_overlay()
+            if annot is not None and annot.is_interactive():
+                consumed = annot.handle_press(
+                    event.position().x(),
+                    event.position().y(),
+                    parent_widget=self,
+                )
+                # Drawing tools always own left-drag (disable timeline scrub).
+                if consumed or annot.captures_left_drag():
+                    self.left_press_pos = None
+                    self.left_drag_started = False
+                    self.scrubbing_frames = False
+                    return
+
             self.left_press_pos = event.position()
             self.left_drag_started = False
             self.scrub_start_x = event.position().x()
@@ -852,6 +1004,9 @@ class Viewport(QWidget):
             self.setCursor(Qt.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
+        if self.main_window is not None and hasattr(self.main_window, "_probe_pointer_moved"):
+            self.main_window._probe_pointer_moved(event.position())
+
         if self.adjustment_mode and (event.buttons() & Qt.LeftButton):
             delta_x = event.position().x() - self.adjust_start_x
 
@@ -875,6 +1030,16 @@ class Viewport(QWidget):
                 )
                 self.main_window._update_ocio_info_label()
             self.update()
+            return
+
+        annot = self._annotation_overlay()
+        if (
+            annot is not None
+            and annot.is_interactive()
+            and (event.buttons() & Qt.LeftButton)
+            and (annot.is_annotating() or annot.captures_left_drag())
+        ):
+            annot.handle_move(event.position().x(), event.position().y())
             return
 
         if self.dragging_wipe:
@@ -903,7 +1068,7 @@ class Viewport(QWidget):
             self.pan_offset += delta
             self.last_mouse_pos = event.position().toPoint()
             self.update()
-        elif self.compare_mode == COMPARE_WIPE:
+        elif self.compare_mode in (COMPARE_WIPE, COMPARE_BLEND):
             hover_x_ratio = event.position().x() / self.width()
             if abs(hover_x_ratio - self.wipe_pos) < 0.02:
                 self.setCursor(Qt.SizeHorCursor)
@@ -920,6 +1085,22 @@ class Viewport(QWidget):
             self.update()
             return
 
+        annot = self._annotation_overlay()
+        if (
+            event.button() == Qt.LeftButton
+            and annot is not None
+            and annot.is_interactive()
+            and (annot.is_annotating() or annot.captures_left_drag())
+        ):
+            annot.handle_release(event.position().x(), event.position().y())
+            self.dragging_wipe = False
+            self.panning = False
+            self.scrubbing_frames = False
+            self.left_press_pos = None
+            self.left_drag_started = False
+            self.setCursor(Qt.ArrowCursor)
+            return
+
         if event.button() == Qt.LeftButton and self.left_press_pos is not None:
             if self.scrubbing_frames and self.main_window:
                 frame_offset = int(
@@ -927,7 +1108,13 @@ class Viewport(QWidget):
                 )
                 target_frame = self.scrub_start_frame + frame_offset
                 self.frame_scrubbed.emit(target_frame)
-            elif not self.left_drag_started and not self.dragging_wipe and self.main_window:
+            elif (
+                not self.left_drag_started
+                and not self.dragging_wipe
+                and self.main_window
+                and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            ):
+                # Plain click toggles playback; Shift+click is for pixel probe only.
                 self.main_window.toggle_playback()
 
         self.dragging_wipe = False

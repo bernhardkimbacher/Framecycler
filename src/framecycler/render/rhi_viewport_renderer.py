@@ -430,7 +430,7 @@ class RhiViewportRenderer:
         if primary is None or primary.data is None:
             return
 
-        secondary = sources[1] if len(sources) > 1 and compare_mode in (1, 2) else None
+        secondary = sources[1] if len(sources) > 1 and compare_mode in (1, 2, 4) else None
 
         self._ensure_static_resources_created()
         if not self._vertex_shader or not self._fragment_shader:

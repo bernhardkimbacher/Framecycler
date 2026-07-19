@@ -30,6 +30,8 @@ class Session:
         # Selected shot / version for metadata UI (independent of playhead sequence shot)
         self.selected_shot_index: int = 0
         self.selected_version_index: int = 0
+        # Per-shot annotation shapes (session memory only; not written to OTIO).
+        self._annotations_by_shot: Dict[int, list] = {}
 
     def set_changed_callback(self, callback: Optional[TimelineChangedCallback]) -> None:
         self._on_changed = callback
@@ -69,8 +71,25 @@ class Session:
         self.plan = PlaybackPlan()
         self.selected_shot_index = 0
         self.selected_version_index = 0
+        self._annotations_by_shot.clear()
         if self._on_changed is not None:
             self._on_changed()
+
+    def annotations_for_shot(self, shot_index: int) -> list:
+        """Return a copy of the annotation list for *shot_index* (may be empty)."""
+        items = self._annotations_by_shot.get(int(shot_index), [])
+        return list(items)
+
+    def set_annotations_for_shot(self, shot_index: int, shapes: list) -> None:
+        """Replace session annotations for *shot_index* (not persisted to OTIO)."""
+        key = int(shot_index)
+        if not shapes:
+            self._annotations_by_shot.pop(key, None)
+        else:
+            self._annotations_by_shot[key] = list(shapes)
+
+    def clear_annotations_for_shot(self, shot_index: int) -> None:
+        self._annotations_by_shot.pop(int(shot_index), None)
 
     @property
     def empty(self) -> bool:

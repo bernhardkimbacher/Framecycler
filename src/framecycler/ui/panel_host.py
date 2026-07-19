@@ -49,6 +49,8 @@ class PanelHost:
         self._panels_menu: QMenu | None = None
         self._finalized = False
         self._syncing_visibility = False
+        self._layout_changed_callback: Callable[[], None] | None = None
+        self._restoring_layout = False
 
     @property
     def finalized(self) -> bool:
@@ -137,8 +139,6 @@ class PanelHost:
                 self.set_visible(spec.panel_id, spec.visible_by_default)
 
         self._restore_layout(settings)
-        self._clamp_floating_docks()
-        self._sync_all_actions()
         self._finalized = True
 
     def ensure_widget(self, panel_id: str) -> QWidget | None:
@@ -196,6 +196,10 @@ class PanelHost:
         for panel_id in to_remove:
             self._remove_panel(panel_id)
 
+    def set_layout_changed_callback(self, callback: Callable[[], None] | None) -> None:
+        """Invoked when the user moves/floats/closes a dock (not during restore)."""
+        self._layout_changed_callback = callback
+
     def save_layout(self, settings: "Settings") -> None:
         if self._main_window is None:
             return
@@ -204,27 +208,50 @@ class PanelHost:
         geom = bytes(self._main_window.saveGeometry())
         settings.main_window_geometry = base64.b64encode(geom).decode("ascii")
 
-    def _has_saved_state(self, settings: "Settings") -> bool:
+    def has_saved_state(self, settings: "Settings") -> bool:
         raw = getattr(settings, "main_window_state", None) or ""
         return bool(str(raw).strip())
+
+    def _has_saved_state(self, settings: "Settings") -> bool:
+        return self.has_saved_state(settings)
+
+    def restore_layout(self, settings: "Settings") -> None:
+        """Public restore entry (also used after the window is shown)."""
+        self._restore_layout(settings)
 
     def _restore_layout(self, settings: "Settings") -> None:
         if self._main_window is None:
             return
-        geom_b64 = getattr(settings, "main_window_geometry", None) or ""
-        if geom_b64:
-            try:
-                geom = QByteArray(base64.b64decode(str(geom_b64)))
-                self._main_window.restoreGeometry(geom)
-            except Exception:
-                logger.exception("Failed to restore main window geometry")
-        state_b64 = getattr(settings, "main_window_state", None) or ""
-        if state_b64:
-            try:
-                state = QByteArray(base64.b64decode(str(state_b64)))
-                self._main_window.restoreState(state)
-            except Exception:
-                logger.exception("Failed to restore main window dock state")
+        self._restoring_layout = True
+        try:
+            geom_b64 = getattr(settings, "main_window_geometry", None) or ""
+            if geom_b64:
+                try:
+                    geom = QByteArray(base64.b64decode(str(geom_b64)))
+                    self._main_window.restoreGeometry(geom)
+                except Exception:
+                    logger.exception("Failed to restore main window geometry")
+            state_b64 = getattr(settings, "main_window_state", None) or ""
+            if state_b64:
+                try:
+                    state = QByteArray(base64.b64decode(str(state_b64)))
+                    ok = self._main_window.restoreState(state)
+                    if not ok:
+                        logger.warning("QMainWindow.restoreState returned false")
+                except Exception:
+                    logger.exception("Failed to restore main window dock state")
+            self._clamp_floating_docks()
+            self._sync_all_actions()
+        finally:
+            self._restoring_layout = False
+
+    def _emit_layout_changed(self) -> None:
+        if self._restoring_layout or self._layout_changed_callback is None:
+            return
+        try:
+            self._layout_changed_callback()
+        except Exception:
+            logger.exception("layout_changed callback failed")
 
     def _clamp_floating_docks(self) -> None:
         screens = QGuiApplication.screens()
@@ -270,6 +297,8 @@ class PanelHost:
         dock.visibilityChanged.connect(
             lambda visible, pid=spec.panel_id: self._on_dock_visibility(pid, visible)
         )
+        dock.dockLocationChanged.connect(lambda *_args: self._emit_layout_changed())
+        dock.topLevelChanged.connect(lambda *_args: self._emit_layout_changed())
         self._docks[spec.panel_id] = dock
 
     def _add_view_action(self, spec: PanelSpec) -> None:
@@ -295,6 +324,7 @@ class PanelHost:
         if visible:
             self.ensure_widget(panel_id)
         self._sync_action(panel_id, visible and self.is_visible(panel_id))
+        self._emit_layout_changed()
 
     def _sync_action(self, panel_id: str, visible: bool) -> None:
         action = self._actions.get(panel_id)

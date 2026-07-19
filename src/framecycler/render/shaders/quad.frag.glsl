@@ -51,6 +51,9 @@ void main() {
         } else {
             finalColor = texture(texB, vec2((vUV.x - 0.5) * 2.0, vUV.y));
         }
+    } else if (uFrame.compareMode == 4) {
+        // Blend: active/compare mix; wipePos is the blend amount (0=A, 1=B).
+        finalColor = mix(colorA, colorB, clamp(uFrame.wipePos, 0.0, 1.0));
     }
 
     if (uFrame.channelMask == 1) {

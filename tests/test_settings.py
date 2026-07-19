@@ -46,6 +46,7 @@ class TestSettings(unittest.TestCase):
         self.settings.display_cache_limit_gb = 4.0
         self.settings.default_fps = 30.0
         self.settings.resolution_scale = 0.5
+        self.settings.pixel_probe_geometry = [120, 80, 300, 400]
         self.settings.save()
 
         new_settings = Settings(config_dir=self.settings.config_dir)
@@ -56,6 +57,7 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(new_settings.display_cache_limit_gb, 4.0)
         self.assertEqual(new_settings.default_fps, 30.0)
         self.assertEqual(new_settings.resolution_scale, 1.0)
+        self.assertEqual(new_settings.pixel_probe_geometry, [120, 80, 300, 400])
 
     def test_legacy_ram_key_migration(self):
         config_path = os.path.join(self.settings.config_dir, "settings.json")

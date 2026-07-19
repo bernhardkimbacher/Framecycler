@@ -41,6 +41,13 @@ class Settings:
         # QMainWindow.saveState / saveGeometry as base64 (dock layout + window geom)
         self.main_window_state: str = ""
         self.main_window_geometry: str = ""
+        # Pixel probe Tool window: [x, y, width, height] in screen coords; empty = default.
+        self.pixel_probe_geometry: list[int] = []
+        # Review overlays (View → Overlay). Aspect/safe use 0 for Off.
+        self.overlay_mask_aspect: float = 0.0  # width/height; 0 = Off
+        self.overlay_mask_opacity: float = 0.5  # 0..1
+        self.overlay_action_safe: float = 0.0  # per-side inset fraction; 0 = Off
+        self.overlay_title_safe: float = 0.0
 
         self.load()
 
@@ -118,6 +125,30 @@ class Settings:
                 self.main_window_state = str(raw_state) if raw_state else ""
                 raw_geom = data.get("main_window_geometry", self.main_window_geometry)
                 self.main_window_geometry = str(raw_geom) if raw_geom else ""
+                raw_probe = data.get("pixel_probe_geometry", self.pixel_probe_geometry)
+                if (
+                    isinstance(raw_probe, list)
+                    and len(raw_probe) == 4
+                    and all(isinstance(v, (int, float)) for v in raw_probe)
+                ):
+                    self.pixel_probe_geometry = [int(v) for v in raw_probe]
+                else:
+                    self.pixel_probe_geometry = []
+                self.overlay_mask_aspect = float(
+                    data.get("overlay_mask_aspect", self.overlay_mask_aspect) or 0.0
+                )
+                self.overlay_mask_opacity = max(
+                    0.0,
+                    min(1.0, float(data.get("overlay_mask_opacity", self.overlay_mask_opacity))),
+                )
+                self.overlay_action_safe = max(
+                    0.0,
+                    min(0.49, float(data.get("overlay_action_safe", self.overlay_action_safe) or 0.0)),
+                )
+                self.overlay_title_safe = max(
+                    0.0,
+                    min(0.49, float(data.get("overlay_title_safe", self.overlay_title_safe) or 0.0)),
+                )
         except Exception as e:
             print(f"Error loading settings: {e}")
         self.clamp_cache_limits_to_platform()
@@ -141,6 +172,11 @@ class Settings:
                 "timeline_splitter_sizes": self.timeline_splitter_sizes,
                 "main_window_state": self.main_window_state,
                 "main_window_geometry": self.main_window_geometry,
+                "pixel_probe_geometry": self.pixel_probe_geometry,
+                "overlay_mask_aspect": self.overlay_mask_aspect,
+                "overlay_mask_opacity": self.overlay_mask_opacity,
+                "overlay_action_safe": self.overlay_action_safe,
+                "overlay_title_safe": self.overlay_title_safe,
             }
             with open(self.config_path, "w") as f:
                 json.dump(data, f, indent=4)

@@ -1,6 +1,7 @@
 #pragma once
-#include <deque>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <set>
 #include <shared_mutex>
 #include <string>
@@ -42,6 +43,12 @@ public:
     const uint16_t* get_frame_data(int frame_index, int& width, int& height, int& channels);
     bool get_frame_dimensions(int frame_index, int& width, int& height, int& channels);
     bool copy_frame_data(int frame_index, uint16_t* dest_ptr, size_t dest_size_elements);
+
+    /// Call *fn* while holding the shared cache lock with a stable frame pointer.
+    /// Returns false if the frame is missing/inactive.
+    bool with_active_frame(
+        int frame_index,
+        const std::function<void(const uint16_t* data, int width, int height, int channels)>& fn);
 
     std::vector<int> get_cached_frames();
     void clear();

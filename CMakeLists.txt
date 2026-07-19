@@ -54,6 +54,7 @@ pybind11_add_module(framecycler_engine
     src/cpp/engine/native_decoder.cpp
     src/cpp/engine/native_movie_decoder.cpp
     src/cpp/engine/transport_clock.cpp
+    src/cpp/engine/scope_analyzer.cpp
 )
 
 target_include_directories(framecycler_engine PRIVATE src/cpp/engine)

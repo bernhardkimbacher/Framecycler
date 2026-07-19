@@ -21,8 +21,16 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QToolButton,
 )
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut, QFont
+from PySide6.QtCore import Qt, QTimer, Signal, QEvent, QPointF
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCursor,
+    QKeySequence,
+    QShortcut,
+    QFont,
+    QShowEvent,
+)
 
 from .. import framecycler_engine
 from ..core.settings import Settings
@@ -41,7 +49,14 @@ from ..decoders.exr_decoder import EXRDecoder
 from ..decoders.image_io import ANAMORPHIC_PIXEL_ASPECT, SQUARE_PIXEL_ASPECT
 from ..packages.manager import PackageManager
 
-from .viewport import ViewportContainer, COMPARE_SEQUENCE
+from .viewport import (
+    ViewportContainer,
+    COMPARE_SEQUENCE,
+    COMPARE_WIPE,
+    COMPARE_DIFFERENCE,
+    COMPARE_TILE,
+    COMPARE_BLEND,
+)
 from .timeline import Timeline
 from .timeline_editor import TimelineSegmentInfo, TimelineVersionInfo
 from .theme import get_viewfinder_stylesheet
@@ -52,6 +67,10 @@ from .source_list_panel import SourceListPanel
 from .panel_host import PanelHost
 from .keybind_registry import KeybindRegistry
 from .drag_drop_overlay import DragDropOverlay
+from .pixel_probe import PixelProbeWindow
+from .probe_sampling import sample_probe, widget_to_image_xy
+from .scopes import ScopesPanel
+from .annotations import AnnotationsPanel
 
 PRESET_FRAME_RATES = [
     ("23.976", 23.976),
@@ -148,6 +167,12 @@ class MainWindow(QMainWindow):
         
         self.package_manager = PackageManager(self, config_dir=self.settings.config_dir)
         self.panel_host = PanelHost()
+        self._dock_layout_applied = False
+        self._layout_save_timer = QTimer(self)
+        self._layout_save_timer.setSingleShot(True)
+        self._layout_save_timer.setInterval(400)
+        self._layout_save_timer.timeout.connect(self._persist_settings)
+        self.panel_host.set_layout_changed_callback(self._schedule_layout_persist)
         self.keybind_registry = KeybindRegistry(self)
         self.source_panel: SourceListPanel | None = None
         self.session.media_pool.set_decoder_resolver(self.package_manager.resolve_decoder)
@@ -164,6 +189,36 @@ class MainWindow(QMainWindow):
         # Check renderer initialization status on startup
         QTimer.singleShot(500, self._check_renderer_status)
 
+    def _schedule_layout_persist(self) -> None:
+        """Debounce writing dock layout so drags don't spam disk."""
+        if self._layout_save_timer.isActive():
+            self._layout_save_timer.stop()
+        self._layout_save_timer.start()
+
+    def _persist_settings(self) -> None:
+        """Save settings including the current dock / window layout."""
+        if hasattr(self, "panel_host"):
+            self.panel_host.save_layout(self.settings)
+        if hasattr(self, "main_splitter"):
+            sizes = self.main_splitter.sizes()
+            if len(sizes) == 2 and sizes[1] > 0:
+                self.settings.timeline_splitter_sizes = sizes
+        if hasattr(self, "_pixel_probe"):
+            # Persist last known probe frame even when currently hidden.
+            geo = self._pixel_probe.geometry_list()
+            if geo[2] > 0 and geo[3] > 0:
+                self.settings.pixel_probe_geometry = geo
+        self.settings.save()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        # Re-apply dock state after the window is visible — more reliable on macOS
+        # than restoreState during __init__ alone.
+        if not self._dock_layout_applied and hasattr(self, "panel_host"):
+            self._dock_layout_applied = True
+            if self.panel_host.has_saved_state(self.settings):
+                self.panel_host.restore_layout(self.settings)
+
     @property
     def sources(self) -> list:
         """Compatibility: online media sources currently in the pool."""
@@ -177,6 +232,20 @@ class MainWindow(QMainWindow):
         self.viewport.wipe_changed.connect(self._on_wipe_moved)
         self.viewport.frame_scrubbed.connect(self._on_timeline_scrub)
         self.viewport.zoom_mode_changed.connect(self._sync_zoom_actions)
+        self.viewport.zoom_mode_changed.connect(self._probe_on_view_changed)
+
+        self._pixel_probe = PixelProbeWindow(self)
+        self._pixel_probe.closed_by_user.connect(self._on_pixel_probe_closed)
+        self._pixel_probe.needs_resample.connect(self._probe_on_magnifier_resized)
+        self._pixel_probe.geometry_changed.connect(self._schedule_layout_persist)
+        self._probe_geometry_restored = False
+        self._probe_last_pos: QPointF | None = None
+        self._probe_hover_timer = QTimer(self)
+        self._probe_hover_timer.setInterval(33)
+        self._probe_hover_timer.timeout.connect(self._probe_poll_cursor)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         
         # NLE timeline editor
         self.timeline = Timeline(self)
@@ -259,6 +328,27 @@ class MainWindow(QMainWindow):
             eager=True,
             on_created=self._on_shots_panel_created,
         )
+        self.panel_host.register_builtin(
+            "scopes",
+            title="Scopes",
+            factory=lambda parent: ScopesPanel(self, parent),
+            default_area="right",
+            visible_by_default=False,
+            eager=True,
+            on_created=self._on_scopes_panel_created,
+        )
+        self.panel_host.register_builtin(
+            "annotations",
+            title="Annotations",
+            factory=lambda parent: AnnotationsPanel(self, parent),
+            default_area="right",
+            visible_by_default=False,
+            eager=True,
+            on_created=self._on_annotations_panel_created,
+        )
+        self.scopes_panel = None
+        self.annotations_panel = None
+        self._annot_shot_index = None
 
         readout_widget = QWidget()
         readout_layout = QGridLayout(readout_widget)
@@ -390,6 +480,9 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
         self._panels_menu = view_menu.addMenu("Panels")
+
+        add_menu_section(view_menu, "Overlay")
+        self._build_overlay_menus(view_menu)
 
         add_menu_section(view_menu, "Zoom")
         self.zoom_actions = []
@@ -547,9 +640,10 @@ class MainWindow(QMainWindow):
         self.compare_actions = []
         compare_modes = [
             ("Sequence", COMPARE_SEQUENCE),
-            ("Wipe", 1),
-            ("Difference", 2),
-            ("Tile", 3),
+            ("Wipe", COMPARE_WIPE),
+            ("Difference", COMPARE_DIFFERENCE),
+            ("Tile", COMPARE_TILE),
+            ("Blend", COMPARE_BLEND),
         ]
         for label, mode in compare_modes:
             act = QAction(label, self)
@@ -558,6 +652,15 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, m=mode: self._set_compare_mode(m))
             tools_menu.addAction(act)
             self.compare_actions.append((mode, act))
+
+        tools_menu.addSeparator()
+        self.act_pixel_probe = QAction("Pixel Probe", self)
+        self.act_pixel_probe.setCheckable(True)
+        self.act_pixel_probe.setToolTip(
+            "Toggle pixel probe. Press Shift over the viewer to open; updates on hover. Esc closes."
+        )
+        self.act_pixel_probe.toggled.connect(self._on_pixel_probe_toggled)
+        tools_menu.addAction(self.act_pixel_probe)
         
         # OCIO Pipeline menu
         self.ocio_menu = menubar.addMenu("&OCIO")
@@ -757,6 +860,332 @@ class MainWindow(QMainWindow):
         self.viewport.hud_visible = bool(visible)
         self.viewport.update()
 
+    def eventFilter(self, obj, event):
+        # Track Shift globally so the hold-Shift probe works even if the
+        # native QWindow does not have keyboard focus.
+        et = event.type()
+        if et in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            if event.key() == Qt.Key.Key_Shift:
+                # Re-read modifiers after the event updates them.
+                QTimer.singleShot(0, self._sync_probe_from_modifiers)
+        return super().eventFilter(obj, event)
+
+    def _sync_probe_from_modifiers(self) -> None:
+        held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if held:
+            # Shift opens the probe; releasing Shift leaves it open (Esc / menu toggle closes).
+            self._open_pixel_probe()
+
+    def _on_pixel_probe_toggled(self, checked: bool) -> None:
+        if checked:
+            self._open_pixel_probe()
+        else:
+            self._close_pixel_probe()
+
+    def _on_pixel_probe_closed(self) -> None:
+        self._close_pixel_probe()
+
+    def _open_pixel_probe(self) -> None:
+        self._pixel_probe.set_sticky(True)
+        if not self._probe_geometry_restored:
+            self._probe_geometry_restored = True
+            self._pixel_probe.restore_geometry_list(self.settings.pixel_probe_geometry)
+        self._pixel_probe.show()
+        self._pixel_probe.raise_()
+        if hasattr(self, "act_pixel_probe") and not self.act_pixel_probe.isChecked():
+            self.act_pixel_probe.blockSignals(True)
+            self.act_pixel_probe.setChecked(True)
+            self.act_pixel_probe.blockSignals(False)
+        self._probe_hover_timer.start()
+        self._probe_poll_cursor()
+
+    def _close_pixel_probe(self) -> None:
+        self._probe_hover_timer.stop()
+        # Capture position before hide so restart can reopen here.
+        self.settings.pixel_probe_geometry = self._pixel_probe.geometry_list()
+        self._pixel_probe.set_sticky(False)
+        self._pixel_probe.hide()
+        if hasattr(self, "act_pixel_probe") and self.act_pixel_probe.isChecked():
+            self.act_pixel_probe.blockSignals(True)
+            self.act_pixel_probe.setChecked(False)
+            self.act_pixel_probe.blockSignals(False)
+        self._schedule_layout_persist()
+
+    def _probe_poll_cursor(self) -> None:
+        """Sample under the cursor while the probe is open (QWindow has no mouse tracking)."""
+        if not self._pixel_probe.isVisible():
+            self._probe_hover_timer.stop()
+            return
+        vp = self.viewport
+        # Map through the Viewport widget (same space as RenderParams / fit scales).
+        local = vp.mapFromGlobal(QCursor.pos())
+        if local.x() < 0 or local.y() < 0 or local.x() >= vp.width() or local.y() >= vp.height():
+            return
+        pos = QPointF(float(local.x()), float(local.y()))
+        self._probe_last_pos = pos
+        self._probe_sample_at(pos)
+
+    def _probe_pointer_moved(self, widget_pos: QPointF) -> None:
+        # Window mouse events are in QWindow space; convert via global so they
+        # match Viewport coordinates used for zoom/pan uniforms.
+        vp = self.viewport
+        win = getattr(vp, "viewport_window", None)
+        if win is not None:
+            global_pt = win.mapToGlobal(widget_pos.toPoint())
+            local = vp.mapFromGlobal(global_pt)
+            widget_pos = QPointF(float(local.x()), float(local.y()))
+        self._probe_last_pos = QPointF(widget_pos)
+        if self._pixel_probe.isVisible():
+            self._probe_sample_at(widget_pos)
+
+    def _probe_on_magnifier_resized(self) -> None:
+        if not self._pixel_probe.isVisible():
+            return
+        if self._probe_last_pos is not None:
+            self._probe_sample_at(self._probe_last_pos)
+        else:
+            self._probe_poll_cursor()
+
+    def _probe_on_view_changed(self, *_args) -> None:
+        """Re-sample after zoom/fit changes so the probe tracks the new transform."""
+        if not self._pixel_probe.isVisible():
+            return
+        self._probe_poll_cursor()
+
+    def _active_display_version(self):
+        """Return (segment, version) for the primary display slot, or (None, None)."""
+        plan = self.session.plan
+        if plan.empty:
+            return None, None
+        segment = plan.segment_at(self.current_frame)
+        if segment is None:
+            return None, None
+        versions = segment.display_versions()
+        if not versions:
+            return None, None
+        version = next((v for v in versions if v.is_active), versions[0])
+        if version.source is None or version.source.cache is None or version.offline:
+            return None, None
+        return segment, version
+
+    def _scopes_active_frame_ref(self):
+        """Return (native_cache, decoder_frame) for scopes C++ downsample path."""
+        segment, version = self._active_display_version()
+        if segment is None or version is None:
+            return None, None
+        native = version.source.cache.native_cache
+        if native is None:
+            return None, None
+        decoder_frame = self.session.plan.decoder_frame_for_version(
+            segment, version, self.current_frame
+        )
+        return native, decoder_frame
+
+    def _probe_active_frame_array(self):
+        """Return (numpy HxWxC float16/float32, decoder_frame) for the primary display version."""
+        import numpy as np
+
+        segment, version = self._active_display_version()
+        if segment is None or version is None:
+            return None, None
+        decoder_frame = self.session.plan.decoder_frame_for_version(
+            segment, version, self.current_frame
+        )
+        native = version.source.cache.native_cache
+        if native is None or not hasattr(native, "get_frame_data"):
+            return None, None
+        arr = native.get_frame_data(decoder_frame)
+        if arr is None:
+            return None, None
+        return np.asarray(arr), decoder_frame
+
+    def _probe_sample_at(self, widget_pos: QPointF) -> None:
+        vp = self.viewport
+        arr, _decoder_frame = self._probe_active_frame_array()
+        if arr is None:
+            self._pixel_probe.show_sample(None)
+            return
+        scale_x, scale_y = vp._fit_scales()
+        zoom = 1.0 if vp.compare_mode == COMPARE_TILE else vp.zoom
+        # Prefer the same dimensions used for fit/zoom uniforms (slot), then
+        # scale into the cache array if they ever diverge.
+        primary = vp._primary_slot()
+        map_w = int(primary.width) if primary is not None and primary.width > 0 else int(arr.shape[1])
+        map_h = int(primary.height) if primary is not None and primary.height > 0 else int(arr.shape[0])
+        mapped = widget_to_image_xy(
+            float(widget_pos.x()),
+            float(widget_pos.y()),
+            float(vp.width()),
+            float(vp.height()),
+            scale_x,
+            scale_y,
+            zoom,
+            float(vp.pan_offset.x()),
+            float(vp.pan_offset.y()),
+            map_w,
+            map_h,
+        )
+        if mapped is None:
+            self._pixel_probe.show_sample(None)
+            return
+        x, y = mapped
+        arr_h, arr_w = int(arr.shape[0]), int(arr.shape[1])
+        if map_w != arr_w or map_h != arr_h:
+            x = int(round(x * (arr_w - 1) / max(1, map_w - 1))) if map_w > 1 else 0
+            y = int(round(y * (arr_h - 1) / max(1, map_h - 1))) if map_h > 1 else 0
+        par = 1.0
+        if primary is not None and primary.pixel_aspect_ratio > 0.0:
+            par = float(primary.pixel_aspect_ratio)
+        elif getattr(vp, "pixel_aspect_ratio", 0.0) > 0.0:
+            par = float(vp.pixel_aspect_ratio)
+        # Quiet PAR update so texel counts use the correct cell aspect (no resample loop).
+        self._pixel_probe.set_pixel_aspect_ratio(par, resample=False)
+        radius_x, radius_y = self._pixel_probe.magnifier_texel_radii()
+        sample = sample_probe(
+            arr,
+            x,
+            y,
+            timeline_frame=int(self.current_frame),
+            ocio_manager=self.ocio_manager,
+            radius_x=radius_x,
+            radius_y=radius_y,
+            pixel_aspect_ratio=par,
+        )
+        self._pixel_probe.show_sample(sample)
+
+    def _build_overlay_menus(self, view_menu: QMenu) -> None:
+        mask_menu = view_menu.addMenu("Mask")
+        self._overlay_mask_actions: list[tuple[float, QAction]] = []
+        mask_choices = [
+            ("Off (Default)", 0.0),
+            ("1.78:1", 16.0 / 9.0),
+            ("1.85:1", 1.85),
+            ("2.39:1", 2.39),
+            ("2.40:1", 2.40),
+        ]
+        for label, aspect in mask_choices:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(self._aspect_matches(self.settings.overlay_mask_aspect, aspect))
+            act.triggered.connect(lambda checked=False, a=aspect: self._set_overlay_mask_aspect(a))
+            mask_menu.addAction(act)
+            self._overlay_mask_actions.append((aspect, act))
+        act_custom = QAction("Custom…", self)
+        act_custom.triggered.connect(self._set_overlay_mask_aspect_custom)
+        mask_menu.addAction(act_custom)
+
+        opacity_menu = view_menu.addMenu("Mask Opacity")
+        self._overlay_opacity_actions: list[tuple[float, QAction]] = []
+        for label, opacity in (("100%", 1.0), ("75%", 0.75), ("50%", 0.5), ("25%", 0.25)):
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(abs(self.settings.overlay_mask_opacity - opacity) < 1e-3)
+            act.triggered.connect(lambda checked=False, o=opacity: self._set_overlay_mask_opacity(o))
+            opacity_menu.addAction(act)
+            self._overlay_opacity_actions.append((opacity, act))
+        act_op_custom = QAction("Custom…", self)
+        act_op_custom.triggered.connect(self._set_overlay_mask_opacity_custom)
+        opacity_menu.addAction(act_op_custom)
+
+        action_safe_menu = view_menu.addMenu("Action Safe")
+        self._overlay_action_safe_actions: list[tuple[float, QAction]] = []
+        for label, frac in (("Off (Default)", 0.0), ("5%", 0.05), ("10%", 0.10)):
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(abs(self.settings.overlay_action_safe - frac) < 1e-4)
+            act.triggered.connect(lambda checked=False, f=frac: self._set_overlay_action_safe(f))
+            action_safe_menu.addAction(act)
+            self._overlay_action_safe_actions.append((frac, act))
+        act_as_custom = QAction("Custom…", self)
+        act_as_custom.triggered.connect(self._set_overlay_action_safe_custom)
+        action_safe_menu.addAction(act_as_custom)
+
+        title_safe_menu = view_menu.addMenu("Title Safe")
+        self._overlay_title_safe_actions: list[tuple[float, QAction]] = []
+        for label, frac in (("Off (Default)", 0.0), ("10%", 0.10), ("20%", 0.20)):
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(abs(self.settings.overlay_title_safe - frac) < 1e-4)
+            act.triggered.connect(lambda checked=False, f=frac: self._set_overlay_title_safe(f))
+            title_safe_menu.addAction(act)
+            self._overlay_title_safe_actions.append((frac, act))
+        act_ts_custom = QAction("Custom…", self)
+        act_ts_custom.triggered.connect(self._set_overlay_title_safe_custom)
+        title_safe_menu.addAction(act_ts_custom)
+
+    @staticmethod
+    def _aspect_matches(current: float, target: float, tol: float = 1e-3) -> bool:
+        if target <= 0.0:
+            return current <= 0.0
+        return abs(current - target) < tol
+
+    def _sync_overlay_menus(self) -> None:
+        if hasattr(self, "_overlay_mask_actions"):
+            for aspect, act in self._overlay_mask_actions:
+                act.setChecked(self._aspect_matches(self.settings.overlay_mask_aspect, aspect))
+        if hasattr(self, "_overlay_opacity_actions"):
+            for opacity, act in self._overlay_opacity_actions:
+                act.setChecked(abs(self.settings.overlay_mask_opacity - opacity) < 1e-3)
+        if hasattr(self, "_overlay_action_safe_actions"):
+            for frac, act in self._overlay_action_safe_actions:
+                act.setChecked(abs(self.settings.overlay_action_safe - frac) < 1e-4)
+        if hasattr(self, "_overlay_title_safe_actions"):
+            for frac, act in self._overlay_title_safe_actions:
+                act.setChecked(abs(self.settings.overlay_title_safe - frac) < 1e-4)
+
+    def _refresh_overlays(self) -> None:
+        self._persist_settings()
+        self._sync_overlay_menus()
+        self.viewport.update()
+
+    def _set_overlay_mask_aspect(self, aspect: float) -> None:
+        self.settings.overlay_mask_aspect = max(0.0, float(aspect))
+        self._refresh_overlays()
+
+    def _set_overlay_mask_aspect_custom(self) -> None:
+        current = self.settings.overlay_mask_aspect if self.settings.overlay_mask_aspect > 0 else 1.78
+        value, ok = QInputDialog.getDouble(
+            self, "Custom Mask Aspect", "Aspect ratio (width / height):", current, 0.1, 10.0, 3
+        )
+        if ok:
+            self._set_overlay_mask_aspect(value)
+
+    def _set_overlay_mask_opacity(self, opacity: float) -> None:
+        self.settings.overlay_mask_opacity = max(0.0, min(1.0, float(opacity)))
+        self._refresh_overlays()
+
+    def _set_overlay_mask_opacity_custom(self) -> None:
+        current = self.settings.overlay_mask_opacity * 100.0
+        value, ok = QInputDialog.getDouble(
+            self, "Custom Mask Opacity", "Opacity (%):", current, 0.0, 100.0, 1
+        )
+        if ok:
+            self._set_overlay_mask_opacity(value / 100.0)
+
+    def _set_overlay_action_safe(self, fraction: float) -> None:
+        self.settings.overlay_action_safe = max(0.0, min(0.49, float(fraction)))
+        self._refresh_overlays()
+
+    def _set_overlay_action_safe_custom(self) -> None:
+        current = self.settings.overlay_action_safe * 100.0
+        value, ok = QInputDialog.getDouble(
+            self, "Custom Action Safe", "Inset per side (%):", current, 0.0, 49.0, 1
+        )
+        if ok:
+            self._set_overlay_action_safe(value / 100.0)
+
+    def _set_overlay_title_safe(self, fraction: float) -> None:
+        self.settings.overlay_title_safe = max(0.0, min(0.49, float(fraction)))
+        self._refresh_overlays()
+
+    def _set_overlay_title_safe_custom(self) -> None:
+        current = self.settings.overlay_title_safe * 100.0
+        value, ok = QInputDialog.getDouble(
+            self, "Custom Title Safe", "Inset per side (%):", current, 0.0, 49.0, 1
+        )
+        if ok:
+            self._set_overlay_title_safe(value / 100.0)
+
     def _on_shots_panel_created(self, panel: QWidget) -> None:
         if not isinstance(panel, SourceListPanel):
             return
@@ -767,6 +1196,123 @@ class MainWindow(QMainWindow):
         panel.active_version_changed.connect(self._on_active_version_changed)
         panel.order_changed.connect(self._on_shot_order_changed)
         panel.hide_requested.connect(lambda: self.panel_host.set_visible("builtin.shots", False))
+
+    def _on_scopes_panel_created(self, panel: QWidget) -> None:
+        if not isinstance(panel, ScopesPanel):
+            return
+        self.scopes_panel = panel
+        panel.set_providers(
+            cache_provider=self._scopes_active_frame_ref,
+            frame_provider=self._probe_active_frame_array,
+            ocio_provider=lambda: self.ocio_manager,
+            playing_provider=lambda: bool(self.playing),
+        )
+        panel.hide_requested.connect(lambda: self.panel_host.set_visible("builtin.scopes", False))
+        dock = self.panel_host.dock("builtin.scopes")
+        if dock is not None:
+            dock.visibilityChanged.connect(panel.set_active)
+            if not dock.isHidden():
+                panel.set_active(True)
+
+    def _notify_scopes_frame_changed(self) -> None:
+        panel = getattr(self, "scopes_panel", None)
+        if panel is not None:
+            panel.notify_frame_changed()
+
+    def _annotation_overlay(self):
+        panel = getattr(self, "viewport_panel", None)
+        if panel is None:
+            return None
+        return panel.annotation_overlay()
+
+    def _on_annotations_panel_created(self, panel: QWidget) -> None:
+        if not isinstance(panel, AnnotationsPanel):
+            return
+        self.annotations_panel = panel
+        overlay = self._annotation_overlay()
+        if overlay is not None:
+            overlay.set_tool(panel.tool)
+            overlay.set_color(panel.color)
+            overlay.set_thickness(panel.thickness)
+            overlay.shapes_changed.connect(self._on_annotation_shapes_changed)
+            overlay.selection_changed.connect(self._on_annotation_selection_changed)
+        panel.tool_changed.connect(self._on_annotation_tool_changed)
+        panel.color_changed.connect(self._on_annotation_color_changed)
+        panel.thickness_changed.connect(self._on_annotation_thickness_changed)
+        panel.clear_requested.connect(self._on_annotation_clear)
+        panel.delete_requested.connect(self._on_annotation_delete)
+        panel.hide_requested.connect(
+            lambda: self.panel_host.set_visible("builtin.annotations", False)
+        )
+        dock = self.panel_host.dock("builtin.annotations")
+        if dock is not None:
+            dock.visibilityChanged.connect(self._on_annotations_visibility_changed)
+            if not dock.isHidden():
+                self._on_annotations_visibility_changed(True)
+
+    def _on_annotations_visibility_changed(self, visible: bool) -> None:
+        overlay = self._annotation_overlay()
+        if overlay is None:
+            return
+        overlay.set_interactive(bool(visible))
+        if visible:
+            self._sync_annotations_for_playhead(force=True)
+
+    def _on_annotation_tool_changed(self, tool) -> None:
+        overlay = self._annotation_overlay()
+        if overlay is not None:
+            overlay.set_tool(tool)
+
+    def _on_annotation_color_changed(self, color: str) -> None:
+        overlay = self._annotation_overlay()
+        if overlay is not None:
+            overlay.set_color(color)
+
+    def _on_annotation_thickness_changed(self, thickness: float) -> None:
+        overlay = self._annotation_overlay()
+        if overlay is not None:
+            overlay.set_thickness(thickness)
+
+    def _on_annotation_shapes_changed(self) -> None:
+        overlay = self._annotation_overlay()
+        if overlay is None or self._annot_shot_index is None:
+            return
+        self.session.set_annotations_for_shot(self._annot_shot_index, overlay.shapes())
+        self._on_annotation_selection_changed()
+
+    def _on_annotation_selection_changed(self) -> None:
+        panel = getattr(self, "annotations_panel", None)
+        overlay = self._annotation_overlay()
+        if panel is not None and overlay is not None:
+            panel.set_selection_enabled(overlay.selected_count() > 0)
+
+    def _on_annotation_clear(self) -> None:
+        overlay = self._annotation_overlay()
+        if overlay is not None:
+            overlay.clear_all()
+
+    def _on_annotation_delete(self) -> None:
+        overlay = self._annotation_overlay()
+        if overlay is not None:
+            overlay.delete_selected()
+
+    def _sync_annotations_for_playhead(self, *, force: bool = False) -> None:
+        """Load per-shot annotations when the playhead shot changes."""
+        overlay = self._annotation_overlay()
+        if overlay is None:
+            return
+        shot = self.session.playhead_shot_version(self.current_frame)
+        shot_index = shot[0] if shot is not None else None
+        if not force and shot_index == self._annot_shot_index:
+            return
+        if self._annot_shot_index is not None and overlay.shapes():
+            self.session.set_annotations_for_shot(self._annot_shot_index, overlay.shapes())
+        self._annot_shot_index = shot_index
+        if shot_index is None:
+            overlay.set_shapes([])
+        else:
+            overlay.set_shapes(self.session.annotations_for_shot(shot_index))
+        self._on_annotation_selection_changed()
 
     def _set_source_panel_visible(self, visible: bool):
         self.panel_host.set_visible("builtin.shots", visible)
@@ -813,6 +1359,8 @@ class MainWindow(QMainWindow):
         self.pixel_aspect_mode = mode
         self.file_pixel_aspect_ratio = par
         self.viewport.set_pixel_aspect_ratio(par)
+        if hasattr(self, "_pixel_probe"):
+            self._pixel_probe.set_pixel_aspect_ratio(par)
         if hasattr(self, "pixel_aspect_actions"):
             for m, act in self.pixel_aspect_actions:
                 act.setChecked(m == mode)
@@ -1111,7 +1659,7 @@ class MainWindow(QMainWindow):
         sizes = self.main_splitter.sizes()
         if len(sizes) == 2 and sizes[1] > 0:
             self.settings.timeline_splitter_sizes = sizes
-            self.settings.save()
+            self._persist_settings()
 
     def _push_timeline_segments(self, plan) -> None:
         segments: list[TimelineSegmentInfo] = []
@@ -1355,6 +1903,8 @@ class MainWindow(QMainWindow):
                     frame, self.viewport.current_timecode, coalesce=True
                 )
             self._request_package_hud_repaint()
+            # Scopes poll on their own timer while playing — do not notify
+            # every transport frame (that stalls the playhead on the GUI thread).
             return
 
         self._apply_cached_frames(frame)
@@ -1430,6 +1980,7 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "package_manager"):
             self.package_manager.emit_frame_changed(frame, self.viewport.current_timecode)
+        self._sync_annotations_for_playhead()
 
     def _has_cpp_transport(self) -> bool:
         renderer = getattr(getattr(self, "viewport", None), "native_renderer", None)
@@ -1563,6 +2114,13 @@ class MainWindow(QMainWindow):
             )
         if needs_update:
             self.viewport.update()
+        if (
+            hasattr(self, "_pixel_probe")
+            and self._pixel_probe.isVisible()
+            and self._probe_last_pos is not None
+        ):
+            self._probe_sample_at(self._probe_last_pos)
+        self._notify_scopes_frame_changed()
 
     def _on_cache_frame_ready(self, media_path: str, frame_index: int):
         # Runs on the GUI thread via _frame_ready_signal.
@@ -1731,7 +2289,7 @@ class MainWindow(QMainWindow):
 
     def _set_timecode_display_mode(self, show_timecode: bool):
         self.settings.timecode_mode = show_timecode
-        self.settings.save()
+        self._persist_settings()
         self.timeline.set_display_options(self.settings.timecode_mode, self.fps)
         self._update_readout_display()
         if hasattr(self, "timecode_display_actions"):
@@ -1749,7 +2307,7 @@ class MainWindow(QMainWindow):
 
     def _set_loop_mode(self, mode: str):
         self.settings.loop_mode = mode
-        self.settings.save()
+        self._persist_settings()
         if hasattr(self, "loop_mode_actions"):
             for m, act in self.loop_mode_actions:
                 act.setChecked(m == mode)
@@ -1764,7 +2322,7 @@ class MainWindow(QMainWindow):
 
     def _set_playback_timing(self, mode: str):
         self.settings.playback_timing = normalize_playback_timing(mode)
-        self.settings.save()
+        self._persist_settings()
         self._sync_playback_timing_actions()
         self._sync_upload_queue_policy()
         if self.playing:
@@ -1868,7 +2426,7 @@ class MainWindow(QMainWindow):
         self.fps = fps
         self.session.set_playback_rate_override(fps)
         self.settings.default_fps = fps
-        self.settings.save()
+        self._persist_settings()
 
         self.viewport.fps = fps
         if hasattr(self, "lbl_fps") and self.lbl_fps:
@@ -2077,8 +2635,8 @@ class MainWindow(QMainWindow):
         old_timing = normalize_playback_timing(self.settings.playback_timing)
         old_package_enabled = dict(self.settings.package_enabled)
         if dialog.exec():
-            # Apply changes
-            self.settings.save()
+            # Apply changes (include current dock layout so it is not overwritten stale).
+            self._persist_settings()
             new_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
             new_timing = normalize_playback_timing(self.settings.playback_timing)
             self._sync_playback_timing_actions()
@@ -2124,22 +2682,26 @@ class MainWindow(QMainWindow):
                 )
 
     def closeEvent(self, event):
-        if hasattr(self, "main_splitter"):
-            sizes = self.main_splitter.sizes()
-            if len(sizes) == 2 and sizes[1] > 0:
-                self.settings.timeline_splitter_sizes = sizes
-        if hasattr(self, "panel_host"):
-            self.panel_host.save_layout(self.settings)
-        self.settings.save()
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        if hasattr(self, "_layout_save_timer"):
+            self._layout_save_timer.stop()
+        if hasattr(self, "_probe_hover_timer"):
+            self._probe_hover_timer.stop()
+        if hasattr(self, "_pixel_probe"):
+            self._pixel_probe.hide()
+        self._persist_settings()
         self._transport_poll_timer.stop()
         self._close_all_sources()
-        # Floating HUD is a Tool window; detach before tearing down the Metal surface.
+        # Floating HUD / annotation overlays are Tool windows; detach before Metal teardown.
         panel = getattr(self, "viewport_panel", None)
         if panel is not None:
             self.removeEventFilter(panel)
-            hud = getattr(panel, "_hud_overlay", None)
-            if hud is not None:
-                hud.hide()
-                hud.setParent(None)
+            for attr in ("_annotation_overlay", "_hud_overlay"):
+                overlay = getattr(panel, attr, None)
+                if overlay is not None:
+                    overlay.hide()
+                    overlay.setParent(None)
         self.viewport.cleanup()
         event.accept()

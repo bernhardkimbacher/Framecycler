@@ -9,10 +9,13 @@
 #include "rhi_renderer.h"
 #include "display_upload_queue.h"
 #include "transport_clock.h"
+#include "scope_analyzer.h"
 
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 namespace py = pybind11;
 
@@ -46,6 +49,116 @@ PYBIND11_MODULE(framecycler_engine, m) {
 
     m.def("set_decode_threads", &NativeDecoder::set_decode_threads, py::arg("n"),
           "Configure global OIIO / OpenEXR decode thread pools");
+
+    m.def(
+        "downsample_frame",
+        [](CacheManager& cache, int frame_index, int max_width) -> py::object {
+            int oh = 0, ow = 0;
+            std::vector<float> rgb;
+            {
+                py::gil_scoped_release release;
+                rgb = ScopeAnalyzer::downsample_frame(cache, frame_index, max_width, oh, ow);
+            }
+            if (rgb.empty() || oh <= 0 || ow <= 0) {
+                return py::none();
+            }
+            auto* owned = new std::vector<float>(std::move(rgb));
+            py::capsule owner(owned, [](void* p) {
+                delete static_cast<std::vector<float>*>(p);
+            });
+            return py::array_t<float>(
+                {oh, ow, 3},
+                {
+                    static_cast<py::ssize_t>(ow * 3 * sizeof(float)),
+                    static_cast<py::ssize_t>(3 * sizeof(float)),
+                    static_cast<py::ssize_t>(sizeof(float))
+                },
+                owned->data(),
+                owner);
+        },
+        py::arg("cache"), py::arg("frame_index"), py::arg("max_width") = 512,
+        "Stride-downsample a cached float16 frame to float32 HxWx3 RGB under the cache lock");
+
+    m.def(
+        "accumulate_scopes",
+        [](py::array_t<float, py::array::c_style | py::array::forcecast> rgb,
+           const std::vector<std::string>& types) -> py::list {
+            if (rgb.ndim() != 3 || rgb.shape(2) < 3) {
+                throw std::runtime_error("accumulate_scopes expects HxWx3 float32 RGB");
+            }
+            const int h = static_cast<int>(rgb.shape(0));
+            const int w = static_cast<int>(rgb.shape(1));
+            const float* ptr = rgb.data();
+            // Own a contiguous copy so we can release the GIL safely.
+            std::vector<float> contiguous;
+            {
+                py::buffer_info info = rgb.request();
+                contiguous.resize(static_cast<size_t>(h) * w * 3);
+                const float* src = static_cast<float*>(info.ptr);
+                // Copy only RGB even if source has more channels.
+                if (rgb.shape(2) == 3) {
+                    std::memcpy(contiguous.data(), src, contiguous.size() * sizeof(float));
+                } else {
+                    for (int y = 0; y < h; ++y) {
+                        for (int x = 0; x < w; ++x) {
+                            const size_t si = (static_cast<size_t>(y) * w + x) * rgb.shape(2);
+                            const size_t di = (static_cast<size_t>(y) * w + x) * 3;
+                            contiguous[di + 0] = src[si + 0];
+                            contiguous[di + 1] = src[si + 1];
+                            contiguous[di + 2] = src[si + 2];
+                        }
+                    }
+                }
+            }
+            std::vector<std::vector<float>> results;
+            results.reserve(types.size());
+            {
+                py::gil_scoped_release release;
+                for (const auto& name : types) {
+                    auto st = ScopeAnalyzer::scope_type_from_name(name);
+                    results.push_back(ScopeAnalyzer::accumulate(contiguous.data(), h, w, st));
+                }
+            }
+            py::list out;
+            for (size_t i = 0; i < results.size(); ++i) {
+                auto st = ScopeAnalyzer::scope_type_from_name(types[i]);
+                auto* owned = new std::vector<float>(std::move(results[i]));
+                py::capsule owner(owned, [](void* p) {
+                    delete static_cast<std::vector<float>*>(p);
+                });
+                py::array arr;
+                if (st == ScopeAnalyzer::ScopeType::Waveform) {
+                    arr = py::array_t<float>(
+                        {ScopeAnalyzer::kWaveformBins, w},
+                        owned->data(),
+                        owner);
+                } else if (st == ScopeAnalyzer::ScopeType::Parade) {
+                    arr = py::array_t<float>(
+                        {ScopeAnalyzer::kWaveformBins, w * 3},
+                        owned->data(),
+                        owner);
+                } else if (st == ScopeAnalyzer::ScopeType::Vectorscope) {
+                    arr = py::array_t<float>(
+                        {ScopeAnalyzer::kVectorSize, ScopeAnalyzer::kVectorSize},
+                        owned->data(),
+                        owner);
+                } else if (st == ScopeAnalyzer::ScopeType::Histogram) {
+                    arr = py::array_t<float>(
+                        {3, ScopeAnalyzer::kHistBins},
+                        owned->data(),
+                        owner);
+                } else {
+                    arr = py::array_t<float>(
+                        {ScopeAnalyzer::kCieGrid, ScopeAnalyzer::kCieGrid},
+                        owned->data(),
+                        owner);
+                }
+                out.append(arr);
+            }
+            return out;
+        },
+        py::arg("rgb"), py::arg("types"),
+        "Accumulate waveform/parade/vectorscope/histogram/cie from float32 HxWx3 RGB");
 
     py::enum_<UploadQueuePolicy>(m, "UploadQueuePolicy")
         .value("EveryFrame", UploadQueuePolicy::EveryFrame)

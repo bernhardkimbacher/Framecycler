@@ -121,7 +121,7 @@ Located in [`src/cpp/engine/rhi_renderer.cpp`](src/cpp/engine/rhi_renderer.cpp).
 
 * **Backends**: Metal (macOS), D3D11 (Windows), Vulkan (Linux); Null when `QT_QPA_PLATFORM=offscreen`.
 * **Shaders**: GLSL from Python/OCIO compiled via `QShaderBaker` to platform binaries.
-* **Compare modes**: Sequence (playhead source), Wipe / Difference (slots 0 vs 1), Tile (aspect-preserving grid).
+* **Compare modes**: Sequence (playhead source), Wipe / Difference / Blend (active vs compare display slots), Tile (aspect-preserving grid).
 * **Resize**: Viewport always refreshes `RenderParams` (fit/tile scales) on size changes so the image does not stretch until the next seek/play.
 
 ### F. Playback timing
@@ -402,7 +402,11 @@ Key implementation files: [`api.py`](src/framecycler/packages/api.py), [`manager
 Located in [`src/framecycler/ui/`](src/framecycler/ui/).
 
 * **Shots panel** (`source_list_panel.py`): OTIO shot stacks with nested versions (select, reorder, remove, set active version). Dockable via **View → Panels → Shots** (starts hidden; can float to another monitor).
-* **Compare** (Tools → Compare): Sequence, Wipe, Difference, Tile.
+* **Scopes panel** (`scopes/`): Waveform, Parade, Vectorscope, Histogram, CIE Chromaticity — two side-by-side panes. Dockable via **View → Panels → Scopes** (CPU cache + OCIO approx; throttled while playing).
+* **Annotations panel** (`annotations/`): Select, Freehand, Line, Arrow, Rect, Ellipse, Text — draw on the viewer (image-normalized; tracks pan/zoom). Per-shot session memory only (not written to OTIO). Dockable via **View → Panels → Annotations**.
+* **Compare** (Tools → Compare): Sequence, Wipe, Difference, Tile, Blend (mix amount via the wipe handle).
+* **Overlay** (View → Overlay): aspect mask, mask opacity, action/title safe guides.
+* **Pixel Probe** (Tools → Pixel Probe, or press Shift over the viewer): magnifier + source/display readouts; updates on hover; Esc closes.
 * **File → Add Media** / drag-and-drop **Replace** (left) vs **Add** (right).
 * **Image menu**: Resolution scale and pixel aspect for the active selection; Sequence readout follows the playhead clip.
 * **Playback timing**: Play Every Frame vs Play Realtime.

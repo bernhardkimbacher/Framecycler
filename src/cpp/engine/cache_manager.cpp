@@ -409,6 +409,24 @@ bool CacheManager::copy_frame_data(int frame_index, uint16_t* dest_ptr, size_t d
     return true;
 }
 
+bool CacheManager::with_active_frame(
+    int frame_index,
+    const std::function<void(const uint16_t* data, int width, int height, int channels)>& fn)
+{
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    auto it = _frame_to_slot.find(frame_index);
+    if (it == _frame_to_slot.end()) {
+        return false;
+    }
+    size_t idx = it->second;
+    const auto& slot = _slots[idx];
+    if (!slot.active || slot.data.empty()) {
+        return false;
+    }
+    fn(slot.data.data(), slot.width, slot.height, slot.channels);
+    return true;
+}
+
 std::vector<int> CacheManager::get_cached_frames() {
     std::shared_lock<std::shared_mutex> lock(_mutex);
     std::vector<int> frames;
