@@ -1,0 +1,121 @@
+{
+  "timestamp": "2026-07-19T09:46:47.935312+00:00",
+  "description": "Before/after transport clock (finding #3): Python PreciseTimer vs C++ monotonic presentation-driven clock.",
+  "methodology": "MainWindow realtime playback for 2.5s per sequence; before uses FRAMECYCLER_PYTHON_TRANSPORT=1 (QTimer fallback); after uses C++ TransportClock. Measures achieved fps, interval p95, and Python per-frame seek/tick cost.",
+  "footage": "/Users/bernie/Github/Framecycler/.temp/TestFootage",
+  "duration_s": 2.5,
+  "before": {
+    "label": "before",
+    "use_cpp_transport": false,
+    "engine_root": "/Users/bernie/Github/Framecycler",
+    "runs": [
+      {
+        "label": "before",
+        "sequence": "KPO_012_0140",
+        "use_cpp_transport": false,
+        "playback_timing": "realtime",
+        "target_fps": 24.0,
+        "duration_s": 2.502776332999929,
+        "n_advances": 118,
+        "frames_covered": 27,
+        "achieved_fps": 10.788019546132078,
+        "cadence_ratio": 0.44950081442216994,
+        "interval_p95_ms": 45.36148340012004,
+        "interval_mean_ms": 20.599634974350298,
+        "python_ms_mean": 23.157756373004336,
+        "python_ms_p95": 28.024747449762796,
+        "final_frame": 1020,
+        "start_frame": 993
+      },
+      {
+        "label": "before",
+        "sequence": "MOC_PCL_0010",
+        "use_cpp_transport": false,
+        "playback_timing": "realtime",
+        "target_fps": 24.0,
+        "duration_s": 2.53295608299959,
+        "n_advances": 90,
+        "frames_covered": 59,
+        "achieved_fps": 23.2929423435288,
+        "cadence_ratio": 0.9705392643137,
+        "interval_p95_ms": 85.39263320053577,
+        "interval_mean_ms": 27.63538014606342,
+        "python_ms_mean": 36.248663322294306,
+        "python_ms_p95": 128.87722255009066,
+        "final_frame": 1052,
+        "start_frame": 993
+      }
+    ]
+  },
+  "after": {
+    "label": "after",
+    "use_cpp_transport": true,
+    "engine_root": "/Users/bernie/Github/Framecycler",
+    "runs": [
+      {
+        "label": "after",
+        "sequence": "KPO_012_0140",
+        "use_cpp_transport": true,
+        "playback_timing": "realtime",
+        "target_fps": 24.0,
+        "duration_s": 2.501734875000693,
+        "n_advances": 31,
+        "frames_covered": 27,
+        "achieved_fps": 10.792510537309642,
+        "cadence_ratio": 0.44968793905456844,
+        "interval_p95_ms": 110.95291860037821,
+        "interval_mean_ms": 76.36523333330842,
+        "python_ms_mean": 0.5653239031450921,
+        "python_ms_p95": 4.334770500463492,
+        "final_frame": 1020,
+        "start_frame": 993
+      },
+      {
+        "label": "after",
+        "sequence": "MOC_PCL_0010",
+        "use_cpp_transport": true,
+        "playback_timing": "realtime",
+        "target_fps": 24.0,
+        "duration_s": 2.5004904999987048,
+        "n_advances": 15,
+        "frames_covered": 57,
+        "achieved_fps": 22.795527517512873,
+        "cadence_ratio": 0.9498136465630364,
+        "interval_p95_ms": 277.90675854957954,
+        "interval_mean_ms": 161.18289285714127,
+        "python_ms_mean": 6.733608333403633,
+        "python_ms_p95": 42.606429299848955,
+        "final_frame": 1050,
+        "start_frame": 993
+      }
+    ]
+  },
+  "comparison": [
+    {
+      "sequence": "KPO_012_0140",
+      "target_fps": 24.0,
+      "before_achieved_fps": 10.788019546132078,
+      "after_achieved_fps": 10.792510537309642,
+      "before_cadence_ratio": 0.44950081442216994,
+      "after_cadence_ratio": 0.44968793905456844,
+      "before_interval_p95_ms": 45.36148340012004,
+      "after_interval_p95_ms": 110.95291860037821,
+      "before_python_ms": 23.157756373004336,
+      "after_python_ms": 0.5653239031450921,
+      "python_speedup": 40.96369575772356
+    },
+    {
+      "sequence": "MOC_PCL_0010",
+      "target_fps": 24.0,
+      "before_achieved_fps": 23.2929423435288,
+      "after_achieved_fps": 22.795527517512873,
+      "before_cadence_ratio": 0.9705392643137,
+      "after_cadence_ratio": 0.9498136465630364,
+      "before_interval_p95_ms": 85.39263320053577,
+      "after_interval_p95_ms": 277.90675854957954,
+      "before_python_ms": 36.248663322294306,
+      "after_python_ms": 6.733608333403633,
+      "python_speedup": 5.383244989536199
+    }
+  ]
+}

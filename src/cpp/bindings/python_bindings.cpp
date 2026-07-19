@@ -8,6 +8,7 @@
 #include "native_movie_decoder.h"
 #include "rhi_renderer.h"
 #include "display_upload_queue.h"
+#include "transport_clock.h"
 
 #include <iostream>
 #include <memory>
@@ -375,6 +376,109 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def_readwrite("slots", &RenderParams::slots)
         .def_readwrite("tiles", &RenderParams::tiles);
 
+    py::enum_<TransportLoopMode>(m, "TransportLoopMode")
+        .value("Once", TransportLoopMode::Once)
+        .value("Loop", TransportLoopMode::Loop)
+        .value("Bounce", TransportLoopMode::Bounce);
+
+    py::enum_<TransportTimingMode>(m, "TransportTimingMode")
+        .value("EveryFrame", TransportTimingMode::EveryFrame)
+        .value("Realtime", TransportTimingMode::Realtime);
+
+    py::class_<TransportSlotMapping>(m, "TransportSlotMapping")
+        .def(py::init<>())
+        .def_readwrite("source_index", &TransportSlotMapping::source_index)
+        .def_readwrite("segment_global_start", &TransportSlotMapping::segment_global_start)
+        .def_readwrite("segment_global_end", &TransportSlotMapping::segment_global_end)
+        .def_readwrite("decoder_start_frame", &TransportSlotMapping::decoder_start_frame)
+        .def_readwrite("decoder_frames", &TransportSlotMapping::decoder_frames)
+        .def_readwrite("playback_in", &TransportSlotMapping::playback_in)
+        .def_readwrite("playback_out", &TransportSlotMapping::playback_out);
+
+    py::class_<TransportProgram>(m, "TransportProgram")
+        .def(py::init<>())
+        .def_readwrite("playing", &TransportProgram::playing)
+        .def_readwrite("direction", &TransportProgram::direction)
+        .def_readwrite("fps", &TransportProgram::fps)
+        .def_readwrite("in_point", &TransportProgram::in_point)
+        .def_readwrite("out_point", &TransportProgram::out_point)
+        .def_readwrite("loop_mode", &TransportProgram::loop_mode)
+        .def_readwrite("timing_mode", &TransportProgram::timing_mode)
+        .def_readwrite("current_frame", &TransportProgram::current_frame)
+        .def_readwrite("segment_global_start", &TransportProgram::segment_global_start)
+        .def_readwrite("segment_global_end", &TransportProgram::segment_global_end)
+        .def_readwrite("hold_at_segment_bounds", &TransportProgram::hold_at_segment_bounds)
+        .def_readwrite("slots", &TransportProgram::slots);
+
+    py::class_<TransportAdvanceResult>(m, "TransportAdvanceResult")
+        .def(py::init<>())
+        .def_readonly("frame", &TransportAdvanceResult::frame)
+        .def_readonly("direction", &TransportAdvanceResult::direction)
+        .def_readonly("moved", &TransportAdvanceResult::moved)
+        .def_readonly("stop", &TransportAdvanceResult::stop)
+        .def_readonly("segment_boundary", &TransportAdvanceResult::segment_boundary)
+        .def_readonly("steps_taken", &TransportAdvanceResult::steps_taken);
+
+    // Pure clock helpers for parity tests (no renderer required).
+    m.def("transport_realtime_steps", &TransportClock::realtime_steps,
+          py::arg("elapsed_seconds"), py::arg("fps"));
+    m.def(
+        "transport_advance_playback",
+        [](int current_frame, int direction, int steps, int in_point, int out_point,
+           const std::string& loop_mode) {
+            return TransportClock::advance_playback(
+                current_frame,
+                direction,
+                steps,
+                in_point,
+                out_point,
+                TransportClock::parse_loop_mode(loop_mode));
+        },
+        py::arg("current_frame"),
+        py::arg("direction"),
+        py::arg("steps"),
+        py::arg("in_point"),
+        py::arg("out_point"),
+        py::arg("loop_mode") = "loop");
+    m.def(
+        "transport_decoder_frame_for_source",
+        [](const TransportProgram& program, int source_index, int global_frame) {
+            TransportClock clock;
+            clock.set_program(program);
+            return clock.decoder_frame_for_source(source_index, global_frame);
+        },
+        py::arg("program"),
+        py::arg("source_index"),
+        py::arg("global_frame"));
+
+    py::class_<TransportClock>(m, "TransportClock")
+        .def(py::init<>())
+        .def("set_program", &TransportClock::set_program)
+        .def("play", [](TransportClock& self) { self.play(); })
+        .def("pause", &TransportClock::pause)
+        .def("seek", [](TransportClock& self, int frame) { self.seek(frame); },
+             py::arg("global_frame"))
+        .def("is_playing", &TransportClock::is_playing)
+        .def("current_frame", &TransportClock::current_frame)
+        .def("direction", &TransportClock::direction)
+        .def(
+            "tick_now",
+            [](TransportClock& self, py::object can_advance) {
+                TransportClock::CanAdvanceFn pred;
+                if (!can_advance.is_none()) {
+                    pred = [can_advance](int global_frame) -> bool {
+                        return py::bool_(can_advance(global_frame));
+                    };
+                }
+                return self.tick(TransportClock::Clock::now(), pred);
+            },
+            py::arg("can_advance") = py::none())
+        .def(
+            "decoder_frame_for_source",
+            &TransportClock::decoder_frame_for_source,
+            py::arg("source_index"),
+            py::arg("global_frame"));
+
     py::class_<RhiRenderer>(m, "RhiRenderer")
         .def(py::init<>())
         .def("initialize", &RhiRenderer::initialize)
@@ -397,6 +501,74 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("clear_display_cache", &RhiRenderer::clear_display_cache)
         .def("set_source_playhead", &RhiRenderer::set_source_playhead)
         .def("invalidate_display_cache_source", &RhiRenderer::invalidate_display_cache_source)
+        .def("set_transport_program", &RhiRenderer::set_transport_program)
+        .def("transport_play", &RhiRenderer::transport_play)
+        .def("transport_pause", &RhiRenderer::transport_pause)
+        .def("transport_seek", &RhiRenderer::transport_seek, py::arg("global_frame"))
+        .def("get_transport_frame", &RhiRenderer::get_transport_frame)
+        .def("get_transport_direction", &RhiRenderer::get_transport_direction)
+        .def("is_transport_playing", &RhiRenderer::is_transport_playing)
+        .def("ack_transport_frame_notify", &RhiRenderer::ack_transport_frame_notify)
+        .def(
+            "poll_transport_frame_notify",
+            [](RhiRenderer& self) -> py::object {
+                int frame = -1;
+                int direction = 1;
+                if (!self.poll_transport_frame_notify(frame, direction)) {
+                    return py::none();
+                }
+                return py::make_tuple(frame, direction);
+            })
+        .def(
+            "poll_transport_boundary_notify",
+            [](RhiRenderer& self) -> py::object {
+                int frame = -1;
+                int direction = 1;
+                if (!self.poll_transport_boundary_notify(frame, direction)) {
+                    return py::none();
+                }
+                return py::make_tuple(frame, direction);
+            })
+        .def(
+            "set_frame_changed_callback",
+            [](RhiRenderer& self, py::object cb) {
+                if (cb.is_none()) {
+                    self.set_frame_changed_callback(nullptr);
+                    return;
+                }
+                auto holder = std::make_shared<GilPyObject>(std::move(cb));
+                self.set_frame_changed_callback([holder](int frame, int direction) {
+                    py::gil_scoped_acquire gil;
+                    try {
+                        holder->get()(frame, direction);
+                    } catch (py::error_already_set& e) {
+                        std::cerr << "RhiRenderer: frame-changed Python callback failed: "
+                                  << e.what() << std::endl;
+                        e.restore();
+                        PyErr_Clear();
+                    }
+                });
+            })
+        .def(
+            "set_segment_boundary_callback",
+            [](RhiRenderer& self, py::object cb) {
+                if (cb.is_none()) {
+                    self.set_segment_boundary_callback(nullptr);
+                    return;
+                }
+                auto holder = std::make_shared<GilPyObject>(std::move(cb));
+                self.set_segment_boundary_callback([holder](int frame, int direction) {
+                    py::gil_scoped_acquire gil;
+                    try {
+                        holder->get()(frame, direction);
+                    } catch (py::error_already_set& e) {
+                        std::cerr << "RhiRenderer: segment-boundary Python callback failed: "
+                                  << e.what() << std::endl;
+                        e.restore();
+                        PyErr_Clear();
+                    }
+                });
+            })
         .def("get_display_cache_stats", [](const RhiRenderer& self) {
             auto s = self.get_display_cache_stats();
             py::dict d;

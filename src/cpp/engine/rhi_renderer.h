@@ -17,9 +17,11 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <functional>
 
 #include "gpu_texture_cache.h"
 #include "display_upload_queue.h"
+#include "transport_clock.h"
 
 class CacheManager;
 
@@ -117,6 +119,24 @@ public:
     /// Prefer Null RHI (set before initialize). Also auto-enabled for offscreen /
     /// FRAMECYCLER_FORCE_NULL_RHI when initialize() runs on the GUI thread.
     void set_force_null_backend(bool enabled);
+
+    // Transport clock (C++-owned playback). Python pushes a program and reacts
+    // to coalesced frame / segment-boundary callbacks.
+    void set_transport_program(const TransportProgram& program);
+    void transport_play();
+    void transport_pause();
+    void transport_seek(int global_frame);
+    int get_transport_frame() const;
+    int get_transport_direction() const;
+    bool is_transport_playing() const;
+    void set_frame_changed_callback(std::function<void(int frame, int direction)> cb);
+    void set_segment_boundary_callback(std::function<void(int frame, int direction)> cb);
+    /// Python ack after draining a coalesced frame notification.
+    void ack_transport_frame_notify();
+    /// Non-blocking drain of coalesced playhead notifies (GUI-thread poll).
+    /// Returns true when a new frame is available since the last successful poll.
+    bool poll_transport_frame_notify(int& frame_out, int& direction_out);
+    bool poll_transport_boundary_notify(int& frame_out, int& direction_out);
 
     struct DebugStats {
         int begin_frame_ok = 0;
@@ -236,6 +256,14 @@ private:
     void sync_and_render_on_thread(bool resize, const QSize& target_size);
     void _wake_render_thread();
 
+    bool _transport_can_advance(int global_frame);
+    bool _transport_can_advance_unlocked(int global_frame);
+    void _apply_transport_frame_to_params(RenderParams& params, int global_frame);
+    void _update_transport_playheads(int global_frame, int direction);
+    void _emit_transport_frame_changed(int frame, int direction);
+    void _emit_transport_segment_boundary(int frame, int direction);
+    void _tick_transport_and_prepare();
+
     std::vector<QRhiShaderResourceBinding> build_srb_bindings(
         QRhiTexture* tex_a,
         QRhiTexture* tex_b) const;
@@ -326,4 +354,16 @@ private:
     QRhiTexture* _last_bound_tex_b = nullptr;
     std::atomic<bool> _is_fallback_null_backend{false};
     bool _force_null_backend = false;
+
+    TransportClock _transport;
+    std::function<void(int, int)> _frame_changed_callback;
+    std::function<void(int, int)> _segment_boundary_callback;
+    std::atomic<int> _pending_notify_frame{-1};
+    std::atomic<int> _pending_notify_direction{1};
+    std::atomic<bool> _frame_notify_pending{false};
+    std::atomic<int> _pending_boundary_frame{-1};
+    std::atomic<int> _pending_boundary_direction{1};
+    std::atomic<bool> _boundary_notify_pending{false};
+    std::atomic<bool> _transport_program_dirty{false};
+    TransportProgram _pending_transport_program;
 };

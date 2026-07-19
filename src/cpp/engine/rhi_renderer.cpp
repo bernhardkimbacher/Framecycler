@@ -102,24 +102,38 @@ void RhiRenderer::render_thread_loop()
     while (_run_thread) {
         bool needs_render = false;
         bool resize = false;
+        bool transport_playing = false;
         QSize target_size;
         {
             std::unique_lock<std::mutex> lock(_mutex);
-            _render_cond.wait(lock, [this]() {
-                return !_run_thread || _resize_pending || _redraw_needed || _clear_cache_pending;
-            });
+            transport_playing = _transport.is_playing();
+            if (transport_playing) {
+                const auto deadline = _transport.next_deadline();
+                _render_cond.wait_until(lock, deadline, [this]() {
+                    return !_run_thread || _resize_pending || _redraw_needed
+                        || _clear_cache_pending || _transport_program_dirty.load();
+                });
+            } else {
+                _render_cond.wait(lock, [this]() {
+                    return !_run_thread || _resize_pending || _redraw_needed
+                        || _clear_cache_pending || _transport_program_dirty.load();
+                });
+            }
 
             if (!_run_thread) {
                 break;
             }
 
-            needs_render = _redraw_needed || _clear_cache_pending;
+            needs_render = _redraw_needed || _clear_cache_pending || _transport.is_playing()
+                || _transport_program_dirty.load();
             _redraw_needed = false;
             resize = _resize_pending.exchange(false);
             target_size = _pending_size;
         }
 
-        if (resize || needs_render) {
+        _tick_transport_and_prepare();
+
+        if (resize || needs_render || _transport.is_playing()) {
             sync_and_render_on_thread(resize, target_size);
         }
     }
@@ -248,6 +262,251 @@ void RhiRenderer::_wake_render_thread()
 {
     _redraw_needed = true;
     _render_cond.notify_one();
+}
+
+void RhiRenderer::set_transport_program(const TransportProgram& program)
+{
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _pending_transport_program = program;
+        _transport_program_dirty = true;
+    }
+    _wake_render_thread();
+}
+
+void RhiRenderer::transport_play()
+{
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _transport.play();
+    }
+    _wake_render_thread();
+}
+
+void RhiRenderer::transport_pause()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _transport.pause();
+}
+
+void RhiRenderer::transport_seek(int global_frame)
+{
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _transport.seek(global_frame);
+        _apply_transport_frame_to_params(_pending_render_params, _transport.current_frame());
+        _render_params_dirty = true;
+    }
+    _wake_render_thread();
+}
+
+int RhiRenderer::get_transport_frame() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _transport.current_frame();
+}
+
+int RhiRenderer::get_transport_direction() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _transport.direction();
+}
+
+bool RhiRenderer::is_transport_playing() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _transport.is_playing();
+}
+
+void RhiRenderer::set_frame_changed_callback(std::function<void(int, int)> cb)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _frame_changed_callback = std::move(cb);
+}
+
+void RhiRenderer::set_segment_boundary_callback(std::function<void(int, int)> cb)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _segment_boundary_callback = std::move(cb);
+}
+
+void RhiRenderer::ack_transport_frame_notify()
+{
+    _frame_notify_pending.store(false);
+}
+
+bool RhiRenderer::poll_transport_frame_notify(int& frame_out, int& direction_out)
+{
+    if (!_frame_notify_pending.exchange(false)) {
+        return false;
+    }
+    frame_out = _pending_notify_frame.load();
+    direction_out = _pending_notify_direction.load();
+    return frame_out >= 0;
+}
+
+bool RhiRenderer::poll_transport_boundary_notify(int& frame_out, int& direction_out)
+{
+    if (!_boundary_notify_pending.exchange(false)) {
+        return false;
+    }
+    frame_out = _pending_boundary_frame.load();
+    direction_out = _pending_boundary_direction.load();
+    return true;
+}
+
+bool RhiRenderer::_transport_can_advance_unlocked(int global_frame)
+{
+    const auto prog = _transport.program();
+    if (prog.slots.empty()) {
+        return true;
+    }
+    for (const auto& slot : prog.slots) {
+        const int decoder_frame =
+            _transport.decoder_frame_for_source(slot.source_index, global_frame);
+        if (decoder_frame < 0) {
+            continue;
+        }
+        auto it = _caches.find(slot.source_index);
+        if (it == _caches.end() || !it->second) {
+            continue;
+        }
+        if (!it->second->has_frame(decoder_frame)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool RhiRenderer::_transport_can_advance(int global_frame)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _transport_can_advance_unlocked(global_frame);
+}
+
+void RhiRenderer::_apply_transport_frame_to_params(RenderParams& params, int global_frame)
+{
+    for (auto& slot : params.slots) {
+        const int decoder_frame =
+            _transport.decoder_frame_for_source(slot.source_index, global_frame);
+        if (decoder_frame >= 0) {
+            slot.frame_index = decoder_frame;
+            slot.upload_token = decoder_frame;
+        }
+    }
+}
+
+void RhiRenderer::_update_transport_playheads(int global_frame, int direction)
+{
+    const auto prog = _transport.program();
+    for (const auto& mapping : prog.slots) {
+        const int decoder_frame =
+            _transport.decoder_frame_for_source(mapping.source_index, global_frame);
+        if (decoder_frame < 0) {
+            continue;
+        }
+        SourcePlayhead ph;
+        ph.playhead = decoder_frame;
+        ph.direction = direction;
+        ph.in_point = mapping.playback_in;
+        ph.out_point = mapping.playback_out;
+        _pending_playheads[mapping.source_index] = ph;
+
+        auto it = _caches.find(mapping.source_index);
+        if (it != _caches.end() && it->second) {
+            it->second->set_playhead(
+                decoder_frame, direction, mapping.playback_in, mapping.playback_out);
+        }
+    }
+}
+
+void RhiRenderer::_emit_transport_frame_changed(int frame, int direction)
+{
+    // Lock-free coalesced notify — never acquire the GIL on the render thread.
+    _pending_notify_frame.store(frame);
+    _pending_notify_direction.store(direction);
+    _frame_notify_pending.store(true);
+    std::function<void(int, int)> cb;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        cb = _frame_changed_callback;
+    }
+    // Optional callback for tests; production UI should poll instead.
+    if (cb) {
+        cb(frame, direction);
+    }
+}
+
+void RhiRenderer::_emit_transport_segment_boundary(int frame, int direction)
+{
+    _pending_boundary_frame.store(frame);
+    _pending_boundary_direction.store(direction);
+    _boundary_notify_pending.store(true);
+    std::function<void(int, int)> cb;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        cb = _segment_boundary_callback;
+    }
+    if (cb) {
+        cb(frame, direction);
+    }
+}
+
+void RhiRenderer::_tick_transport_and_prepare()
+{
+    TransportAdvanceResult advanced;
+    bool had_program = false;
+    bool should_emit_move = false;
+    bool should_emit_boundary = false;
+    bool should_emit_stop = false;
+    int emit_frame = 0;
+    int emit_direction = 1;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_transport_program_dirty.exchange(false)) {
+            const bool was_playing = _pending_transport_program.playing;
+            _transport.set_program(_pending_transport_program);
+            if (was_playing) {
+                _transport.play();
+            }
+            had_program = true;
+            _apply_transport_frame_to_params(
+                _pending_render_params, _transport.current_frame());
+            _render_params_dirty = true;
+        }
+
+        if (!_transport.is_playing() && !had_program) {
+            return;
+        }
+
+        // Mutex is held: can_advance must use the unlocked helper.
+        advanced = _transport.tick(
+            TransportClock::Clock::now(),
+            [this](int global_frame) {
+                return _transport_can_advance_unlocked(global_frame);
+            });
+
+        if (advanced.moved || had_program) {
+            _apply_transport_frame_to_params(
+                _pending_render_params, _transport.current_frame());
+            _apply_transport_frame_to_params(
+                _active_render_params, _transport.current_frame());
+            _render_params_dirty = true;
+            _update_transport_playheads(_transport.current_frame(), _transport.direction());
+        }
+
+        emit_frame = advanced.frame;
+        emit_direction = advanced.direction;
+        should_emit_boundary = advanced.segment_boundary;
+        should_emit_move = advanced.moved;
+        should_emit_stop = advanced.stop;
+    }
+
+    if (should_emit_boundary) {
+        _emit_transport_segment_boundary(emit_frame, emit_direction);
+    } else if (should_emit_move || should_emit_stop) {
+        _emit_transport_frame_changed(emit_frame, emit_direction);
+    }
 }
 
 void RhiRenderer::set_display_cache_limit_gb(double limit_gb)
