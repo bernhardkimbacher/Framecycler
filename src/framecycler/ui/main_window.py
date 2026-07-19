@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QComboBox,
     QLabel,
-    QDockWidget,
     QSlider,
     QInputDialog,
     QSplitter,
@@ -50,6 +49,7 @@ from .settings_dialog import SettingsDialog
 from .widgets import WideComboBox, add_menu_section
 from .fonts import ui_font
 from .source_list_panel import SourceListPanel
+from .panel_host import PanelHost
 from .drag_drop_overlay import DragDropOverlay
 
 PRESET_FRAME_RATES = [
@@ -146,6 +146,8 @@ class MainWindow(QMainWindow):
         self._cached_frames_timer.timeout.connect(self._refresh_timeline_cached_frames)
         
         self.package_manager = PackageManager(self, config_dir=self.settings.config_dir)
+        self.panel_host = PanelHost()
+        self.source_panel: SourceListPanel | None = None
 
         # Build UI layout
         self._init_ui()
@@ -241,25 +243,18 @@ class MainWindow(QMainWindow):
 
         viewer_layout.addLayout(header_layout)
 
-        self.source_panel = SourceListPanel(self)
-        self.source_panel.shot_selected.connect(self._on_shot_selected)
-        self.source_panel.shot_removed.connect(self._remove_shot)
-        self.source_panel.version_removed.connect(self._remove_version)
-        self.source_panel.active_version_changed.connect(self._on_active_version_changed)
-        self.source_panel.order_changed.connect(self._on_shot_order_changed)
-        self.source_panel.hide_requested.connect(lambda: self._set_source_panel_visible(False))
+        # Viewport stays central; Shots and package panels dock via PanelHost.
+        viewer_layout.addWidget(self.viewport_panel, stretch=1)
 
-        self.viewer_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.viewer_splitter.addWidget(self.source_panel)
-        self.viewer_splitter.addWidget(self.viewport_panel)
-        self.viewer_splitter.setStretchFactor(0, 0)
-        self.viewer_splitter.setStretchFactor(1, 1)
-        self._source_panel_sizes = [220, 900]
-        self.viewer_splitter.setSizes(self._source_panel_sizes)
-        # Hidden by default; isVisible() is False until the window is shown, so
-        # hide() must be called explicitly during construction.
-        self.source_panel.hide()
-        viewer_layout.addWidget(self.viewer_splitter, stretch=1)
+        self.panel_host.register_builtin(
+            "shots",
+            title="Shots",
+            factory=lambda parent: SourceListPanel(self, parent),
+            default_area="left",
+            visible_by_default=False,
+            eager=True,
+            on_created=self._on_shots_panel_created,
+        )
 
         readout_widget = QWidget()
         readout_layout = QGridLayout(readout_widget)
@@ -386,13 +381,8 @@ class MainWindow(QMainWindow):
         act_hud.triggered.connect(self.viewport.toggle_hud)
         view_menu.addAction(act_hud)
 
-        add_menu_section(view_menu, "Panels")
-        self.act_media_sources = QAction("Shots", self)
-        self.act_media_sources.setCheckable(True)
-        self.act_media_sources.setChecked(False)
-        self.act_media_sources.triggered.connect(self._toggle_source_panel)
-        view_menu.addAction(self.act_media_sources)
-        self._set_source_panel_visible(False)
+        view_menu.addSeparator()
+        self._panels_menu = view_menu.addMenu("Panels")
 
         add_menu_section(view_menu, "Zoom")
         self.zoom_actions = []
@@ -509,6 +499,13 @@ class MainWindow(QMainWindow):
         # Packages menu (populated after packages activate)
         self._plugins_menu = menubar.addMenu("&Plugins")
         self.package_manager.load_enabled()
+        for spec in self.package_manager.panel_specs:
+            self.panel_host.register(spec)
+        # Docks + Panels menu actions after all registrations (built-in + packages).
+        self.panel_host.finalize(
+            self, self.view_menu, self.settings, panels_menu=self._panels_menu
+        )
+        self.source_panel = self.panel_host.widget("builtin.shots")
         self._rebuild_plugins_menu()
 
         # Tools menu (grading and compare)
@@ -703,33 +700,19 @@ class MainWindow(QMainWindow):
             self.look_combo.setCurrentIndex(idx)
         self.look_combo.blockSignals(False)
 
-    def _toggle_source_panel(self, checked: bool = False):
-        self._set_source_panel_visible(self.act_media_sources.isChecked())
+    def _on_shots_panel_created(self, panel: QWidget) -> None:
+        if not isinstance(panel, SourceListPanel):
+            return
+        self.source_panel = panel
+        panel.shot_selected.connect(self._on_shot_selected)
+        panel.shot_removed.connect(self._remove_shot)
+        panel.version_removed.connect(self._remove_version)
+        panel.active_version_changed.connect(self._on_active_version_changed)
+        panel.order_changed.connect(self._on_shot_order_changed)
+        panel.hide_requested.connect(lambda: self.panel_host.set_visible("builtin.shots", False))
 
     def _set_source_panel_visible(self, visible: bool):
-        # Use isHidden() (not isVisible()): during __init__ the widget is not yet
-        # shown, so isVisible() is False and would skip hide() incorrectly.
-        currently_shown = not self.source_panel.isHidden()
-        if visible == currently_shown:
-            if hasattr(self, "act_media_sources"):
-                self.act_media_sources.blockSignals(True)
-                self.act_media_sources.setChecked(visible)
-                self.act_media_sources.blockSignals(False)
-            return
-
-        if visible:
-            self.source_panel.show()
-            self.viewer_splitter.setSizes(self._source_panel_sizes)
-        else:
-            sizes = self.viewer_splitter.sizes()
-            if sizes and sizes[0] > 0:
-                self._source_panel_sizes = sizes
-            self.source_panel.hide()
-
-        if hasattr(self, "act_media_sources"):
-            self.act_media_sources.blockSignals(True)
-            self.act_media_sources.setChecked(visible)
-            self.act_media_sources.blockSignals(False)
+        self.panel_host.set_visible("builtin.shots", visible)
 
     def _set_compare_mode(self, mode: int):
         self.viewport.set_compare_mode(mode)
@@ -939,11 +922,12 @@ class MainWindow(QMainWindow):
                 labels.append(version.clip.name or "offline")
         self.viewport.set_source_labels(labels)
 
-        self.source_panel.set_plan(
-            plan,
-            selected_shot=self.session.selected_shot_index,
-            selected_version=self.session.selected_version_index,
-        )
+        if self.source_panel is not None:
+            self.source_panel.set_plan(
+                plan,
+                selected_shot=self.session.selected_shot_index,
+                selected_version=self.session.selected_version_index,
+            )
 
         self._push_timeline_segments(plan)
 
@@ -1155,7 +1139,8 @@ class MainWindow(QMainWindow):
 
         self.exr_layer_combo.clear()
         self.exr_layer_combo.addItem("beauty")
-        self.source_panel.set_plan(self.session.plan)
+        if self.source_panel is not None:
+            self.source_panel.set_plan(self.session.plan)
 
         self.lbl_resolution.setText("")
         self.source_width = 0
@@ -1341,7 +1326,8 @@ class MainWindow(QMainWindow):
         self.viewport.set_source_labels(labels)
 
         self.viewport.set_sequence_index(0)
-        self.source_panel.highlight_sequence_index(segment.index)
+        if self.source_panel is not None:
+            self.source_panel.highlight_sequence_index(segment.index)
 
         active = segment.active
         current_source = active.source if active is not None else None
@@ -2063,7 +2049,9 @@ class MainWindow(QMainWindow):
             sizes = self.main_splitter.sizes()
             if len(sizes) == 2 and sizes[1] > 0:
                 self.settings.timeline_splitter_sizes = sizes
-                self.settings.save()
+        if hasattr(self, "panel_host"):
+            self.panel_host.save_layout(self.settings)
+        self.settings.save()
         self._transport_poll_timer.stop()
         self._close_all_sources()
         self.viewport.cleanup()

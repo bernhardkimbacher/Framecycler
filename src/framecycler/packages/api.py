@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,19 @@ class PackageEvents:
     MEDIA_LOADED = "media_loaded"
     FRAME_CHANGED = "frame_changed"
     SESSION_CHANGED = "session_changed"
+
+
+@dataclass
+class PanelSpec:
+    """Registration for one dockable panel (built-in or package)."""
+
+    panel_id: str
+    title: str
+    factory: Callable[[QWidget], QWidget]
+    default_area: str = "right"
+    visible_by_default: bool = False
+    eager: bool = False
+    on_created: Callable[[QWidget], None] | None = field(default=None)
 
 
 class PackageContext:
@@ -30,6 +44,7 @@ class PackageContext:
         host: Any,
         event_bus: "EventBus",
         menu_actions: list[QAction],
+        panel_specs: list[PanelSpec] | None = None,
     ):
         self.package_id = package_id
         self.package_dir = Path(package_dir)
@@ -37,6 +52,7 @@ class PackageContext:
         self._host = host
         self._event_bus = event_bus
         self._menu_actions = menu_actions
+        self._panel_specs = panel_specs if panel_specs is not None else []
 
     @property
     def session(self):
@@ -57,6 +73,34 @@ class PackageContext:
         for action in actions:
             if action is not None:
                 self._menu_actions.append(action)
+
+    def register_panel(
+        self,
+        panel_id: str,
+        *,
+        title: str,
+        factory: Callable[[QWidget], QWidget],
+        default_area: str = "right",
+        visible_by_default: bool = False,
+    ) -> None:
+        """Register a dockable panel. Stable id becomes ``{package_id}.{panel_id}``."""
+        if not panel_id or "." in panel_id:
+            raise ValueError(
+                f"panel_id must be a non-empty local name without dots; got {panel_id!r}"
+            )
+        full_id = f"{self.package_id}.{panel_id}"
+        if any(spec.panel_id == full_id for spec in self._panel_specs):
+            raise ValueError(f"Duplicate panel id: {full_id}")
+        self._panel_specs.append(
+            PanelSpec(
+                panel_id=full_id,
+                title=title,
+                factory=factory,
+                default_area=default_area,
+                visible_by_default=visible_by_default,
+                eager=False,
+            )
+        )
 
     def status(self, message: str) -> None:
         bar = getattr(self._host, "statusBar", None)

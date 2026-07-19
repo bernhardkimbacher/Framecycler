@@ -223,9 +223,11 @@ class TestShippedExamplePackages(unittest.TestCase):
         self.assertIn("framecycler.example_apply_cdl", found)
         self.assertIn("framecycler.example_add_version", found)
         self.assertIn("framecycler.example_per_stack_cdl", found)
+        self.assertIn("framecycler.example_session_panel", found)
         self.assertFalse(found["framecycler.example_apply_cdl"].enabled_by_default)
         self.assertFalse(found["framecycler.example_add_version"].enabled_by_default)
         self.assertFalse(found["framecycler.example_per_stack_cdl"].enabled_by_default)
+        self.assertFalse(found["framecycler.example_session_panel"].enabled_by_default)
         self.assertTrue(found["framecycler.ocio_api_loader"].enabled_by_default)
 
 

@@ -229,6 +229,7 @@ flowchart LR
   settings["settings.package_enabled\n+ enabled_by_default"] --> mgr
   mgr --> activate["Package.activate(ctx)"]
   activate --> menu["Plugins menu"]
+  activate --> panels["PanelHost docks"]
   activate --> bus["EventBus"]
   MW["MainWindow"] --> mgr
   MW -->|media_loaded / frame_changed / session_changed| bus
@@ -280,7 +281,7 @@ On menu setup, `MainWindow` constructs `PackageManager` and calls `load_enabled(
 2. For each enabled id, load `{package_dir}/{entry_module}.py` with `importlib` (module name `framecycler_pkg_{id}`).
 3. Instantiate the entry class (must subclass `Package`).
 4. Call `activate(ctx)` with a `PackageContext`.
-5. Collect `QAction`s into the **Plugins** menu.
+5. Collect `QAction`s into the **Plugins** menu and panel specs into **PanelHost** (View → Panels).
 
 Entry modules must be a **top-level `.py` file** in the package directory (not a nested package path). Prefer the dual import used by shipped examples so the same code works from source and frozen builds:
 
@@ -330,6 +331,16 @@ class MyToolPackage(Package):
         ctx.add_menu_actions([action])
         ctx.subscribe("media_loaded", self._on_media)
 
+        from PySide6.QtWidgets import QLabel
+
+        ctx.register_panel(
+            "status",
+            title="My Tool",
+            factory=lambda parent: QLabel("Hello from panel", parent),
+            default_area="right",
+            visible_by_default=False,
+        )
+
     def _run(self, ctx: PackageContext) -> None:
         ctx.status("Hello from package")
         ctx.logger.info("ran")
@@ -337,6 +348,8 @@ class MyToolPackage(Package):
     def _on_media(self, source_index, path, metadata) -> None:
         pass
 ```
+
+Panels appear under **View → Panels**. They can dock to any edge or float (including onto another monitor). Layout is persisted via `main_window_state` / `main_window_geometry` in settings.
 
 ### `PackageContext` API (host services)
 
@@ -348,6 +361,7 @@ class MyToolPackage(Package):
 | `settings` | App settings |
 | `add_media(paths, mode="sequence"\|"stack")` | Load media onto the session |
 | `add_menu_actions([...])` | Contribute to **Plugins** |
+| `register_panel(panel_id, *, title, factory, default_area="right", visible_by_default=False)` | Dockable panel; id becomes `{package_id}.{panel_id}` |
 | `status(message)` | Status bar |
 | `parent_widget()` | `MainWindow` as Qt parent |
 | `update_ocio_pipeline()` | Refresh viewer OCIO |
@@ -368,11 +382,12 @@ All under [`apps/`](apps/):
 | [`example_apply_cdl`](apps/example_apply_cdl/) | `framecycler.example_apply_cdl` | off | Plugins → “Apply Example CDL”: hardcoded viewer CDL via `ctx.apply_cdl` (stub for ShotGrid/ftrack fetch) |
 | [`example_add_version`](apps/example_add_version/) | `framecycler.example_add_version` | off | Writes a grey EXR and `ctx.add_media(..., mode="stack")` onto the playhead shot |
 | [`example_per_stack_cdl`](apps/example_per_stack_cdl/) | `framecycler.example_per_stack_cdl` | off | Alternating R/G/B slopes per shot stack via session stack CDL APIs |
+| [`example_session_panel`](apps/example_session_panel/) | `framecycler.example_session_panel` | off | View → Panels → “Session Events”: `register_panel` + `SESSION_CHANGED` |
 | [`ocio_api_loader`](apps/ocio_api_loader/) | `framecycler.ocio_api_loader` | **on** | Mock “Load OCIO from External API…” → `ctx.ocio.load_config(...)` |
 
-Enable the examples under **Settings → Packages**, restart, then use **Plugins**.
+Enable the examples under **Settings → Packages**, restart, then use **Plugins** / **View → Panels**.
 
-Key implementation files: [`api.py`](src/framecycler/packages/api.py), [`manager.py`](src/framecycler/packages/manager.py), [`manifest.py`](src/framecycler/packages/manifest.py), [`paths.py`](src/framecycler/packages/paths.py). Tests: [`tests/test_packages.py`](tests/test_packages.py).
+Key implementation files: [`api.py`](src/framecycler/packages/api.py), [`manager.py`](src/framecycler/packages/manager.py), [`panel_host.py`](src/framecycler/ui/panel_host.py), [`manifest.py`](src/framecycler/packages/manifest.py), [`paths.py`](src/framecycler/packages/paths.py). Tests: [`tests/test_packages.py`](tests/test_packages.py), [`tests/test_panel_host.py`](tests/test_panel_host.py).
 
 ---
 
@@ -380,7 +395,7 @@ Key implementation files: [`api.py`](src/framecycler/packages/api.py), [`manager
 
 Located in [`src/framecycler/ui/`](src/framecycler/ui/).
 
-* **Shots panel** (`source_list_panel.py`): OTIO shot stacks with nested versions (select, reorder, remove, set active version). Toggle via **View → Shots** (starts hidden).
+* **Shots panel** (`source_list_panel.py`): OTIO shot stacks with nested versions (select, reorder, remove, set active version). Dockable via **View → Panels → Shots** (starts hidden; can float to another monitor).
 * **Compare** (Tools → Compare): Sequence, Wipe, Difference, Tile.
 * **File → Add Media** / drag-and-drop **Replace** (left) vs **Add** (right).
 * **Image menu**: Resolution scale and pixel aspect for the active selection; Sequence readout follows the playhead clip.

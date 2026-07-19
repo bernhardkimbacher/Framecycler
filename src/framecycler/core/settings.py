@@ -36,6 +36,9 @@ class Settings:
         self.package_enabled: dict[str, bool] = {}
         # Vertical main splitter: [viewer_area, timeline_pane]
         self.timeline_splitter_sizes: list[int] = [700, 96]
+        # QMainWindow.saveState / saveGeometry as base64 (dock layout + window geom)
+        self.main_window_state: str = ""
+        self.main_window_geometry: str = ""
 
         self.load()
 
@@ -101,6 +104,10 @@ class Settings:
                     and all(isinstance(v, (int, float)) for v in raw_sizes)
                 ):
                     self.timeline_splitter_sizes = [max(80, int(raw_sizes[0])), max(64, int(raw_sizes[1]))]
+                raw_state = data.get("main_window_state", self.main_window_state)
+                self.main_window_state = str(raw_state) if raw_state else ""
+                raw_geom = data.get("main_window_geometry", self.main_window_geometry)
+                self.main_window_geometry = str(raw_geom) if raw_geom else ""
         except Exception as e:
             print(f"Error loading settings: {e}")
         self.clamp_cache_limits_to_platform()
@@ -121,6 +128,8 @@ class Settings:
                 "missing_frame_mode": self.missing_frame_mode,
                 "package_enabled": self.package_enabled,
                 "timeline_splitter_sizes": self.timeline_splitter_sizes,
+                "main_window_state": self.main_window_state,
+                "main_window_geometry": self.main_window_geometry,
             }
             with open(self.config_path, "w") as f:
                 json.dump(data, f, indent=4)

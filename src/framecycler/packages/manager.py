@@ -10,7 +10,7 @@ from typing import Any
 
 from PySide6.QtGui import QAction
 
-from .api import EventBus, Package, PackageContext, PackageEvents
+from .api import EventBus, Package, PackageContext, PackageEvents, PanelSpec
 from .manifest import PackageManifest, discover_packages, is_package_enabled
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ class PackageManager:
         self._manifests: list[PackageManifest] = []
         self._active: list[tuple[PackageManifest, Package, PackageContext]] = []
         self._menu_actions: list[QAction] = []
+        self._panel_specs: list[PanelSpec] = []
 
     @property
     def manifests(self) -> list[PackageManifest]:
@@ -32,6 +33,10 @@ class PackageManager:
     @property
     def menu_actions(self) -> list[QAction]:
         return list(self._menu_actions)
+
+    @property
+    def panel_specs(self) -> list[PanelSpec]:
+        return list(self._panel_specs)
 
     def discover(self) -> list[PackageManifest]:
         self._manifests = discover_packages(self._config_dir)
@@ -47,6 +52,7 @@ class PackageManager:
             self.discover()
 
         self._menu_actions.clear()
+        self._panel_specs.clear()
         self._active.clear()
 
         for manifest in self._manifests:
@@ -67,6 +73,7 @@ class PackageManager:
                 host=self._host,
                 event_bus=self._event_bus,
                 menu_actions=self._menu_actions,
+                panel_specs=self._panel_specs,
             )
             try:
                 package.activate(ctx)

@@ -138,4 +138,27 @@ def get_viewfinder_stylesheet() -> str:
         font-size: 9px;
         border-top: 1px solid #2d2d2d;
     }}
+
+    QDockWidget {{
+        color: #aaaaaa;
+        font-family: "{mono}", monospace;
+        font-size: 11px;
+        titlebar-close-icon: none;
+        titlebar-normal-icon: none;
+    }}
+
+    QDockWidget::title {{
+        background-color: #1a1a1a;
+        color: #aaaaaa;
+        text-align: left;
+        padding-left: 8px;
+        padding-top: 3px;
+        padding-bottom: 3px;
+        border-bottom: 1px solid #2d2d2d;
+    }}
+
+    QDockWidget > QWidget {{
+        background-color: #121212;
+        border: 1px solid #2d2d2d;
+    }}
     """
