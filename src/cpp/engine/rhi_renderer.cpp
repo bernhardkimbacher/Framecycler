@@ -6,6 +6,9 @@
 #include <QGuiApplication>
 #include <QDebug>
 #include <QEvent>
+#include <QStandardPaths>
+#include <QDir>
+#include <QFile>
 #include <regex>
 #include <cmath>
 #include <algorithm>
@@ -241,6 +244,11 @@ void RhiRenderer::shutdown_rhi_on_thread()
         _placeholderLut3D->destroy();
         delete _placeholderLut3D;
         _placeholderLut3D = nullptr;
+    }
+    if (_placeholderLut2D) {
+        _placeholderLut2D->destroy();
+        delete _placeholderLut2D;
+        _placeholderLut2D = nullptr;
     }
     if (_swapChain) {
         _swapChain->destroy();
@@ -640,7 +648,15 @@ void RhiRenderer::request_redraw()
 
 RhiRenderer::DebugStats RhiRenderer::get_debug_stats() const
 {
-    return _debug_stats;
+    DebugStats stats = _debug_stats;
+    stats.pipeline_lut_count = _pipeline_lut_count;
+    return stats;
+}
+
+int RhiRenderer::pipeline_lut_count() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _pipeline_lut_count;
 }
 
 void RhiRenderer::sync_and_render()
@@ -703,6 +719,7 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
     }
 
     bool shaders_dirty = false;
+    bool lut_count_changed = false;
     std::string frag_src_for_layout;
 
     {
@@ -714,6 +731,16 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
         if (_grading_params_dirty) {
             _active_grading_params = _pending_grading_params;
             _grading_params_dirty = false;
+        }
+        if (_ocio_lut_dims_dirty) {
+            _ocio_lut_slot_dims = _pending_ocio_lut_dims;
+            _ocio_lut_dims_dirty = false;
+            // Exact count (may shrink) so leftover LUT placeholders cannot steal UBO bindings.
+            const int needed = static_cast<int>(_ocio_lut_slot_dims.size());
+            if (needed != _pipeline_lut_count) {
+                _pipeline_lut_count = needed;
+                lut_count_changed = true;
+            }
         }
         if (_ocio_luts_dirty) {
             // Destroy old active textures first (since we are on the render thread!)
@@ -729,10 +756,14 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
             // Build new active LUTs list from pending
             for (const auto& pending : _pending_ocio_luts) {
                 while (static_cast<int>(_active_ocio_luts.size()) <= pending.index) {
-                    _active_ocio_luts.push_back(OcioLut3D());
+                    _active_ocio_luts.push_back(OcioLut());
                 }
                 auto& lut = _active_ocio_luts[pending.index];
+                lut.is_3d = pending.is_3d;
                 lut.size = pending.size;
+                lut.width = pending.width;
+                lut.height = pending.height;
+                lut.channels = pending.channels;
                 lut.rgba_data = pending.rgba_data;
                 lut.dirty = true;
             }
@@ -745,8 +776,10 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
         }
     }
 
-    if (shaders_dirty && !frag_src_for_layout.empty()) {
-        parse_ocio_ubo_layout(frag_src_for_layout);
+    if ((shaders_dirty && !frag_src_for_layout.empty()) || lut_count_changed) {
+        if (shaders_dirty && !frag_src_for_layout.empty()) {
+            parse_ocio_ubo_layout(frag_src_for_layout);
+        }
         clear_tile_srb_cache();
         if (_pipeline) {
             _pipeline->destroy();
@@ -815,13 +848,19 @@ void RhiRenderer::set_shader_sources(const std::string& pipeline_key, const std:
     
     // Bake shaders on the calling thread (CPU-only). GPU resource setup
     // (Ocio UBO, pipeline) happens in sync_and_render() on the GUI thread.
-    if (bake_shaders(vert_src, frag_src)) {
+    if (bake_shaders(pipeline_key, vert_src, frag_src)) {
         _cached_pipeline_key = pipeline_key;
         _pending_frag_src_for_layout = frag_src;
         _shaders_dirty = true;
         _render_params_dirty = true;
         _wake_render_thread();
     }
+}
+
+std::string RhiRenderer::cached_pipeline_key() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _cached_pipeline_key;
 }
 
 void RhiRenderer::set_exposed(bool exposed)
@@ -841,21 +880,74 @@ void RhiRenderer::set_pending_size(int width, int height)
 void RhiRenderer::upload_ocio_lut_3d(int index, int size, const std::vector<float>& data)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    PendingLut3D lut;
+    PendingOcioLut lut;
     lut.index = index;
+    lut.is_3d = true;
     lut.size = size;
-    lut.rgba_data.resize(size * size * size * 4);
+    lut.rgba_data.resize(static_cast<size_t>(size) * size * size * 4);
     
     // Convert RGB to RGBA
     for (int i = 0; i < size * size * size; ++i) {
-        lut.rgba_data[i * 4 + 0] = data[i * 3 + 0];
-        lut.rgba_data[i * 4 + 1] = data[i * 3 + 1];
-        lut.rgba_data[i * 4 + 2] = data[i * 3 + 2];
-        lut.rgba_data[i * 4 + 3] = 1.0f;
+        lut.rgba_data[static_cast<size_t>(i) * 4 + 0] = data[static_cast<size_t>(i) * 3 + 0];
+        lut.rgba_data[static_cast<size_t>(i) * 4 + 1] = data[static_cast<size_t>(i) * 3 + 1];
+        lut.rgba_data[static_cast<size_t>(i) * 4 + 2] = data[static_cast<size_t>(i) * 3 + 2];
+        lut.rgba_data[static_cast<size_t>(i) * 4 + 3] = 1.0f;
     }
-    _pending_ocio_luts.push_back(lut);
+    _pending_ocio_luts.push_back(std::move(lut));
     _ocio_luts_dirty = true;
-    _shaders_dirty = true;
+    _wake_render_thread();
+}
+
+void RhiRenderer::upload_ocio_lut_2d(
+    int index,
+    int width,
+    int height,
+    int channels,
+    const std::vector<float>& data)
+{
+    if (width <= 0 || height <= 0 || channels <= 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    PendingOcioLut lut;
+    lut.index = index;
+    lut.is_3d = false;
+    lut.width = width;
+    lut.height = height;
+    lut.channels = channels;
+    const int pixels = width * height;
+    lut.rgba_data.resize(static_cast<size_t>(pixels) * 4);
+    for (int i = 0; i < pixels; ++i) {
+        if (channels == 1) {
+            const float r = data[static_cast<size_t>(i)];
+            lut.rgba_data[static_cast<size_t>(i) * 4 + 0] = r;
+            lut.rgba_data[static_cast<size_t>(i) * 4 + 1] = r;
+            lut.rgba_data[static_cast<size_t>(i) * 4 + 2] = r;
+            lut.rgba_data[static_cast<size_t>(i) * 4 + 3] = 1.0f;
+        } else if (channels == 3) {
+            lut.rgba_data[static_cast<size_t>(i) * 4 + 0] = data[static_cast<size_t>(i) * 3 + 0];
+            lut.rgba_data[static_cast<size_t>(i) * 4 + 1] = data[static_cast<size_t>(i) * 3 + 1];
+            lut.rgba_data[static_cast<size_t>(i) * 4 + 2] = data[static_cast<size_t>(i) * 3 + 2];
+            lut.rgba_data[static_cast<size_t>(i) * 4 + 3] = 1.0f;
+        } else {
+            // Assume RGBA (or pad from available channels)
+            const int src_ch = std::min(channels, 4);
+            for (int c = 0; c < 4; ++c) {
+                lut.rgba_data[static_cast<size_t>(i) * 4 + c] =
+                    (c < src_ch) ? data[static_cast<size_t>(i) * channels + c] : (c == 3 ? 1.0f : 0.0f);
+            }
+        }
+    }
+    _pending_ocio_luts.push_back(std::move(lut));
+    _ocio_luts_dirty = true;
+    _wake_render_thread();
+}
+
+void RhiRenderer::set_ocio_lut_slot_dims(const std::vector<std::string>& dims)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _pending_ocio_lut_dims = dims;
+    _ocio_lut_dims_dirty = true;
     _wake_render_thread();
 }
 
@@ -863,8 +955,9 @@ void RhiRenderer::clear_ocio_luts()
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _pending_ocio_luts.clear();
+    _pending_ocio_lut_dims.clear();
+    _ocio_lut_dims_dirty = true;
     _ocio_luts_dirty = true;
-    _shaders_dirty = true;
     _wake_render_thread();
 }
 
@@ -1001,10 +1094,16 @@ void RhiRenderer::render_frame()
         _debug_stats.swap_h = swapSize.height();
     }
 
-    // 2. Upload OCIO 3D LUTs
+    // 2. Upload OCIO LUTs (1D-as-2D and 3D)
     for (auto& lut : _active_ocio_luts) {
-        if (lut.dirty && lut.size > 0) {
+        if (!lut.dirty) {
+            continue;
+        }
+        if (lut.is_3d && lut.size > 0) {
             upload_texture_3d(lut, batch);
+            lut.dirty = false;
+        } else if (!lut.is_3d && lut.width > 0 && lut.height > 0) {
+            upload_texture_2d_lut(lut, batch);
             lut.dirty = false;
         }
     }
@@ -1212,6 +1311,21 @@ void RhiRenderer::update_rhi_resources(QRhiResourceUpdateBatch* batch)
         }
     }
 
+    if (!_placeholderLut2D) {
+        _placeholderLut2D = _rhi->newTexture(QRhiTexture::RGBA32F, QSize(1, 1));
+        _placeholderLut2D->create();
+        if (batch) {
+            static const float kBlackRgba32F2D[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            QByteArray arr = QByteArray::fromRawData(
+                reinterpret_cast<const char*>(kBlackRgba32F2D),
+                static_cast<int>(sizeof(kBlackRgba32F2D)));
+            batch->uploadTexture(
+                _placeholderLut2D,
+                QRhiTextureUploadDescription(
+                    QRhiTextureUploadEntry(0, 0, QRhiTextureSubresourceUploadDescription(arr))));
+        }
+    }
+
     if (!_texAState.texture) {
         _texAState.texture = _placeholderTex2D;
     }
@@ -1247,9 +1361,18 @@ std::vector<QRhiShaderResourceBinding> RhiRenderer::build_srb_bindings(
     }
 
     for (int i = 0; i < _pipeline_lut_count; ++i) {
-        QRhiTexture* lutTex = _placeholderLut3D;
-        if (i < static_cast<int>(_active_ocio_luts.size()) && _active_ocio_luts[i].texture) {
-            lutTex = _active_ocio_luts[i].texture;
+        const bool slot_is_3d = [&]() {
+            if (i < static_cast<int>(_ocio_lut_slot_dims.size())) {
+                return _ocio_lut_slot_dims[static_cast<size_t>(i)] != "2D";
+            }
+            if (i < static_cast<int>(_active_ocio_luts.size())) {
+                return _active_ocio_luts[static_cast<size_t>(i)].is_3d;
+            }
+            return true;
+        }();
+        QRhiTexture* lutTex = slot_is_3d ? _placeholderLut3D : _placeholderLut2D;
+        if (i < static_cast<int>(_active_ocio_luts.size()) && _active_ocio_luts[static_cast<size_t>(i)].texture) {
+            lutTex = _active_ocio_luts[static_cast<size_t>(i)].texture;
         }
         if (lutTex && _lutSampler) {
             bindings.push_back(QRhiShaderResourceBinding::sampledTexture(
@@ -1293,6 +1416,17 @@ QRhiShaderResourceBindings* RhiRenderer::get_or_create_tile_srb(QRhiTexture* tex
     QRhiShaderResourceBindings* srb = _rhi->newShaderResourceBindings();
     srb->setBindings(bindings.begin(), bindings.end());
     if (!srb->create()) {
+        QStringList indices{QStringLiteral("0"), QStringLiteral("1"), QStringLiteral("2")};
+        for (int i = 0; i < _pipeline_lut_count; ++i) {
+            indices << QString::number(3 + i);
+        }
+        if (_ocioUboLayout.binding >= 0) {
+            indices << QString::number(_ocioUboLayout.binding);
+        }
+        qWarning() << "RhiRenderer: tile SRB create failed; bindings:" << indices.join(',')
+                   << "ocioUboBinding:" << _ocioUboLayout.binding
+                   << "lutCount:" << _pipeline_lut_count
+                   << "bindingCount:" << bindings.size();
         delete srb;
         return nullptr;
     }
@@ -1382,13 +1516,29 @@ void RhiRenderer::build_pipeline(QRhiRenderPassDescriptor* rpDesc, bool force_re
     }
     clear_tile_srb_cache();
 
-    _pipeline_lut_count = std::max(_pipeline_lut_count, static_cast<int>(_active_ocio_luts.size()));
+    _pipeline_lut_count = static_cast<int>(_ocio_lut_slot_dims.size());
+    if (_pipeline_lut_count == 0 && !_active_ocio_luts.empty()) {
+        // Fallback when dims were not set (legacy callers).
+        _pipeline_lut_count = static_cast<int>(_active_ocio_luts.size());
+    }
 
     auto bindings = build_srb_bindings(_texAState.texture, _texBState.texture);
 
     _srb = _rhi->newShaderResourceBindings();
     _srb->setBindings(bindings.begin(), bindings.end());
-    _srb->create();
+    if (!_srb->create()) {
+        QStringList indices{QStringLiteral("0"), QStringLiteral("1"), QStringLiteral("2")};
+        for (int i = 0; i < _pipeline_lut_count; ++i) {
+            indices << QString::number(3 + i);
+        }
+        if (_ocioUboLayout.binding >= 0) {
+            indices << QString::number(_ocioUboLayout.binding);
+        }
+        qWarning() << "RhiRenderer: SRB create failed; bindings:" << indices.join(',')
+                   << "ocioUboBinding:" << _ocioUboLayout.binding
+                   << "lutCount:" << _pipeline_lut_count
+                   << "bindingCount:" << bindings.size();
+    }
 
     _pipeline = _rhi->newGraphicsPipeline();
     _pipeline->setShaderStages({
@@ -1416,8 +1566,33 @@ void RhiRenderer::build_pipeline(QRhiRenderPassDescriptor* rpDesc, bool force_re
     _last_bound_tex_b = _texBState.texture;
 }
 
-bool RhiRenderer::bake_shaders(const std::string& vert_src, const std::string& frag_src)
+bool RhiRenderer::bake_shaders(
+    const std::string& pipeline_key,
+    const std::string& vert_src,
+    const std::string& frag_src)
 {
+    // Disk cache: QStandardPaths::CacheLocation/framecycler/qsb/<pipeline_key>/{vert,frag}.qsb
+    QString cacheDir;
+    if (!pipeline_key.empty()) {
+        const QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+        cacheDir = base + QStringLiteral("/framecycler/qsb/") + QString::fromStdString(pipeline_key);
+        const QString vertPath = cacheDir + QStringLiteral("/vert.qsb");
+        const QString fragPath = cacheDir + QStringLiteral("/frag.qsb");
+        QFile vertFile(vertPath);
+        QFile fragFile(fragPath);
+        if (vertFile.open(QIODevice::ReadOnly) && fragFile.open(QIODevice::ReadOnly)) {
+            const QByteArray vertBlob = vertFile.readAll();
+            const QByteArray fragBlob = fragFile.readAll();
+            QShader vertShader = QShader::fromSerialized(vertBlob);
+            QShader fragShader = QShader::fromSerialized(fragBlob);
+            if (vertShader.isValid() && fragShader.isValid()) {
+                _vertexShader = vertShader;
+                _fragmentShader = fragShader;
+                return true;
+            }
+        }
+    }
+
     // Bake Vertex Shader
     QShaderBaker vertBaker;
     vertBaker.setGeneratedShaderVariants({QShader::StandardShader});
@@ -1452,6 +1627,20 @@ bool RhiRenderer::bake_shaders(const std::string& vert_src, const std::string& f
 
     _vertexShader = vertShader;
     _fragmentShader = fragShader;
+
+    if (!cacheDir.isEmpty()) {
+        QDir().mkpath(cacheDir);
+        const QByteArray vertBlob = vertShader.serialized();
+        const QByteArray fragBlob = fragShader.serialized();
+        QFile vertFile(cacheDir + QStringLiteral("/vert.qsb"));
+        QFile fragFile(cacheDir + QStringLiteral("/frag.qsb"));
+        if (vertFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            vertFile.write(vertBlob);
+        }
+        if (fragFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            fragFile.write(fragBlob);
+        }
+    }
     return true;
 }
 
@@ -1531,6 +1720,38 @@ void RhiRenderer::parse_ocio_ubo_layout(const std::string& fragment_source)
 std::vector<char> RhiRenderer::pack_ocio_ubo()
 {
     std::vector<char> buf(_ocioUboLayout.size, 0);
+
+    // Seed identity defaults so a missing uniform write cannot desaturate (sat=0)
+    // or crush contrast (gamma=0). Live grading params overlay these next.
+    auto write_float = [&](const char* name, float val) {
+        auto it = _ocioUboLayout.members.find(name);
+        if (it == _ocioUboLayout.members.end() || it->second.is_vec3) {
+            return;
+        }
+        std::memcpy(buf.data() + it->second.offset, &val, sizeof(float));
+    };
+    auto write_vec3 = [&](const char* name, float x, float y, float z) {
+        auto it = _ocioUboLayout.members.find(name);
+        if (it == _ocioUboLayout.members.end() || !it->second.is_vec3) {
+            return;
+        }
+        const float v[3] = {x, y, z};
+        std::memcpy(buf.data() + it->second.offset, v, sizeof(float) * 3);
+    };
+
+    write_float("ocio_exposure_contrast_exposureVal", 0.0f);
+    write_float("ocio_exposure_contrast_gammaVal", 1.0f);
+    write_vec3("ocio_grading_primary_brightness", 0.0f, 0.0f, 0.0f);
+    write_vec3("ocio_grading_primary_contrast", 1.0f, 1.0f, 1.0f);
+    write_vec3("ocio_grading_primary_gamma", 1.0f, 1.0f, 1.0f);
+    write_float("ocio_grading_primary_saturation", 1.0f);
+    write_float("ocio_grading_primary_localBypass", 0.0f);
+    write_vec3("fc_cdl_slope", 1.0f, 1.0f, 1.0f);
+    write_vec3("fc_cdl_offset", 0.0f, 0.0f, 0.0f);
+    write_vec3("fc_cdl_power", 1.0f, 1.0f, 1.0f);
+    write_float("fc_cdl_saturation", 1.0f);
+    write_float("fc_cdl_enable", 0.0f);
+
     for (const auto& pair : _active_grading_params.floats) {
         auto it = _ocioUboLayout.members.find(pair.first);
         if (it == _ocioUboLayout.members.end() || it->second.is_vec3) {
@@ -2212,7 +2433,7 @@ void RhiRenderer::upload_texture(TextureState& state, const FrameSlotSpec& spec,
     _debug_stats.last_upload_count++;
 }
 
-void RhiRenderer::upload_texture_3d(OcioLut3D& lut, QRhiResourceUpdateBatch* batch)
+void RhiRenderer::upload_texture_3d(OcioLut& lut, QRhiResourceUpdateBatch* batch)
 {
     if (!_rhi || lut.size <= 0) {
         return;
@@ -2245,8 +2466,45 @@ void RhiRenderer::upload_texture_3d(OcioLut3D& lut, QRhiResourceUpdateBatch* bat
     desc.setEntries(entries.begin(), entries.end());
     batch->uploadTexture(lut.texture, desc);
 
-    const int needed = static_cast<int>(_active_ocio_luts.size());
-    if (needed > _pipeline_lut_count) {
+    const int needed = !_ocio_lut_slot_dims.empty()
+        ? static_cast<int>(_ocio_lut_slot_dims.size())
+        : static_cast<int>(_active_ocio_luts.size());
+    if (needed != _pipeline_lut_count) {
+        _pipeline_lut_count = needed;
+        build_pipeline(_swapChain->renderPassDescriptor(), true);
+    } else {
+        update_srb_resources();
+    }
+}
+
+void RhiRenderer::upload_texture_2d_lut(OcioLut& lut, QRhiResourceUpdateBatch* batch)
+{
+    if (!_rhi || lut.width <= 0 || lut.height <= 0) {
+        return;
+    }
+
+    if (lut.texture) {
+        lut.texture->destroy();
+        delete lut.texture;
+    }
+
+    lut.texture = _rhi->newTexture(QRhiTexture::RGBA32F, QSize(lut.width, lut.height));
+    lut.texture->create();
+
+    const int rowStride = lut.width * 4 * static_cast<int>(sizeof(float));
+    QByteArray data = QByteArray::fromRawData(
+        reinterpret_cast<const char*>(lut.rgba_data.data()),
+        lut.width * lut.height * 4 * static_cast<int>(sizeof(float)));
+    QRhiTextureSubresourceUploadDescription subres(data);
+    subres.setDataStride(rowStride);
+    batch->uploadTexture(
+        lut.texture,
+        QRhiTextureUploadDescription(QRhiTextureUploadEntry(0, 0, subres)));
+
+    const int needed = !_ocio_lut_slot_dims.empty()
+        ? static_cast<int>(_ocio_lut_slot_dims.size())
+        : static_cast<int>(_active_ocio_luts.size());
+    if (needed != _pipeline_lut_count) {
         _pipeline_lut_count = needed;
         build_pipeline(_swapChain->renderPassDescriptor(), true);
     } else {

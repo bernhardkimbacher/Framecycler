@@ -600,8 +600,8 @@ class MainWindow(QMainWindow):
         act_load_lut.triggered.connect(self._load_custom_lut)
         self.look_menu.addAction(act_load_lut)
         
-        # 3. Display Output list
-        self.display_output_menu = self.ocio_menu.addMenu("Display Output")
+        # 3. Display / View (config-driven; Raw bypasses DisplayViewTransform)
+        self.display_output_menu = self.ocio_menu.addMenu("Display / View")
         for d in self.ocio_manager.get_display_outputs():
             act = QAction(d, self)
             act.setCheckable(True)
@@ -1186,7 +1186,9 @@ class MainWindow(QMainWindow):
             self._applied_cdl_key = cache_key
             self.ocio_manager.reset_cdl_values()
             if hasattr(self, "viewport") and self.viewport is not None:
-                self.viewport.update_ocio_pipeline()
+                self.viewport._sync_grading_uniforms()
+                self.viewport.native_renderer.request_redraw()
+                self.viewport.update()
             self._update_ocio_info_label()
             return
 
@@ -1199,7 +1201,10 @@ class MainWindow(QMainWindow):
         self._applied_cdl_key = cache_key
         self.ocio_manager.apply_cdl_dict(cdl)
         if hasattr(self, "viewport") and self.viewport is not None:
-            self.viewport.update_ocio_pipeline()
+            # CDL is UBO-driven — sync uniforms only (no shader rebake).
+            self.viewport._sync_grading_uniforms()
+            self.viewport.native_renderer.request_redraw()
+            self.viewport.update()
         self._update_ocio_info_label()
 
     def _apply_resolved_input_colorspace(self, *, force: bool = False) -> None:

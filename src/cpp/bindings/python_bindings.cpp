@@ -492,7 +492,17 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("register_cache", &RhiRenderer::register_cache, py::keep_alive<1, 3>())
         .def("set_shader_sources", &RhiRenderer::set_shader_sources)
         .def("upload_ocio_lut_3d", &RhiRenderer::upload_ocio_lut_3d)
+        .def(
+            "upload_ocio_lut_2d",
+            &RhiRenderer::upload_ocio_lut_2d,
+            py::arg("index"),
+            py::arg("width"),
+            py::arg("height"),
+            py::arg("channels"),
+            py::arg("data"))
+        .def("set_ocio_lut_slot_dims", &RhiRenderer::set_ocio_lut_slot_dims)
         .def("clear_ocio_luts", &RhiRenderer::clear_ocio_luts)
+        .def("cached_pipeline_key", &RhiRenderer::cached_pipeline_key)
         .def("set_exposed", &RhiRenderer::set_exposed)
         .def("set_pending_size", &RhiRenderer::set_pending_size)
         .def("request_redraw", &RhiRenderer::request_redraw)
@@ -627,6 +637,8 @@ PYBIND11_MODULE(framecycler_engine, m) {
             d["staging_waits"] = s.staging_waits;
             d["textures_created"] = s.textures_created;
             d["textures_pooled_reuses"] = s.textures_pooled_reuses;
+            d["pipeline_lut_count"] = s.pipeline_lut_count;
             return d;
-        });
+        })
+        .def("pipeline_lut_count", &RhiRenderer::pipeline_lut_count);
 }

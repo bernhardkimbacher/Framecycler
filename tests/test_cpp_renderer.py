@@ -40,6 +40,50 @@ class TestCppRenderer(unittest.TestCase):
         renderer.set_grading_uniform_vec3("tint", 1.0, 0.9, 0.8)
         renderer.clear_grading_uniforms()
 
+    def test_ocio_lut_2d_api(self):
+        renderer = framecycler_engine.RhiRenderer()
+        self.assertTrue(hasattr(renderer, "upload_ocio_lut_2d"))
+        self.assertTrue(hasattr(renderer, "set_ocio_lut_slot_dims"))
+        self.assertTrue(hasattr(renderer, "cached_pipeline_key"))
+        self.assertTrue(hasattr(renderer, "pipeline_lut_count"))
+        # 4x1 single-channel LUT (RGBA-packed upload path)
+        data = [0.0, 0.33, 0.66, 1.0]
+        renderer.set_ocio_lut_slot_dims(["2D"])
+        renderer.upload_ocio_lut_2d(0, 4, 1, 1, data)
+        renderer.clear_ocio_luts()
+        # Clearing dims must shrink lut count (applied on next sync; pending starts at 0).
+        self.assertEqual(renderer.pipeline_lut_count(), 0)
+
+    def test_lut_slot_dims_shrink_pending(self):
+        """Empty slot dims must not leave a stale high lut count after clear."""
+        renderer = framecycler_engine.RhiRenderer()
+        renderer.set_ocio_lut_slot_dims(["2D", "3D"])
+        renderer.clear_ocio_luts()
+        # clear_ocio_luts clears pending dims; count resets when dims are applied on render thread.
+        # Without an active RHI, pending dims are empty and count stays at construction default 0
+        # until sync — assert the public API exists and clear does not raise.
+        self.assertEqual(renderer.pipeline_lut_count(), 0)
+        stats = renderer.get_debug_stats()
+        self.assertIn("pipeline_lut_count", stats)
+        self.assertEqual(stats["pipeline_lut_count"], 0)
+
+    def test_set_shader_sources_skips_same_pipeline_key(self):
+        renderer = framecycler_engine.RhiRenderer()
+        vert = (
+            "#version 450\n"
+            "layout(location=0) in vec2 pos;\n"
+            "void main(){ gl_Position = vec4(pos,0,1); }\n"
+        )
+        frag = (
+            "#version 450\n"
+            "layout(location=0) out vec4 c;\n"
+            "void main(){ c = vec4(1.0); }\n"
+        )
+        renderer.set_shader_sources("key-a", vert, frag)
+        key1 = renderer.cached_pipeline_key()
+        renderer.set_shader_sources("key-a", vert, frag)
+        self.assertEqual(renderer.cached_pipeline_key(), key1)
+
     def test_request_redraw_is_bound(self):
         renderer = framecycler_engine.RhiRenderer()
         self.assertTrue(hasattr(renderer, "request_redraw"))

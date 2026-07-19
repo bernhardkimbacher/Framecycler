@@ -102,9 +102,12 @@ class TileDrawParams:
 
 
 @dataclass
-class _OcioLut3D:
+class _OcioLutSlot:
     texture: QRhiTexture | None = None
+    is_3d: bool = True
     size: int = 0
+    width: int = 0
+    height: int = 0
     rgba_data: np.ndarray | None = None
     dirty: bool = False
 
@@ -193,7 +196,8 @@ class RhiViewportRenderer:
         self._tex_a_state = _TextureUploadState()
         self._tex_b_state = _TextureUploadState()
         self._texture_states: list[_TextureUploadState] = []
-        self._ocio_luts_3d: list[_OcioLut3D] = []
+        self._ocio_luts: list[_OcioLutSlot] = []
+        self._ocio_lut_slot_dims: list[str] = []
 
         self._vertex_shader: QShader | None = None
         self._fragment_shader: QShader | None = None
@@ -288,10 +292,10 @@ class RhiViewportRenderer:
         if self._rhi is None or size <= 0 or data is None:
             return
 
-        while len(self._ocio_luts_3d) <= index:
-            self._ocio_luts_3d.append(_OcioLut3D())
+        while len(self._ocio_luts) <= index:
+            self._ocio_luts.append(_OcioLutSlot())
 
-        slot = self._ocio_luts_3d[index]
+        slot = self._ocio_luts[index]
         _destroy_resource(slot.texture)
         slot.texture = self._rhi.newTexture(
             QRhiTexture.RGBA32F,
@@ -301,6 +305,7 @@ class RhiViewportRenderer:
             flags=QRhiTexture.ThreeDimensional,
         )
         slot.texture.create()
+        slot.is_3d = True
         slot.size = size
 
         flat = np.asarray(data, dtype=np.float32).reshape(-1)
@@ -312,6 +317,54 @@ class RhiViewportRenderer:
         slot.rgba_data = rgba
         slot.dirty = True
         self._invalidate_pipeline()
+
+    def upload_ocio_lut_2d(
+        self,
+        index: int,
+        width: int,
+        height: int,
+        channels: int,
+        data: np.ndarray | list[float],
+    ) -> None:
+        if self._rhi is None or width <= 0 or height <= 0 or channels <= 0 or data is None:
+            return
+
+        while len(self._ocio_luts) <= index:
+            self._ocio_luts.append(_OcioLutSlot())
+
+        slot = self._ocio_luts[index]
+        _destroy_resource(slot.texture)
+        slot.texture = _new_texture_2d(self._rhi, QRhiTexture.RGBA32F, width, height)
+        slot.texture.create()
+        slot.is_3d = False
+        slot.width = width
+        slot.height = height
+        slot.size = 0
+
+        flat = np.asarray(data, dtype=np.float32).reshape(-1)
+        pixels = width * height
+        rgba = np.empty((height, width, 4), dtype=np.float32)
+        if channels == 1:
+            r = flat[:pixels].reshape(height, width)
+            rgba[..., 0] = r
+            rgba[..., 1] = r
+            rgba[..., 2] = r
+            rgba[..., 3] = 1.0
+        elif channels == 3:
+            rgb = flat[: pixels * 3].reshape(height, width, 3)
+            rgba[..., :3] = rgb
+            rgba[..., 3] = 1.0
+        else:
+            src = flat[: pixels * min(channels, 4)].reshape(height, width, min(channels, 4))
+            rgba[..., : src.shape[-1]] = src
+            if src.shape[-1] < 4:
+                rgba[..., 3] = 1.0
+        slot.rgba_data = rgba
+        slot.dirty = True
+        self._invalidate_pipeline()
+
+    def set_ocio_lut_slot_dims(self, dims: list[str]) -> None:
+        self._ocio_lut_slot_dims = list(dims)
 
     def set_grading_uniform(self, name: str, value: float) -> None:
         self._grading_floats[name] = float(value)
@@ -325,7 +378,8 @@ class RhiViewportRenderer:
 
     def clear_ocio_luts(self) -> None:
         if self._rhi is None:
-            self._ocio_luts_3d.clear()
+            self._ocio_luts.clear()
+            self._ocio_lut_slot_dims.clear()
             return
         self._clear_ocio_luts_internal()
 
@@ -413,9 +467,18 @@ class RhiViewportRenderer:
                 frame_index=secondary.frame_index,
             )
 
-        for lut in self._ocio_luts_3d:
+        for lut in self._ocio_luts:
             if lut.dirty and lut.texture is not None and lut.rgba_data is not None:
-                _upload_texture_3d(batch, lut.texture, lut.rgba_data)
+                if lut.is_3d:
+                    _upload_texture_3d(batch, lut.texture, lut.rgba_data)
+                else:
+                    row_stride = lut.width * 4 * 4
+                    _upload_texture_bytes(
+                        batch,
+                        lut.texture,
+                        lut.rgba_data.tobytes(),
+                        row_stride_bytes=row_stride,
+                    )
                 lut.dirty = False
 
         self._ensure_pipeline(render_target)
@@ -505,9 +568,18 @@ class RhiViewportRenderer:
                 frame_index=slot.frame_index,
             )
 
-        for lut in self._ocio_luts_3d:
+        for lut in self._ocio_luts:
             if lut.dirty and lut.texture is not None and lut.rgba_data is not None:
-                _upload_texture_3d(batch, lut.texture, lut.rgba_data)
+                if lut.is_3d:
+                    _upload_texture_3d(batch, lut.texture, lut.rgba_data)
+                else:
+                    row_stride = lut.width * 4 * 4
+                    _upload_texture_bytes(
+                        batch,
+                        lut.texture,
+                        lut.rgba_data.tobytes(),
+                        row_stride_bytes=row_stride,
+                    )
                 lut.dirty = False
 
         cb.beginPass(render_target, QColor(0, 0, 0), DEFAULT_DEPTH_STENCIL_CLEAR, batch)
@@ -567,13 +639,16 @@ class RhiViewportRenderer:
         self._cached_render_pass_desc = None
 
     def _clear_ocio_luts_internal(self) -> None:
-        for lut in self._ocio_luts_3d:
+        for lut in self._ocio_luts:
             _destroy_resource(lut.texture)
             lut.texture = None
             lut.size = 0
+            lut.width = 0
+            lut.height = 0
             lut.rgba_data = None
             lut.dirty = False
-        self._ocio_luts_3d.clear()
+        self._ocio_luts.clear()
+        self._ocio_lut_slot_dims.clear()
         self._invalidate_pipeline()
 
     def _release_texture_state(self, state: _TextureUploadState) -> None:
@@ -700,6 +775,33 @@ class RhiViewportRenderer:
 
     def _fill_ocio_ubo(self) -> bytes:
         buf = bytearray(self._ocio_ubo_size)
+
+        def write_float(name: str, value: float) -> None:
+            member = self._ocio_uniform_members.get(name)
+            if member is None or member.is_vec3:
+                return
+            struct.pack_into("<f", buf, member.offset, float(value))
+
+        def write_vec3(name: str, x: float, y: float, z: float) -> None:
+            member = self._ocio_uniform_members.get(name)
+            if member is None or not member.is_vec3:
+                return
+            struct.pack_into("<fff", buf, member.offset, x, y, z)
+
+        # Identity defaults — prevent sat=0 desaturation if a uniform is missing.
+        write_float("ocio_exposure_contrast_exposureVal", 0.0)
+        write_float("ocio_exposure_contrast_gammaVal", 1.0)
+        write_vec3("ocio_grading_primary_brightness", 0.0, 0.0, 0.0)
+        write_vec3("ocio_grading_primary_contrast", 1.0, 1.0, 1.0)
+        write_vec3("ocio_grading_primary_gamma", 1.0, 1.0, 1.0)
+        write_float("ocio_grading_primary_saturation", 1.0)
+        write_float("ocio_grading_primary_localBypass", 0.0)
+        write_vec3("fc_cdl_slope", 1.0, 1.0, 1.0)
+        write_vec3("fc_cdl_offset", 0.0, 0.0, 0.0)
+        write_vec3("fc_cdl_power", 1.0, 1.0, 1.0)
+        write_float("fc_cdl_saturation", 1.0)
+        write_float("fc_cdl_enable", 0.0)
+
         for name, value in self._grading_floats.items():
             member = self._ocio_uniform_members.get(name)
             if member is None or member.is_vec3:
@@ -755,7 +857,7 @@ class RhiViewportRenderer:
         ]
 
         lut_binding = 3
-        for lut in self._ocio_luts_3d:
+        for lut in self._ocio_luts:
             if lut.texture is None:
                 continue
             bindings.append(

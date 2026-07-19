@@ -97,7 +97,17 @@ public:
     // Shader/OCIO updates
     void set_shader_sources(const std::string& pipeline_key, const std::string& vert_src, const std::string& frag_src);
     void upload_ocio_lut_3d(int index, int size, const std::vector<float>& data);
+    /// OCIO 1D LUTs are exposed as sampler2D (width x height, 1 or 4 channels).
+    void upload_ocio_lut_2d(
+        int index,
+        int width,
+        int height,
+        int channels,
+        const std::vector<float>& data);
+    /// Ordered slot dimensions matching sampler_bindings ("2D" or "3D"), starting at binding 3.
+    void set_ocio_lut_slot_dims(const std::vector<std::string>& dims);
     void clear_ocio_luts();
+    std::string cached_pipeline_key() const;
 
     // Window event listeners (called from RhiViewportWindow on GUI thread)
     void set_exposed(bool exposed);
@@ -173,8 +183,10 @@ public:
         int staging_waits = 0;
         int textures_created = 0;
         int textures_pooled_reuses = 0;
+        int pipeline_lut_count = 0;
     };
     DebugStats get_debug_stats() const;
+    int pipeline_lut_count() const;
 
 private:
     struct StagingBuffer {
@@ -186,9 +198,13 @@ private:
         int frame_index = -1;
     };
 
-    struct OcioLut3D {
+    struct OcioLut {
         QRhiTexture* texture = nullptr;
-        int size = 0;
+        bool is_3d = true;
+        int size = 0; // edge length for 3D
+        int width = 0;
+        int height = 0;
+        int channels = 4;
         std::vector<float> rgba_data;
         bool dirty = false;
     };
@@ -223,13 +239,17 @@ private:
     QRhiShaderResourceBindings* get_or_create_tile_srb(QRhiTexture* tex_a);
     void ensure_per_frame_ubo(int slot_count);
     quint32 per_frame_ubo_stride() const;
-    bool bake_shaders(const std::string& vert_src, const std::string& frag_src);
+    bool bake_shaders(
+        const std::string& pipeline_key,
+        const std::string& vert_src,
+        const std::string& frag_src);
     void parse_ocio_ubo_layout(const std::string& fragment_source);
     std::vector<char> pack_ocio_ubo();
 
     // Texture helpers
     void upload_texture(TextureState& state, const FrameSlotSpec& spec, CacheManager* cpu_cache, QRhiResourceUpdateBatch* batch);
-    void upload_texture_3d(OcioLut3D& lut, QRhiResourceUpdateBatch* batch);
+    void upload_texture_3d(OcioLut& lut, QRhiResourceUpdateBatch* batch);
+    void upload_texture_2d_lut(OcioLut& lut, QRhiResourceUpdateBatch* batch);
     bool resolve_display_texture(
         int source_index,
         CacheManager* cpu_cache,
@@ -294,14 +314,20 @@ private:
     DebugStats _debug_stats;
 
     // Double-buffered inputs
-    struct PendingLut3D {
+    struct PendingOcioLut {
         int index = 0;
+        bool is_3d = true;
         int size = 0;
+        int width = 0;
+        int height = 0;
+        int channels = 4;
         std::vector<float> rgba_data;
     };
     RenderParams _pending_render_params;
     GradingParams _pending_grading_params;
-    std::vector<PendingLut3D> _pending_ocio_luts;
+    std::vector<PendingOcioLut> _pending_ocio_luts;
+    std::vector<std::string> _pending_ocio_lut_dims;
+    bool _ocio_lut_dims_dirty = false;
     bool _render_params_dirty = false;
     bool _grading_params_dirty = false;
     bool _ocio_luts_dirty = false;
@@ -326,6 +352,7 @@ private:
     QRhiGraphicsPipeline* _pipeline = nullptr;
     QRhiTexture* _placeholderTex2D = nullptr;
     QRhiTexture* _placeholderLut3D = nullptr;
+    QRhiTexture* _placeholderLut2D = nullptr;
 
     QShader _vertexShader;
     QShader _fragmentShader;
@@ -335,7 +362,8 @@ private:
     TextureState _texAState;
     TextureState _texBState;
     std::vector<TextureState> _texturePool;
-    std::vector<OcioLut3D> _active_ocio_luts;
+    std::vector<OcioLut> _active_ocio_luts;
+    std::vector<std::string> _ocio_lut_slot_dims; // "2D" or "3D" per slot index
     int _pipeline_lut_count = 0; // LUT slots baked into current SRB layout
 
     // Per-source (per texA) SRBs for tile compare — layout-compatible with _pipeline

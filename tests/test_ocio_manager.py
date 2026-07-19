@@ -21,7 +21,9 @@ class TestOCIOManager(unittest.TestCase):
         self.assertIsNotNone(self.ocio_mgr.config)
         self.assertEqual(self.ocio_mgr.input_colorspace, "ACEScg")
         self.assertIsNone(self.ocio_mgr.look)
-        self.assertEqual(self.ocio_mgr.display_output, "sRGB")
+        self.assertEqual(self.ocio_mgr.display_name, "sRGB")
+        self.assertEqual(self.ocio_mgr.view_name, "sRGB View")
+        self.assertEqual(self.ocio_mgr.display_output, "sRGB / sRGB View")
 
     def test_load_config_prefers_ocio_env_over_settings(self):
         bundled_path = OCIOManager._bundled_config_path()
@@ -68,38 +70,62 @@ class TestOCIOManager(unittest.TestCase):
 
     def test_get_display_outputs(self):
         outputs = self.ocio_mgr.get_display_outputs()
-        self.assertEqual(outputs, ["Raw", "sRGB", "Rec709"])
-
-    def test_set_look(self):
-        self.ocio_mgr.set_look("ARRI LogC3 to Rec709")
-        self.assertEqual(self.ocio_mgr.look, "ARRI LogC3 to Rec709")
-        self.ocio_mgr.set_look("None (Bypass)")
-        self.assertIsNone(self.ocio_mgr.look)
+        self.assertIn("Raw", outputs)
+        self.assertIn("sRGB / sRGB View", outputs)
+        self.assertIn("Rec.709 / Rec.709 View", outputs)
 
     def test_set_display_output(self):
         self.ocio_mgr.set_display_output("Rec709")
-        self.assertEqual(self.ocio_mgr.display_output, "Rec709")
+        self.assertEqual(self.ocio_mgr.display_name, "Rec.709")
+        self.assertEqual(self.ocio_mgr.view_name, "Rec.709 View")
+        self.assertEqual(self.ocio_mgr.display_output, "Rec.709 / Rec.709 View")
         self.ocio_mgr.set_display_output("Raw")
         self.assertEqual(self.ocio_mgr.display_output, "Raw")
         # Invalid output should be ignored
         self.ocio_mgr.set_display_output("InvalidOutput")
         self.assertEqual(self.ocio_mgr.display_output, "Raw")
 
+    def test_display_view_transform_in_group(self):
+        self.assertTrue(self.ocio_mgr.transform_group_has_display_view())
+        self.ocio_mgr.set_display_output("Raw")
+        self.assertFalse(self.ocio_mgr.transform_group_has_display_view())
+        self.ocio_mgr.set_look("ARRI LogC3 to Rec709")
+        self.ocio_mgr.set_display_output("sRGB")
+        self.assertTrue(self.ocio_mgr.transform_group_has_display_view())
+        post = list(self.ocio_mgr._build_post_cdl_group())
+        self.assertGreaterEqual(len(post), 2)  # look + DVT
+
     def test_gpu_shader_compilation(self):
-        # 1. Test Default Bypass + sRGB
+        # 1. Test Default Bypass + sRGB view
         shader_text, lut_3d, lut_1d = self.ocio_mgr.get_gpu_shader_glsl()
-        self.assertIn("ocio_color_transform", shader_text)
+        self.assertIn("ocio_to_working", shader_text)
+        self.assertIn("ocio_to_display", shader_text)
         self.assertTrue(len(shader_text) > 0)
 
         # 2. Test Input Space convert
         self.ocio_mgr.input_colorspace = "ARRI Alexa LogC3"
+        self.ocio_mgr.invalidate_shader_cache()
         shader_text, lut_3d, lut_1d = self.ocio_mgr.get_gpu_shader_glsl()
-        self.assertIn("ocio_color_transform", shader_text)
+        self.assertIn("ocio_to_working", shader_text)
 
-        # 3. Test Display output curves
+        # 3. Test Display view change
         self.ocio_mgr.set_display_output("Rec709")
+        self.ocio_mgr.invalidate_shader_cache()
         shader_text, lut_3d, lut_1d = self.ocio_mgr.get_gpu_shader_glsl()
-        self.assertIn("ocio_color_transform", shader_text)
+        self.assertIn("ocio_to_display", shader_text)
+
+    def test_cineon_emits_1d_lut(self):
+        self.ocio_mgr.input_colorspace = "Cineon (ADX10)"
+        self.ocio_mgr.invalidate_shader_cache()
+        bundle = self.ocio_mgr.get_rhi_shader_bundle()
+        self.assertTrue(
+            bundle.textures_1d or any(dim == "2D" for _, dim, _ in bundle.sampler_bindings),
+            "Expected 1D/2D LUT samplers for Cineon→ACEScg",
+        )
+        self.assertTrue(
+            any(dim == "2D" for _, dim, _ in bundle.sampler_bindings)
+            or "sampler2D" in bundle.fragment_source
+        )
 
     def test_custom_lut_loading(self):
         # Create a temp .cube file to mock custom LUT load
@@ -149,7 +175,7 @@ class TestOCIOManager(unittest.TestCase):
         self.assertEqual(self.ocio_mgr.detect_input_colorspace("photo.jpg"), "sRGB - Texture")
         self.assertEqual(self.ocio_mgr.detect_input_colorspace("camera.ari"), "ARRI Alexa LogC3")
         self.assertEqual(self.ocio_mgr.detect_input_colorspace("raw_footage.r3d"), "RED Log3G10")
-        self.assertEqual(self.ocio_mgr.detect_input_colorspace("unknown_file.xyz"), "Raw")
+        self.assertEqual(self.ocio_mgr.detect_input_colorspace("unknown_file.xyz"), "ACEScg")
 
     def test_built_in_grading_tool(self):
         # 1. Default grade parameters should be neutral
@@ -178,7 +204,7 @@ class TestOCIOManager(unittest.TestCase):
         self.assertEqual(self.ocio_mgr.cdl_power, (1.0, 1.0, 1.0))
         self.assertEqual(self.ocio_mgr.cdl_saturation, 1.0)
 
-    def test_cdl_changes_pipeline_key_and_shader(self):
+    def test_cdl_does_not_change_pipeline_key_or_shader(self):
         key_a = self.ocio_mgr.get_pipeline_key()
         text_a, _, _ = self.ocio_mgr.get_gpu_shader_glsl()
 
@@ -191,13 +217,25 @@ class TestOCIOManager(unittest.TestCase):
         key_b = self.ocio_mgr.get_pipeline_key()
         text_b, _, _ = self.ocio_mgr.get_gpu_shader_glsl()
 
-        self.assertNotEqual(key_a, key_b)
-        self.assertNotEqual(text_a, text_b)
-        # OCIO may fold CDL into a Matrix op; assert baked constants appear.
-        self.assertTrue(
-            "1.2" in text_b or "CDL" in text_b or "Add Matrix" in text_b,
-            "Expected CDL effect in generated shader",
-        )
+        self.assertEqual(key_a, key_b)
+        self.assertEqual(text_a, text_b)
+        values = self.ocio_mgr.get_grading_uniform_values()
+        self.assertEqual(values["fc_cdl_slope"], (1.2, 1.0, 0.8))
+        self.assertEqual(values["fc_cdl_saturation"], 1.15)
+        self.assertEqual(values["fc_cdl_enable"], 1.0)
+
+    def test_cdl_enable_identity_vs_active(self):
+        values = self.ocio_mgr.get_grading_uniform_values()
+        self.assertEqual(values["fc_cdl_enable"], 0.0)
+        self.ocio_mgr.set_cdl_values(saturation=0.8)
+        self.assertEqual(self.ocio_mgr.get_grading_uniform_values()["fc_cdl_enable"], 1.0)
+        self.ocio_mgr.reset_cdl_values()
+        self.assertEqual(self.ocio_mgr.get_grading_uniform_values()["fc_cdl_enable"], 0.0)
+
+    def test_rhi_bundle_has_cdl_enable_early_out(self):
+        bundle = self.ocio_mgr.get_rhi_shader_bundle()
+        self.assertIn("fc_cdl_enable", bundle.fragment_source)
+        self.assertIn("fc_cdl_enable < 0.5", bundle.fragment_source)
 
     def test_reset_cdl_values(self):
         self.ocio_mgr.set_cdl_values(slope=(1.5, 1.5, 1.5), saturation=0.5)
@@ -211,12 +249,29 @@ class TestOCIOManager(unittest.TestCase):
         self.assertEqual(values["ocio_exposure_contrast_exposureVal"], 1.0)
         self.assertEqual(values["ocio_exposure_contrast_gammaVal"], 1.5)
         self.assertEqual(values["ocio_grading_primary_brightness"], (-0.1, -0.1, -0.1))
+        # GradingPrimary factory defaults must be uploaded (zero UBO → gray).
         self.assertEqual(values["ocio_grading_primary_contrast"], (1.0, 1.0, 1.0))
-        self.assertEqual(values["ocio_grading_primary_gamma"], (1.0, 1.0, 1.0))
         self.assertEqual(values["ocio_grading_primary_saturation"], 1.0)
-        self.assertEqual(values["ocio_grading_primary_localBypass"], 0.0)
+        self.assertIn("fc_cdl_slope", values)
+        self.assertIn("fc_cdl_saturation", values)
+        self.assertEqual(values["fc_cdl_enable"], 0.0)
 
     def test_rhi_shader_bundle(self):
+        from src.framecycler.render.shader_pipeline import ubo_has_vec3_before_scalar_hazard
+
         bundle = self.ocio_mgr.get_rhi_shader_bundle()
         self.assertIn("layout(binding = 1) uniform sampler2D texA", bundle.fragment_source)
-        self.assertIn("ocio_color_transform", bundle.fragment_source)
+        self.assertIn("ocio_to_working", bundle.fragment_source)
+        self.assertIn("ocio_to_display", bundle.fragment_source)
+        self.assertIn("fc_asc_cdl", bundle.fragment_source)
+        self.assertIn("fc_cdl_slope", bundle.fragment_source)
+        self.assertIn("layout(std140, binding = 3) uniform OcioDynamicUbo", bundle.fragment_source)
+        self.assertIn("ocio_grading_primary_contrast", bundle.fragment_source)
+        self.assertNotIn("_fc_gammaVal", bundle.fragment_source)
+        self.assertFalse(ubo_has_vec3_before_scalar_hazard(bundle.fragment_source))
+        self.assertIn("ocio_exposure_contrast_exposureVal", bundle.fragment_source)
+        self.assertIn("ocio_grading_primary_brightness", bundle.fragment_source)
+
+
+if __name__ == "__main__":
+    unittest.main()

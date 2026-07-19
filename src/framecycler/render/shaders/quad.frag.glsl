@@ -13,7 +13,26 @@ layout(std140, binding = 0) uniform PerFrameUbo {
     int channelMask;
 } uFrame;
 
-// OCIO-generated declarations and ocio_color_transform() are injected here.
+// OCIO-generated declarations and ocio_to_working()/ocio_to_display() are injected here.
+// ASC CDL uniforms (fc_cdl_*) live in OcioDynamicUbo when present.
+
+vec4 fc_asc_cdl(vec4 inColor) {
+    // Identity CDL: skip entirely so a zeroed sat uniform cannot desaturate RGB.
+    if (fc_cdl_enable < 0.5) {
+        return inColor;
+    }
+    // ASC CDL: out = sat(power(slope * in + offset))
+    vec3 slope = fc_cdl_slope;
+    vec3 cdlOffset = fc_cdl_offset;
+    vec3 power = fc_cdl_power;
+    float sat = fc_cdl_saturation;
+
+    vec3 c = inColor.rgb * slope + cdlOffset;
+    c = sign(c) * pow(abs(c) + 1e-10, power);
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    c = mix(vec3(luma), c, sat);
+    return vec4(c, inColor.a);
+}
 
 void main() {
     vec4 colorA = texture(texA, vUV);
@@ -47,5 +66,6 @@ void main() {
         finalColor = vec4(lum, lum, lum, 1.0);
     }
 
-    fragColor = ocio_color_transform(finalColor);
+    // Order: input→working+grading (OCIO) → ASC CDL → look+display (OCIO)
+    fragColor = ocio_to_display(fc_asc_cdl(ocio_to_working(finalColor)));
 }

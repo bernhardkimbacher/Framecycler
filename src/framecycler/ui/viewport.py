@@ -503,16 +503,65 @@ class Viewport(QWidget):
 
     def update_ocio_pipeline(self):
         bundle = self.ocio_manager.get_rhi_shader_bundle()
+        last_key = getattr(self, "_last_ocio_pipeline_key", None)
+        if last_key == bundle.pipeline_key and self._ocio_pipeline_ready:
+            # Same OCIO graph — uniforms only (skip clear/bake/LUT reupload).
+            self._sync_grading_uniforms()
+            self.native_renderer.request_redraw()
+            self.update()
+            return
+
         self.native_renderer.clear_ocio_luts()
+        slot_dims = [dim for _binding, dim, _name in bundle.sampler_bindings]
+        if hasattr(self.native_renderer, "set_ocio_lut_slot_dims"):
+            self.native_renderer.set_ocio_lut_slot_dims(slot_dims)
+
         self.native_renderer.set_shader_sources(
             bundle.pipeline_key,
             bundle.vertex_source,
             bundle.fragment_source,
         )
-        for index, lut in enumerate(bundle.textures_3d):
-            lut_data = np.array(lut["data"], dtype=np.float32)
-            self.native_renderer.upload_ocio_lut_3d(index, lut["size"], lut_data.flatten().tolist())
+
+        # Map sampler name → texture payload for binding-order upload.
+        by_sampler: dict[str, tuple[str, dict]] = {}
+        for lut in bundle.textures_1d:
+            by_sampler[lut["sampler"]] = ("2D", lut)
+        for lut in bundle.textures_3d:
+            by_sampler[lut["sampler"]] = ("3D", lut)
+
+        for slot_index, (_binding, dim, name) in enumerate(bundle.sampler_bindings):
+            entry = by_sampler.get(name)
+            if entry is None:
+                continue
+            kind, lut = entry
+            if kind == "3D" or dim == "3D":
+                lut_data = np.array(lut["data"], dtype=np.float32)
+                self.native_renderer.upload_ocio_lut_3d(
+                    slot_index, lut["size"], lut_data.flatten().tolist()
+                )
+            else:
+                lut_data = np.asarray(lut["data"], dtype=np.float32).flatten()
+                channel = str(lut.get("channel", "")).upper()
+                if "RGB" in channel and "A" not in channel.replace("RGB", ""):
+                    channels = 3
+                elif "RED" in channel or channel in ("R", "TEXTURE_RED_CHANNEL"):
+                    channels = 1
+                else:
+                    # Infer from data length
+                    pixels = int(lut["width"]) * int(lut["height"])
+                    channels = max(1, int(lut_data.size // max(pixels, 1)))
+                    channels = min(channels, 4)
+                if hasattr(self.native_renderer, "upload_ocio_lut_2d"):
+                    self.native_renderer.upload_ocio_lut_2d(
+                        slot_index,
+                        int(lut["width"]),
+                        int(lut["height"]),
+                        channels,
+                        lut_data.tolist(),
+                    )
+
         self._sync_grading_uniforms()
+        self._last_ocio_pipeline_key = bundle.pipeline_key
         self._ocio_pipeline_ready = True
         self.native_renderer.request_redraw()
         self.update()

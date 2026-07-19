@@ -5,21 +5,32 @@ import PyOpenColorIO as OCIO
 from ..render.shader_pipeline import build_rhi_shader_bundle, hash_pipeline_state
 
 
+# Legacy display_output strings → (display, view) for settings migration.
+_LEGACY_DISPLAY_ALIASES = {
+    "Raw": ("", ""),  # bypass DisplayViewTransform
+    "sRGB": ("sRGB", "sRGB View"),
+    "Rec709": ("Rec.709", "Rec.709 View"),
+    "Rec.709": ("Rec.709", "Rec.709 View"),
+}
+
+
 class OCIOManager:
     def __init__(self, custom_config_path=""):
         self.config = None
         self.config_path = ""
         self.input_colorspace = "ACEScg"
         self.look = None  # None = Bypass
-        self.display_output = "sRGB"  # "Raw" | "sRGB" | "Rec709"
+        # Config-driven display/view. Empty display ⇒ Raw (bypass DVT).
+        self.display_name = "sRGB"
+        self.view_name = "sRGB View"
         self._custom_lut_path = None
-        
+
         # Grading Tool parameters (Exposure, Gamma, Offset) — UBO-driven
         self.grade_exposure = 0.0
         self.grade_gamma = 1.0
         self.grade_offset = 0.0
 
-        # ASC CDL (slope/offset/power/sat) — baked into shader; requires rebuild
+        # ASC CDL (slope/offset/power/sat) — UBO/GLSL driven (not baked into OCIO)
         self.cdl_slope = (1.0, 1.0, 1.0)
         self.cdl_offset = (0.0, 0.0, 0.0)
         self.cdl_power = (1.0, 1.0, 1.0)
@@ -33,6 +44,15 @@ class OCIOManager:
         self._cached_dynamic_uniforms = []
 
         self.load_config(custom_config_path)
+
+    @property
+    def display_output(self) -> str:
+        """Backward-compatible label for UI/status (display / view or Raw)."""
+        if not self.display_name:
+            return "Raw"
+        if self.view_name:
+            return f"{self.display_name} / {self.view_name}"
+        return self.display_name
 
     @staticmethod
     def _bundled_config_path() -> str:
@@ -54,48 +74,69 @@ class OCIOManager:
     def load_config(self, custom_config_path=""):
         config_loaded = False
 
-        # 1. OCIO environment variable
         env_path = os.environ.get("OCIO", "").strip()
         if env_path:
             config_loaded = self._try_load_config_from_file(env_path, "OCIO environment variable")
 
-        # 2. Settings path
         if not config_loaded:
             settings_path = (custom_config_path or "").strip()
             if settings_path:
                 config_loaded = self._try_load_config_from_file(settings_path, "settings")
 
-        # 3. Bundled config
         if not config_loaded:
             bundled_path = self._bundled_config_path()
             if os.path.exists(bundled_path):
                 config_loaded = self._try_load_config_from_file(bundled_path, "bundled default")
             else:
                 print(f"Bundled OCIO config not found at: {bundled_path}")
-                
-        # 3. Post-load initialization
+
         if config_loaded and self.config:
             try:
                 OCIO.SetCurrentConfig(self.config)
-                
-                # Retrieve default input colorspace
+
                 colorspaces = self.get_colorspaces()
                 if colorspaces:
                     if "ACEScg" in colorspaces:
                         self.input_colorspace = "ACEScg"
                     else:
                         self.input_colorspace = colorspaces[0]
-                        
+
                 self.look = None
-                self.display_output = "sRGB"
                 self._custom_lut_path = None
+                self._set_default_display_view()
             except Exception as e:
                 self.config = None
                 print(f"Error initializing loaded OCIO config: {e}")
         else:
             self.config = None
+            self.display_name = ""
+            self.view_name = ""
             print("No OCIO Config file loaded, falling back to passthrough mode.")
         self.invalidate_shader_cache()
+
+    def _set_default_display_view(self) -> None:
+        displays = self.get_displays()
+        if not displays:
+            self.display_name = ""
+            self.view_name = ""
+            return
+        default_display = ""
+        try:
+            default_display = self.config.getDefaultDisplay() or ""
+        except Exception:
+            default_display = ""
+        if default_display not in displays:
+            default_display = displays[0]
+        views = self.get_views(default_display)
+        default_view = ""
+        try:
+            default_view = self.config.getDefaultView(default_display) or ""
+        except Exception:
+            default_view = ""
+        if default_view not in views and views:
+            default_view = views[0]
+        self.display_name = default_display
+        self.view_name = default_view
 
     def get_colorspaces(self):
         if not self.config:
@@ -116,8 +157,52 @@ class OCIOManager:
             looks.append(os.path.basename(self._custom_lut_path))
         return looks
 
-    def get_display_outputs(self):
-        return ["Raw", "sRGB", "Rec709"]
+    def get_displays(self) -> list[str]:
+        if not self.config:
+            return []
+        try:
+            names = list(self.config.getDisplays())
+            active = []
+            try:
+                active = list(self.config.getActiveDisplays())
+            except Exception:
+                active = []
+            if active:
+                ordered = [d for d in active if d in names]
+                ordered.extend([d for d in names if d not in ordered])
+                return ordered
+            return names
+        except Exception:
+            return []
+
+    def get_views(self, display: str | None = None) -> list[str]:
+        if not self.config:
+            return []
+        display = display if display is not None else self.display_name
+        if not display:
+            return []
+        try:
+            names = list(self.config.getViews(display))
+            active = []
+            try:
+                active = list(self.config.getActiveViews())
+            except Exception:
+                active = []
+            if active:
+                ordered = [v for v in active if v in names]
+                ordered.extend([v for v in names if v not in ordered])
+                return ordered
+            return names
+        except Exception:
+            return []
+
+    def get_display_outputs(self) -> list[str]:
+        """Menu entries: Raw plus ``Display / View`` labels."""
+        outputs = ["Raw"]
+        for display in self.get_displays():
+            for view in self.get_views(display):
+                outputs.append(f"{display} / {view}")
+        return outputs
 
     def set_look(self, name):
         if name == "None (Bypass)":
@@ -125,9 +210,40 @@ class OCIOManager:
         else:
             self.look = name
 
-    def set_display_output(self, name):
-        if name in self.get_display_outputs():
-            self.display_output = name
+    def set_display_output(self, name: str) -> None:
+        """Accept legacy aliases or ``Display / View`` labels."""
+        if not name:
+            return
+        if name in _LEGACY_DISPLAY_ALIASES:
+            display, view = _LEGACY_DISPLAY_ALIASES[name]
+            self.display_name = display
+            self.view_name = view
+            return
+        if name == "Raw":
+            self.display_name = ""
+            self.view_name = ""
+            return
+        if " / " in name:
+            display, view = name.split(" / ", 1)
+            displays = self.get_displays()
+            if display in displays and view in self.get_views(display):
+                self.display_name = display
+                self.view_name = view
+            return
+        # Bare display name → default view for that display
+        if name in self.get_displays():
+            views = self.get_views(name)
+            self.display_name = name
+            self.view_name = views[0] if views else ""
+
+    def set_display_view(self, display: str, view: str) -> None:
+        if not display:
+            self.display_name = ""
+            self.view_name = ""
+            return
+        if display in self.get_displays() and view in self.get_views(display):
+            self.display_name = display
+            self.view_name = view
 
     def load_custom_lut(self, path):
         if path and os.path.exists(path):
@@ -137,36 +253,33 @@ class OCIOManager:
 
     def detect_input_colorspace(self, file_path, metadata=None):
         """
-        Detects the standard colorspace from media file path hints, file extension, 
+        Detects the standard colorspace from media file path hints, file extension,
         and metadata (DPX headers, QuickTime tags, etc.) and aligns it with config spaces.
         """
         available_spaces = self.get_colorspaces()
         filename = os.path.basename(file_path).lower()
         ext = os.path.splitext(filename)[1]
 
-        # Normalized mapping keys to actual config colorspaces
         mapping = {
-            'acescg': 'ACEScg',
-            'srgb': 'sRGB - Texture',
-            'rec709': 'Rec.709 - Texture',
-            'bt709': 'Rec.709 - Texture',
-            'cineon': 'Cineon (ADX10)',
-            'logc3': 'ARRI Alexa LogC3',
-            'alexalogc3': 'ARRI Alexa LogC3',
-            'logc4': 'ARRI LogC4',
-            'slog3': 'Sony S-Log3',
-            'vlog': 'Panasonic V-Log',
-            'redlog3g10': 'RED Log3G10',
-            'raw': 'Raw'
+            "acescg": "ACEScg",
+            "srgb": "sRGB - Texture",
+            "rec709": "Rec.709 - Texture",
+            "bt709": "Rec.709 - Texture",
+            "cineon": "Cineon (ADX10)",
+            "logc3": "ARRI Alexa LogC3",
+            "alexalogc3": "ARRI Alexa LogC3",
+            "logc4": "ARRI LogC4",
+            "slog3": "Sony S-Log3",
+            "vlog": "Panasonic V-Log",
+            "redlog3g10": "RED Log3G10",
+            "raw": "Raw",
         }
 
         def normalize(s):
-            return str(s).lower().replace('-', '').replace('_', '').replace(' ', '').replace('.', '')
+            return str(s).lower().replace("-", "").replace("_", "").replace(" ", "").replace(".", "")
 
-        # 1. Inspect metadata for explicit keys or DPX/video attributes
         if metadata:
-            # Check standard colorspace attributes
-            for key in ['color_space', 'colorspace', 'ocio_colorspace']:
+            for key in ["color_space", "colorspace", "ocio_colorspace"]:
                 if key in metadata and metadata[key]:
                     val = normalize(metadata[key])
                     for k in sorted(mapping.keys(), key=len, reverse=True):
@@ -175,26 +288,24 @@ class OCIOManager:
                             if cs in available_spaces:
                                 return cs
 
-            # DPX specific header tags
-            if 'transfer_characteristic' in metadata:
-                tc = metadata['transfer_characteristic']
-                if tc == 2:  # Printing density (Log)
-                    cs = 'Cineon (ADX10)'
+            if "transfer_characteristic" in metadata:
+                tc = metadata["transfer_characteristic"]
+                if tc == 2:
+                    cs = "Cineon (ADX10)"
                     if cs in available_spaces:
                         return cs
-                elif tc == 3:  # Linear
-                    cs = 'ACEScg'
+                elif tc == 3:
+                    cs = "ACEScg"
                     if cs in available_spaces:
                         return cs
-                elif tc == 6:  # Rec.709
-                    cs = 'Rec.709 - Texture'
+                elif tc == 6:
+                    cs = "Rec.709 - Texture"
                     if cs in available_spaces:
                         return cs
 
-            # QuickTime/Video stream metadata sub-dictionary
-            file_meta = metadata.get('file_metadata', {})
+            file_meta = metadata.get("file_metadata", {})
             for k_meta, v_meta in file_meta.items():
-                if any(x in k_meta.lower() for x in ['color', 'space', 'transfer', 'primaries', 'trc']):
+                if any(x in k_meta.lower() for x in ["color", "space", "transfer", "primaries", "trc"]):
                     val = normalize(v_meta)
                     for k in sorted(mapping.keys(), key=len, reverse=True):
                         if k in val:
@@ -202,49 +313,40 @@ class OCIOManager:
                             if cs in available_spaces:
                                 return cs
 
-        # 2. Check filename/filepath hints (e.g. 'shot_srgb.exr')
-        filename_norm = normalize(filename)
         for k in sorted(mapping.keys(), key=len, reverse=True):
-            if k in filename_norm:
-                # Skip generic 'raw' name hints on camera raw formats to allow extension fallbacks (like .r3d)
-                if k == 'raw' and ext in ['.r3d', '.ari', '.arri']:
+            if k in normalize(filename):
+                if k == "raw" and ext in [".r3d", ".ari", ".arri"]:
                     continue
                 cs = mapping[k]
                 if cs in available_spaces:
                     return cs
 
-        # 3. Fallback based on extension
-        fallback_cs = 'Raw'
-        if ext in ['.exr']:
-            fallback_cs = 'ACEScg'
-        elif ext in ['.dpx']:
-            fallback_cs = 'Cineon (ADX10)'
-        elif ext in ['.mov', '.mp4', '.mxf', '.mkv', '.avi', '.m4v']:
-            fallback_cs = 'Rec.709 - Texture'
-        elif ext in ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.tga', '.bmp', '.psd']:
-            fallback_cs = 'sRGB - Texture'
-        elif ext in ['.ari', '.arri']:
-            fallback_cs = 'ARRI Alexa LogC3'
-        elif ext in ['.r3d']:
-            fallback_cs = 'RED Log3G10'
+        fallback_cs = None
+        if ext in [".exr"]:
+            fallback_cs = "ACEScg"
+        elif ext in [".dpx"]:
+            fallback_cs = "Cineon (ADX10)"
+        elif ext in [".mov", ".mp4", ".mxf", ".mkv", ".avi", ".m4v"]:
+            fallback_cs = "Rec.709 - Texture"
+        elif ext in [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".tga", ".bmp", ".psd"]:
+            fallback_cs = "sRGB - Texture"
+        elif ext in [".ari", ".arri"]:
+            fallback_cs = "ARRI Alexa LogC3"
+        elif ext in [".r3d"]:
+            fallback_cs = "RED Log3G10"
 
-        # Ensure fallback exists in config, otherwise default to Raw/first color space
-        if fallback_cs in available_spaces:
+        if fallback_cs and fallback_cs in available_spaces:
             return fallback_cs
-            
-        return 'ACEScg' if 'ACEScg' in available_spaces else (available_spaces[0] if available_spaces else 'Raw')
 
-    def set_grading_values(
-        self,
-        exposure: float | None = None,
-        gamma: float | None = None,
-        offset: float | None = None,
-    ) -> None:
-        """Update grading parameters without invalidating the OCIO shader text."""
+        return self.input_colorspace if self.input_colorspace in available_spaces else (
+            available_spaces[0] if available_spaces else "Raw"
+        )
+
+    def set_grading_values(self, exposure=None, gamma=None, offset=None):
         if exposure is not None:
             self.grade_exposure = float(exposure)
         if gamma is not None:
-            self.grade_gamma = float(gamma)
+            self.grade_gamma = max(0.01, float(gamma))
         if offset is not None:
             self.grade_offset = float(offset)
 
@@ -271,7 +373,7 @@ class OCIOManager:
         saturation: float | None = None,
         style=None,
     ) -> None:
-        """Update ASC CDL parameters. Requires shader pipeline rebuild (not UBO-driven)."""
+        """Update ASC CDL parameters (UBO-driven; does not invalidate shader cache)."""
         if slope is not None:
             self.cdl_slope = self._as_rgb_triple(slope)
         if offset is not None:
@@ -282,7 +384,6 @@ class OCIOManager:
             self.cdl_saturation = float(saturation)
         if style is not None:
             self.cdl_style = style
-        self.invalidate_shader_cache()
 
     def reset_cdl_values(self) -> None:
         self.set_cdl_values(
@@ -321,7 +422,6 @@ class OCIOManager:
 
     @staticmethod
     def _gpu_uniform_float(value: float) -> float:
-        """Clamp OCIO scalar uniforms to finite float32 range for GPU UBO uploads."""
         value = float(value)
         if not math.isfinite(value):
             return 0.0
@@ -334,12 +434,6 @@ class OCIOManager:
 
     @staticmethod
     def _grading_primary_static_uniform_defaults() -> dict[str, float | tuple[float, float, float]]:
-        """Factory defaults for non-interactive GradingPrimary uniforms.
-
-        Vulkan/SPIR-V packs OCIO dynamic uniforms into a UBO that is zero-initialized
-        each frame unless explicitly populated. Contrast/pivot at 0 would crush the
-        image to black; OpenGL left these unset, so defaults must be supplied here.
-        """
         primary = OCIO.GradingPrimaryTransform().getValue()
         return {
             "ocio_grading_primary_contrast": (
@@ -362,18 +456,26 @@ class OCIOManager:
         }
 
     def get_grading_uniform_values(self) -> dict[str, float | tuple[float, float, float]]:
-        """Return OCIO dynamic uniform values for the current grading state."""
+        """Return OCIO dynamic + ASC CDL uniform values for the current grading state.
+
+        Includes GradingPrimary factory defaults so a zero-filled UBO cannot
+        crush contrast/saturation (std140 pack must match Metal layout).
+        """
         values = self._grading_primary_static_uniform_defaults()
         values.update(
             {
                 "ocio_exposure_contrast_exposureVal": self.grade_exposure,
                 "ocio_exposure_contrast_gammaVal": self.grade_gamma,
-                # Spike A mapping: GradingPrimary offset is driven via brightness uniform.
                 "ocio_grading_primary_brightness": (
                     self.grade_offset,
                     self.grade_offset,
                     self.grade_offset,
                 ),
+                "fc_cdl_slope": self.cdl_slope,
+                "fc_cdl_offset": self.cdl_offset,
+                "fc_cdl_power": self.cdl_power,
+                "fc_cdl_saturation": self._gpu_uniform_float(self.cdl_saturation),
+                "fc_cdl_enable": 0.0 if self._cdl_is_identity() else 1.0,
             }
         )
         return values
@@ -385,21 +487,21 @@ class OCIOManager:
     def get_pipeline_key(self) -> str:
         look_key = self.look or ""
         custom_lut = self._custom_lut_path or ""
-        cdl_key = (
-            f"{self.cdl_slope}|{self.cdl_offset}|{self.cdl_power}|"
-            f"{self.cdl_saturation}|{self.cdl_style}"
-        )
+        display_key = f"{self.display_name}|{self.view_name}"
+        # Salt busts stale QSB disk caches when the fragment UBO/template changes.
         return hash_pipeline_state(
+            "ocio_frag_v6_ubo_layout",
             self.input_colorspace,
             look_key,
-            self.display_output,
+            display_key,
             custom_lut,
             self.config_path,
-            cdl_key,
         )
 
     @staticmethod
-    def _append_dynamic_grading(group: OCIO.GroupTransform, exposure: float, gamma: float, offset: float) -> None:
+    def _append_dynamic_grading(
+        group: OCIO.GroupTransform, exposure: float, gamma: float, offset: float
+    ) -> None:
         ect = OCIO.ExposureContrastTransform()
         ect.setExposure(exposure)
         ect.setGamma(gamma)
@@ -413,17 +515,6 @@ class OCIOManager:
         gpt.setValue(primary)
         gpt.makeDynamic()
         group.appendTransform(gpt)
-
-    def _append_cdl(self, group: OCIO.GroupTransform) -> None:
-        if self._cdl_is_identity():
-            return
-        cdl = OCIO.CDLTransform()
-        cdl.setSlope(list(self.cdl_slope))
-        cdl.setOffset(list(self.cdl_offset))
-        cdl.setPower(list(self.cdl_power))
-        cdl.setSat(self.cdl_saturation)
-        cdl.setStyle(self.cdl_style)
-        group.appendTransform(cdl)
 
     def _resolve_working_space(self) -> str:
         if not self.config:
@@ -439,78 +530,83 @@ class OCIOManager:
                 working_space = cs_names[0]
         return working_space
 
-    def _build_transform_group(self) -> OCIO.GroupTransform:
-        group = OCIO.GroupTransform()
+    def _append_look(self, group: OCIO.GroupTransform, working_space: str) -> None:
+        if not self.look:
+            return
+        if self._custom_lut_path and self.look == os.path.basename(self._custom_lut_path):
+            try:
+                group.appendTransform(
+                    OCIO.FileTransform(src=self._custom_lut_path, interpolation=OCIO.INTERP_LINEAR)
+                )
+            except Exception as e:
+                print(f"OCIOManager: Failed to apply custom LUT '{self._custom_lut_path}': {e}")
+            return
+        try:
+            group.appendTransform(
+                OCIO.LookTransform(src=working_space, dst=working_space, looks=self.look)
+            )
+        except Exception as e:
+            print(
+                f"OCIOManager: Failed to apply Look '{self.look}': {e}. "
+                "Ensure LUT file exists in studio_config/luts/."
+            )
 
+    def _append_display_view(self, group: OCIO.GroupTransform, working_space: str) -> None:
+        if not self.config or not self.display_name or not self.view_name:
+            return
+        try:
+            dvt = OCIO.DisplayViewTransform()
+            dvt.setSrc(working_space)
+            dvt.setDisplay(self.display_name)
+            dvt.setView(self.view_name)
+            # Looks are applied explicitly via LookTransform; do not re-apply via the view.
+            if hasattr(dvt, "setLooksBypass"):
+                dvt.setLooksBypass(True)
+            group.appendTransform(dvt)
+        except Exception as e:
+            print(
+                f"OCIOManager: Failed DisplayViewTransform "
+                f"'{self.display_name}' / '{self.view_name}': {e}"
+            )
+
+    def _build_pre_cdl_group(self) -> OCIO.GroupTransform:
+        """Input → working + dynamic grading (ASC CDL applied in GLSL after this)."""
+        group = OCIO.GroupTransform()
         if not self.config:
-            self._append_dynamic_grading(group, self.grade_exposure, self.grade_gamma, self.grade_offset)
-            self._append_cdl(group)
+            self._append_dynamic_grading(
+                group, self.grade_exposure, self.grade_gamma, self.grade_offset
+            )
             return group
 
         working_space = self._resolve_working_space()
-
         if self.input_colorspace != "Raw" and self.input_colorspace != working_space:
             cs_names = [cs.getName() for cs in self.config.getColorSpaces()]
             if self.input_colorspace in cs_names:
                 group.appendTransform(
                     OCIO.ColorSpaceTransform(src=self.input_colorspace, dst=working_space)
                 )
+        self._append_dynamic_grading(
+            group, self.grade_exposure, self.grade_gamma, self.grade_offset
+        )
+        return group
 
-        self._append_dynamic_grading(group, self.grade_exposure, self.grade_gamma, self.grade_offset)
-        self._append_cdl(group)
+    def _build_post_cdl_group(self) -> OCIO.GroupTransform:
+        """Look + DisplayViewTransform (after ASC CDL in GLSL)."""
+        group = OCIO.GroupTransform()
+        if not self.config:
+            return group
+        working_space = self._resolve_working_space()
+        self._append_look(group, working_space)
+        self._append_display_view(group, working_space)
+        return group
 
-        look_applied = False
-        if self.look:
-            if self._custom_lut_path and self.look == os.path.basename(self._custom_lut_path):
-                try:
-                    group.appendTransform(
-                        OCIO.FileTransform(src=self._custom_lut_path, interpolation=OCIO.INTERP_LINEAR)
-                    )
-                    look_applied = True
-                except Exception as e:
-                    print(f"OCIOManager: Failed to apply custom LUT '{self._custom_lut_path}': {e}")
-            else:
-                try:
-                    group.appendTransform(
-                        OCIO.LookTransform(src=working_space, dst=working_space, looks=self.look)
-                    )
-                    look_applied = True
-                except Exception as e:
-                    print(
-                        f"OCIOManager: Failed to apply Look '{self.look}': {e}. "
-                        "Ensure LUT file exists in studio_config/luts/."
-                    )
-
-        if self.display_output != "Raw" and not look_applied:
-            cs_names = [cs.getName() for cs in self.config.getColorSpaces()]
-            if working_space == "ACEScg":
-                group.appendTransform(
-                    OCIO.BuiltinTransform(style="UTILITY - ACES-AP1_to_LINEAR-REC709_BFD")
-                )
-                if self.display_output == "sRGB":
-                    t = OCIO.ExponentWithLinearTransform()
-                    t.setGamma([2.4, 2.4, 2.4, 1.0])
-                    t.setOffset([0.055, 0.055, 0.055, 0.0])
-                    t.setDirection(OCIO.TRANSFORM_DIR_INVERSE)
-                    group.appendTransform(t)
-                elif self.display_output == "Rec709":
-                    t = OCIO.ExponentTransform()
-                    t.setValue([2.4, 2.4, 2.4, 1.0])
-                    t.setDirection(OCIO.TRANSFORM_DIR_INVERSE)
-                    group.appendTransform(t)
-            else:
-                target_cs = "sRGB - Texture" if self.display_output == "sRGB" else "Rec.709 - Texture"
-                if target_cs in cs_names:
-                    group.appendTransform(OCIO.ColorSpaceTransform(src=working_space, dst=target_cs))
-                else:
-                    display_spaces = [
-                        cs.getName() for cs in self.config.getColorSpaces() if not cs.isData()
-                    ]
-                    if display_spaces:
-                        group.appendTransform(
-                            OCIO.ColorSpaceTransform(src=working_space, dst=display_spaces[-1])
-                        )
-
+    def _build_transform_group(self) -> OCIO.GroupTransform:
+        """Full group for introspection/tests (CDL omitted — applied in GLSL)."""
+        group = OCIO.GroupTransform()
+        for t in self._build_pre_cdl_group():
+            group.appendTransform(t)
+        for t in self._build_post_cdl_group():
+            group.appendTransform(t)
         return group
 
     @staticmethod
@@ -548,21 +644,23 @@ class OCIOManager:
                         "sampler": tex.samplerName,
                         "width": tex.width,
                         "height": tex.height,
-                        "channel": tex.channel,
+                        "channel": str(tex.channel),
                         "data": tex.getValues(),
                     }
                 )
         else:
             num_1d_tex = shader_desc.getNumTextures()
             for i in range(num_1d_tex):
-                tex_name, sampler_name, width, height, channel, _fmt, _direction, lut_data = shader_desc.getTexture(i)
+                tex_name, sampler_name, width, height, channel, _fmt, _direction, lut_data = (
+                    shader_desc.getTexture(i)
+                )
                 textures_1d.append(
                     {
                         "name": tex_name,
                         "sampler": sampler_name,
                         "width": width,
                         "height": height,
-                        "channel": channel,
+                        "channel": str(channel),
                         "data": lut_data,
                     }
                 )
@@ -582,7 +680,7 @@ class OCIOManager:
                     names.append(parts[2])
         return names
 
-    def _compile_gpu_shader(self, group: OCIO.GroupTransform):
+    def _compile_gpu_shader(self, group: OCIO.GroupTransform, function_name: str):
         if not self.config:
             raw_cfg = OCIO.Config.CreateRaw()
             processor = raw_cfg.getProcessor(group)
@@ -592,7 +690,7 @@ class OCIOManager:
         gpu_proc = processor.getDefaultGPUProcessor()
         shader_desc = OCIO.GpuShaderDesc.CreateShaderDesc()
         shader_desc.setLanguage(OCIO.GPU_LANGUAGE_GLSL_4_0)
-        shader_desc.setFunctionName("ocio_color_transform")
+        shader_desc.setFunctionName(function_name)
         gpu_proc.extractGpuShaderInfo(shader_desc)
 
         shader_text = shader_desc.getShaderText()
@@ -600,21 +698,42 @@ class OCIOManager:
         dynamic_uniforms = self._extract_dynamic_uniforms(shader_text)
         return shader_text, textures_3d, textures_1d, dynamic_uniforms
 
+    @staticmethod
+    def _identity_ocio_function(name: str) -> str:
+        return f"""
+vec4 {name}(vec4 color) {{
+    return color;
+}}
+"""
+
     def _ensure_shader_cache(self) -> None:
         pipeline_key = self.get_pipeline_key()
         if pipeline_key == self._cached_pipeline_key and self._cached_ocio_shader:
             return
 
         try:
-            group = self._build_transform_group()
-            shader_text, textures_3d, textures_1d, dynamic_uniforms = self._compile_gpu_shader(group)
+            pre_text, pre_3d, pre_1d, pre_dyn = self._compile_gpu_shader(
+                self._build_pre_cdl_group(), "ocio_to_working"
+            )
+            post_group = self._build_post_cdl_group()
+            post_transforms = list(post_group)
+            if not post_transforms:
+                post_text = self._identity_ocio_function("ocio_to_display")
+                post_3d, post_1d, post_dyn = [], [], []
+            else:
+                post_text, post_3d, post_1d, post_dyn = self._compile_gpu_shader(
+                    post_group, "ocio_to_display"
+                )
+            shader_text = pre_text + "\n" + post_text
+            textures_3d = pre_3d + post_3d
+            textures_1d = pre_1d + post_1d
+            dynamic_uniforms = list(dict.fromkeys(pre_dyn + post_dyn))
         except Exception as e:
             print(f"Error compiling OCIO GPU Shader: {e}")
-            shader_text = """
-            vec4 ocio_color_transform(vec4 color) {
-                return color;
-            }
-            """
+            shader_text = (
+                self._identity_ocio_function("ocio_to_working")
+                + self._identity_ocio_function("ocio_to_display")
+            )
             textures_3d, textures_1d, dynamic_uniforms = [], [], []
 
         self._cached_pipeline_key = pipeline_key
@@ -631,16 +750,10 @@ class OCIOManager:
         self._cached_dynamic_uniforms = []
 
     def get_gpu_shader_glsl(self):
-        """
-        Compiles the 3-step pipeline: Input ColorSpace -> Grade -> Look -> Display Output.
-        Dynamically adapts to custom configs if the default ACEScg working space is absent.
-        Returns (GLSL shader function text, list of 3D Lut textures, list of 1D Lut textures)
-        """
         self._ensure_shader_cache()
         return self._cached_ocio_shader, self._cached_textures_3d, self._cached_textures_1d
 
     def get_rhi_shader_bundle(self):
-        """Return a Vulkan-GLSL shader bundle ready for pyside6-qsb / QShaderBaker."""
         self._ensure_shader_cache()
         return build_rhi_shader_bundle(
             self._cached_ocio_shader,
@@ -648,3 +761,10 @@ class OCIOManager:
             self._cached_textures_1d,
             self.get_pipeline_key(),
         )
+
+    def transform_group_has_display_view(self) -> bool:
+        """Test helper: True when the post-CDL group contains a DisplayViewTransform."""
+        for t in self._build_post_cdl_group():
+            if t.getTransformType() == OCIO.TRANSFORM_TYPE_DISPLAY_VIEW:
+                return True
+        return False
