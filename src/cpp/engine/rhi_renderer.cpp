@@ -61,78 +61,6 @@ bool RhiRenderer::initialize(uintptr_t window_ptr)
     return true;
 }
 
-void RhiRenderer::set_present_timing_enabled(bool enabled)
-{
-    _present_timing_enabled.store(enabled);
-}
-
-void RhiRenderer::clear_present_timings()
-{
-    std::lock_guard<std::mutex> lock(_present_timing_mutex);
-    _present_timing_ring.clear();
-    _present_timing_ring.resize(kPresentTimingCapacity);
-    _present_timing_write = 0;
-    _present_timing_count = 0;
-}
-
-std::vector<RhiRenderer::PresentTimingSample> RhiRenderer::drain_present_timings()
-{
-    std::lock_guard<std::mutex> lock(_present_timing_mutex);
-    std::vector<PresentTimingSample> out;
-    if (_present_timing_count == 0 || _present_timing_ring.empty()) {
-        return out;
-    }
-    out.reserve(_present_timing_count);
-    const size_t cap = _present_timing_ring.size();
-    const size_t start = (_present_timing_count < cap)
-        ? 0
-        : _present_timing_write;
-    for (size_t i = 0; i < _present_timing_count; ++i) {
-        out.push_back(_present_timing_ring[(start + i) % cap]);
-    }
-    _present_timing_write = 0;
-    _present_timing_count = 0;
-    return out;
-}
-
-void RhiRenderer::_record_present_timing(bool drew_frame)
-{
-    if (!drew_frame || !_present_timing_enabled.load(std::memory_order_relaxed)) {
-        return;
-    }
-
-    PresentTimingSample sample;
-    sample.steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::steady_clock::now().time_since_epoch())
-                           .count();
-    sample.frames_drawn = _debug_stats.frames_drawn;
-    if (_transport.is_playing()) {
-        sample.global_frame = _transport.current_frame();
-    } else if (!_active_render_params.slots.empty()) {
-        // Prefer the sequence/primary slot when present.
-        int primary = _active_render_params.sequence_index;
-        sample.global_frame = _active_render_params.slots[0].frame_index;
-        for (const auto& slot : _active_render_params.slots) {
-            if (slot.source_index == primary) {
-                sample.global_frame = slot.frame_index;
-                break;
-            }
-        }
-    } else {
-        sample.global_frame = -1;
-    }
-
-    std::lock_guard<std::mutex> lock(_present_timing_mutex);
-    if (_present_timing_ring.empty()) {
-        _present_timing_ring.resize(kPresentTimingCapacity);
-    }
-    _present_timing_ring[_present_timing_write] = sample;
-    _present_timing_write = (_present_timing_write + 1) % _present_timing_ring.size();
-    if (_present_timing_count < _present_timing_ring.size()) {
-        ++_present_timing_count;
-    }
-}
-
 void RhiRenderer::set_force_null_backend(bool enabled)
 {
     _force_null_backend = enabled;
@@ -1210,7 +1138,6 @@ void RhiRenderer::render_frame()
             _debug_stats.end_frame_ms_max = end_ms;
         }
     }
-    _record_present_timing(drew_this_frame);
     // Staging/GPU uploads submitted this frame are safe to treat as complete next frame.
     _completed_upload_generation = _upload_generation;
     ++_upload_generation;

@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -35,10 +34,7 @@ from ..core.media_source import MediaSource, decoder_frame_to_local_index
 from ..core.playback_timing import (
     PLAYBACK_TIMING_EVERY_FRAME,
     PLAYBACK_TIMING_REALTIME,
-    advance_playback,
-    every_frame_can_advance,
     normalize_playback_timing,
-    realtime_steps,
 )
 from ..core.transport_program import build_transport_program
 from ..color.ocio_manager import OCIOManager
@@ -131,9 +127,6 @@ class MainWindow(QMainWindow):
         self.file_pixel_aspect_ratio = SQUARE_PIXEL_ASPECT
         self.source_width = 0
         self.source_height = 0
-        self._playback_anchor_time = 0.0
-        self._playback_anchor_frame = 0
-        self._playback_anchor_direction = 1
         
         # Dynamic menus references
         self.exr_layer_combo = None
@@ -141,11 +134,6 @@ class MainWindow(QMainWindow):
         self.display_menu = None
         self.view_menu = None
         
-        # Playback timer (Python fallback when C++ transport is unavailable)
-        self.timer = QTimer(self)
-        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self.timer.timeout.connect(self._playback_tick)
-
         # Drain coalesced C++ transport notifies on the GUI thread (no GIL on render thread).
         self._transport_poll_timer = QTimer(self)
         self._transport_poll_timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -687,10 +675,8 @@ class MainWindow(QMainWindow):
             self.stop_playback()
         elif self.playing:
             self.playback_direction = direction
-            self._reset_playback_clock()
             self._update_playback_buttons()
-            if self._use_cpp_transport:
-                self._push_transport_program(playing=True)
+            self._push_transport_program(playing=True)
         else:
             self.playback_direction = direction
             self.start_playback()
@@ -1293,13 +1279,12 @@ class MainWindow(QMainWindow):
             and self._transport_shot_key is not None
         ):
             self._seek_light(frame, segment)
-            if self._use_cpp_transport:
+            if self._has_cpp_transport():
                 self.viewport.native_renderer.transport_seek(frame)
             return
 
         self._seek_heavy(frame, segment, shot_key)
-        if self._use_cpp_transport:
-            self._push_transport_program(playing=self.playing)
+        self._push_transport_program(playing=self.playing)
 
     def _seek_light(self, frame: int, segment) -> None:
         """Per-frame path: playhead / readout / packages only (same shot)."""
@@ -1315,7 +1300,7 @@ class MainWindow(QMainWindow):
 
         # During C++-clocked playback the render thread already presents the
         # new frame; skip viewport.update() so Python cannot stall the clock.
-        if self.playing and self._use_cpp_transport:
+        if self.playing:
             self.timeline.set_current_frame(frame)
             self._update_readout_display()
             if hasattr(self, "package_manager"):
@@ -1388,11 +1373,7 @@ class MainWindow(QMainWindow):
         self._update_readout_display()
 
         if self.playing and not self._fps_matches(previous_fps, self.fps):
-            if self._use_cpp_transport:
-                self._push_transport_program(playing=True)
-            else:
-                self.timer.start(max(1, int(round(1000.0 / max(1.0, self.fps)))))
-                self._reset_playback_clock()
+            self._push_transport_program(playing=True)
 
         self._apply_resolved_cdl()
         self._apply_resolved_input_colorspace()
@@ -1400,19 +1381,25 @@ class MainWindow(QMainWindow):
         if hasattr(self, "package_manager"):
             self.package_manager.emit_frame_changed(frame, self.viewport.current_timecode)
 
-    @property
-    def _use_cpp_transport(self) -> bool:
-        if os.environ.get("FRAMECYCLER_PYTHON_TRANSPORT", "").strip() in ("1", "true", "yes"):
-            return False
+    def _has_cpp_transport(self) -> bool:
         renderer = getattr(getattr(self, "viewport", None), "native_renderer", None)
         return renderer is not None and hasattr(renderer, "set_transport_program")
+
+    def _ensure_cpp_transport(self) -> bool:
+        if self._has_cpp_transport():
+            return True
+        self.statusBar().showMessage(
+            "Playback requires the C++ transport clock (rebuild framecycler_engine).",
+            5000,
+        )
+        return False
 
     def _wire_transport_callbacks(self) -> None:
         # Kept for API compatibility; production path polls atomics (no GIL on render).
         self._transport_callbacks_wired = True
 
     def _poll_transport_notifies(self) -> None:
-        if not self._use_cpp_transport:
+        if not self._has_cpp_transport():
             return
         renderer = self.viewport.native_renderer
         boundary = renderer.poll_transport_boundary_notify()
@@ -1426,7 +1413,7 @@ class MainWindow(QMainWindow):
             self._on_transport_frame_changed(int(frame), int(direction))
 
     def _push_transport_program(self, *, playing: bool) -> None:
-        if not self._use_cpp_transport:
+        if not self._has_cpp_transport():
             return
         plan = self.session.plan
         segment = None if plan.empty else plan.segment_at(self.current_frame)
@@ -1620,94 +1607,6 @@ class MainWindow(QMainWindow):
                 return index
         return None
 
-    def _reset_playback_clock(self):
-        self._playback_anchor_time = time.monotonic()
-        self._playback_anchor_frame = self.current_frame
-        self._playback_anchor_direction = self.playback_direction
-
-    def _schedule_decode_for_frame(self, frame: int) -> None:
-        """Prioritize decode for ``frame`` without moving the playhead."""
-        plan = self.session.plan
-        if plan.empty:
-            return
-        segment = plan.segment_at(frame)
-        if segment is None:
-            return
-        for version in segment.display_versions():
-            if version.source is None or version.source.cache is None or version.offline:
-                continue
-            decoder_frame = plan.decoder_frame_for_version(segment, version, frame)
-            version.source.cache.get_frame(decoder_frame)
-
-    def _frame_ready_for_display(self, frame: int) -> bool:
-        """True when every online compare slot for ``frame`` is in the decode cache."""
-        plan = self.session.plan
-        if plan.empty:
-            return True
-        segment = plan.segment_at(frame)
-        if segment is None:
-            return True
-        online = [
-            version
-            for version in segment.display_versions()
-            if version.source is not None
-            and version.source.cache is not None
-            and not version.offline
-        ]
-        if not online:
-            return True
-        for version in online:
-            decoder_frame = plan.decoder_frame_for_version(segment, version, frame)
-            if not version.source.cache.has_frame(decoder_frame):
-                return False
-        return True
-
-    def _playback_tick(self):
-        if self._use_cpp_transport:
-            # C++ transport owns the clock while playing.
-            return
-        timing = normalize_playback_timing(self.settings.playback_timing)
-        if timing == PLAYBACK_TIMING_REALTIME:
-            steps = realtime_steps(
-                time.monotonic() - self._playback_anchor_time,
-                self.fps,
-            )
-            result = advance_playback(
-                self._playback_anchor_frame,
-                self._playback_anchor_direction,
-                steps,
-                self.in_point,
-                self.out_point,
-                self.settings.loop_mode,
-            )
-        else:
-            result = advance_playback(
-                self.current_frame,
-                self.playback_direction,
-                1,
-                self.in_point,
-                self.out_point,
-                self.settings.loop_mode,
-            )
-
-        if result.frame is None:
-            if result.stop:
-                self.stop_playback()
-            return
-
-        if timing == PLAYBACK_TIMING_EVERY_FRAME and not result.stop:
-            next_decode_ready = self._frame_ready_for_display(result.frame)
-            if not every_frame_can_advance(next_decode_ready=next_decode_ready):
-                self._schedule_decode_for_frame(result.frame)
-                return
-
-        if result.frame != self.current_frame or result.direction != self.playback_direction:
-            self.playback_direction = result.direction
-            self.seek_to_frame(result.frame)
-
-        if result.stop:
-            self.stop_playback()
-
     def toggle_playback(self):
         if self.playing:
             self.stop_playback()
@@ -1715,32 +1614,21 @@ class MainWindow(QMainWindow):
             self.start_playback()
 
     def start_playback(self):
-        if self.playing and (
-            (self._use_cpp_transport and self.viewport.native_renderer.is_transport_playing())
-            or self.timer.isActive()
-        ):
+        if not self._ensure_cpp_transport():
+            return
+        if self.playing and self.viewport.native_renderer.is_transport_playing():
             return
         self.playing = True
         self._update_playback_buttons()
-        self._reset_playback_clock()
-
-        if self._use_cpp_transport:
-            self.timer.stop()
-            self._push_transport_program(playing=True)
-            self.viewport.native_renderer.transport_play()
-            self._transport_poll_timer.start()
-        else:
-            # Fractional-aware interval (still truncated for QTimer ms resolution).
-            interval_ms = max(1, int(round(1000.0 / max(1.0, self.fps))))
-            self.timer.start(interval_ms)
-            self._transport_poll_timer.stop()
+        self._push_transport_program(playing=True)
+        self.viewport.native_renderer.transport_play()
+        self._transport_poll_timer.start()
         self._cached_frames_timer.start()
 
     def stop_playback(self):
         self.playing = False
-        self.timer.stop()
         self._transport_poll_timer.stop()
-        if self._use_cpp_transport:
+        if self._has_cpp_transport():
             self.viewport.native_renderer.transport_pause()
         self._cached_frames_timer.stop()
         self._refresh_timeline_cached_frames()
@@ -1785,7 +1673,7 @@ class MainWindow(QMainWindow):
         self.in_point = in_pt
         self.out_point = out_pt
         self._sync_all_cache_playback_ranges()
-        if self.playing and self._use_cpp_transport:
+        if self.playing:
             self._push_transport_program(playing=True)
 
     def _toggle_timecode_display(self):
@@ -1815,7 +1703,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "loop_mode_actions"):
             for m, act in self.loop_mode_actions:
                 act.setChecked(m == mode)
-        if self.playing and self._use_cpp_transport:
+        if self.playing:
             self._push_transport_program(playing=True)
 
     def _sync_playback_timing_actions(self):
@@ -1830,9 +1718,7 @@ class MainWindow(QMainWindow):
         self._sync_playback_timing_actions()
         self._sync_upload_queue_policy()
         if self.playing:
-            self._reset_playback_clock()
-            if self._use_cpp_transport:
-                self._push_transport_program(playing=True)
+            self._push_transport_program(playing=True)
 
     def _scale_matches(self, a: float, b: float, tol: float = 0.001) -> bool:
         return abs(a - b) < tol
@@ -1943,7 +1829,7 @@ class MainWindow(QMainWindow):
         self._sync_frame_rate_menu(fps)
 
         if self.playing:
-            self.timer.start(int(1000.0 / self.fps))
+            self._push_transport_program(playing=True)
 
     def _prompt_custom_frame_rate(self):
         fps, ok = QInputDialog.getDouble(
@@ -2131,7 +2017,7 @@ class MainWindow(QMainWindow):
             self._sync_playback_timing_actions()
             self._sync_upload_queue_policy()
             if self.playing and new_timing != old_timing:
-                self._reset_playback_clock()
+                self._push_transport_program(playing=True)
             # Update cache worker thread sizes
             for source in self.session.all_online_sources():
                 if source.cache is None:
@@ -2173,7 +2059,7 @@ class MainWindow(QMainWindow):
             if len(sizes) == 2 and sizes[1] > 0:
                 self.settings.timeline_splitter_sizes = sizes
                 self.settings.save()
-        self.timer.stop()
+        self._transport_poll_timer.stop()
         self._close_all_sources()
         self.viewport.cleanup()
         event.accept()

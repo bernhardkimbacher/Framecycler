@@ -509,23 +509,6 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("get_transport_direction", &RhiRenderer::get_transport_direction)
         .def("is_transport_playing", &RhiRenderer::is_transport_playing)
         .def("ack_transport_frame_notify", &RhiRenderer::ack_transport_frame_notify)
-        .def("set_present_timing_enabled", &RhiRenderer::set_present_timing_enabled,
-             py::arg("enabled"))
-        .def("clear_present_timings", &RhiRenderer::clear_present_timings)
-        .def(
-            "drain_present_timings",
-            [](RhiRenderer& self) {
-                auto samples = self.drain_present_timings();
-                py::list out;
-                for (const auto& s : samples) {
-                    py::dict d;
-                    d["steady_ns"] = s.steady_ns;
-                    d["global_frame"] = s.global_frame;
-                    d["frames_drawn"] = s.frames_drawn;
-                    out.append(d);
-                }
-                return out;
-            })
         .def(
             "poll_transport_frame_notify",
             [](RhiRenderer& self) -> py::object {

@@ -142,48 +142,5 @@ class TestTransportClockTick(unittest.TestCase):
         self.assertEqual(allowed.frame, 1)
 
 
-class TestPresentTimingRing(unittest.TestCase):
-    def test_api_clear_drain_empty(self):
-        renderer = eng.RhiRenderer()
-        self.assertTrue(hasattr(renderer, "set_present_timing_enabled"))
-        self.assertTrue(hasattr(renderer, "clear_present_timings"))
-        self.assertTrue(hasattr(renderer, "drain_present_timings"))
-        renderer.clear_present_timings()
-        renderer.set_present_timing_enabled(True)
-        samples = renderer.drain_present_timings()
-        self.assertEqual(list(samples), [])
-        renderer.set_present_timing_enabled(False)
-
-    def test_null_rhi_present_samples_monotonic(self):
-        """Null-RHI present loop in a subprocess (bare QWindow can SIGBUS on macOS)."""
-        import os
-        import pathlib
-        import subprocess
-        import sys
-
-        repo = pathlib.Path(__file__).resolve().parents[1]
-        smoke = pathlib.Path(__file__).with_name("_present_timing_null_smoke.py")
-        env = dict(**os.environ)
-        env["PYTHONPATH"] = str(repo) + (
-            os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
-        )
-        proc = subprocess.run(
-            [sys.executable, str(smoke)],
-            cwd=str(repo),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        out = (proc.stdout or "").strip()
-        if proc.returncode < 0 or proc.returncode == 139:
-            self.skipTest("Null RHI present loop crashed (known bare-QWindow issue)")
-        if out.startswith("SKIP:"):
-            self.skipTest(out)
-        if proc.returncode != 0:
-            self.fail(f"present timing subprocess failed: {out}\n{proc.stderr}")
-        self.assertTrue(out.startswith("OK:"), out)
-
-
 if __name__ == "__main__":
     unittest.main()

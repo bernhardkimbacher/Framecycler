@@ -139,16 +139,6 @@ public:
     bool poll_transport_frame_notify(int& frame_out, int& direction_out);
     bool poll_transport_boundary_notify(int& frame_out, int& direction_out);
 
-    /// Authoritative present-interval samples (render-thread timestamps).
-    struct PresentTimingSample {
-        int64_t steady_ns = 0;
-        int global_frame = -1;
-        int frames_drawn = 0;
-    };
-    void set_present_timing_enabled(bool enabled);
-    void clear_present_timings();
-    std::vector<PresentTimingSample> drain_present_timings();
-
     struct DebugStats {
         int begin_frame_ok = 0;
         int begin_frame_fail = 0;
@@ -286,7 +276,6 @@ private:
     void _emit_transport_frame_changed(int frame, int direction);
     void _emit_transport_segment_boundary(int frame, int direction);
     void _tick_transport_and_prepare();
-    void _record_present_timing(bool drew_frame);
 
     std::vector<QRhiShaderResourceBinding> build_srb_bindings(
         QRhiTexture* tex_a,
@@ -394,11 +383,4 @@ private:
     std::atomic<bool> _boundary_notify_pending{false};
     std::atomic<bool> _transport_program_dirty{false};
     TransportProgram _pending_transport_program;
-
-    static constexpr size_t kPresentTimingCapacity = 4096;
-    std::atomic<bool> _present_timing_enabled{false};
-    std::mutex _present_timing_mutex;
-    std::vector<PresentTimingSample> _present_timing_ring;
-    size_t _present_timing_write = 0;
-    size_t _present_timing_count = 0;
 };
