@@ -3,6 +3,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from .fonts import ui_font
+from .translucent_window import FLOATING_OVERLAY_FLAGS, clear_translucent_backdrop
 
 
 class DropTargetMixin:
@@ -95,9 +96,7 @@ class DragDropOverlay(DropTargetMixin, QWidget):
         if floating:
             super().__init__(
                 parent,
-                Qt.WindowType.Tool
-                | Qt.WindowType.FramelessWindowHint
-                | Qt.WindowType.WindowStaysOnTopHint,
+                FLOATING_OVERLAY_FLAGS | Qt.WindowType.WindowStaysOnTopHint,
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -106,6 +105,7 @@ class DragDropOverlay(DropTargetMixin, QWidget):
             super().__init__(parent)
             self.setAcceptDrops(True)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._floating = floating
         self._main_window = main_window if main_window is not None else parent
         self._active_zone = self.ZONE_SEQUENCE
         self._split_xs: list[int] | None = None
@@ -123,8 +123,10 @@ class DragDropOverlay(DropTargetMixin, QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect()
+        if self._floating:
+            clear_translucent_backdrop(painter, rect)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w = rect.width()
         third = w // 3
         bounds = [

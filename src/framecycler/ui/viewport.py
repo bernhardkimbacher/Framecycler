@@ -9,6 +9,7 @@ from ..color.ocio_manager import OCIOManager
 from ..core.tile_layout import TileLayout, compute_tile_layouts
 from .fonts import mono_font, ui_font
 from .drag_drop_overlay import DragDropOverlay
+from .translucent_window import FLOATING_OVERLAY_FLAGS, clear_translucent_backdrop
 
 try:
     from .. import framecycler_engine
@@ -108,12 +109,7 @@ class ViewportHudOverlay(QWidget):
 
     def __init__(self, viewport: "Viewport", parent: QWidget, *, floating: bool = False):
         if floating:
-            super().__init__(
-                parent,
-                Qt.WindowType.Tool
-                | Qt.WindowType.FramelessWindowHint
-                | Qt.WindowType.WindowDoesNotAcceptFocus,
-            )
+            super().__init__(parent, FLOATING_OVERLAY_FLAGS)
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.setAttribute(Qt.WA_ShowWithoutActivating)
             self.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -137,10 +133,7 @@ class ViewportHudOverlay(QWidget):
         viewport = self._viewport
         painter = QPainter(self)
         if self._floating:
-            # Translucent top-level windows retain prior pixels unless cleared.
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            clear_translucent_backdrop(painter, self.rect())
 
         if not viewport.hud_visible and not viewport.adjustment_mode:
             painter.end()
