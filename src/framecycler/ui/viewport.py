@@ -23,6 +23,10 @@ COMPARE_DIFFERENCE = 2
 COMPARE_TILE = 3
 COMPARE_BLEND = 4
 
+FALSE_COLOR_OFF = 0
+FALSE_COLOR_HEATMAP = 1
+FALSE_COLOR_ZEBRA = 2
+
 
 @dataclass
 class TileDrawParams:
@@ -394,6 +398,9 @@ class Viewport(QWidget):
         self.compare_mode = COMPARE_SEQUENCE
         self.channel_mask = 0
         self.wipe_pos = 0.5
+        self.false_color_mode = FALSE_COLOR_OFF
+        self.zebra_lo = 0.02
+        self.zebra_hi = 0.98
 
         self.zoom = 1.0
         self.zoom_mode = "fit"
@@ -539,6 +546,15 @@ class Viewport(QWidget):
 
     def set_channel_mask(self, mask: int):
         self.channel_mask = mask
+        self.update()
+
+    def set_false_color_mode(self, mode: int):
+        self.false_color_mode = int(mode)
+        self.update()
+
+    def set_zebra_thresholds(self, lo: float, hi: float):
+        self.zebra_lo = max(0.0, min(1.0, float(lo)))
+        self.zebra_hi = max(self.zebra_lo, min(1.0, float(hi)))
         self.update()
 
     def toggle_hud(self):
@@ -774,6 +790,9 @@ class Viewport(QWidget):
             params.sequence_index = self.sequence_index
             params.wipe_pos = self.wipe_pos
             params.channel_mask = self.channel_mask
+            params.false_color_mode = self.false_color_mode
+            params.zebra_lo = self.zebra_lo
+            params.zebra_hi = self.zebra_hi
 
             scale_x, scale_y = self._fit_scales()
             widget_w, widget_h = self.width(), self.height()

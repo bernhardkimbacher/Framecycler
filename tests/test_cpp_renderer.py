@@ -12,6 +12,9 @@ class TestCppRenderer(unittest.TestCase):
         params.compare_mode = 1
         params.wipe_pos = 0.75
         params.channel_mask = 2
+        params.false_color_mode = 1
+        params.zebra_lo = 0.05
+        params.zebra_hi = 0.95
         params.scale_x = 1.5
         params.scale_y = 1.5
 
@@ -31,6 +34,9 @@ class TestCppRenderer(unittest.TestCase):
 
         self.assertEqual(params.compare_mode, 1)
         self.assertAlmostEqual(params.wipe_pos, 0.75)
+        self.assertEqual(params.false_color_mode, 1)
+        self.assertAlmostEqual(params.zebra_lo, 0.05)
+        self.assertAlmostEqual(params.zebra_hi, 0.95)
         self.assertEqual(params.slots[0].frame_index, 101)
         self.assertEqual(params.tiles[0].source_index, 1)
 

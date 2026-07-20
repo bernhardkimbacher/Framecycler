@@ -26,6 +26,9 @@ class TestViewportQrhiIntegration(unittest.TestCase):
         viewport.sequence_index = 0
         viewport.wipe_pos = 0.5
         viewport.channel_mask = 0
+        viewport.false_color_mode = 0
+        viewport.zebra_lo = 0.02
+        viewport.zebra_hi = 0.98
         viewport.zoom = 1.0
         viewport.zoom_mode = "fit"
         viewport.pan_offset = QPoint(0, 0)
@@ -82,6 +85,9 @@ class TestViewportQrhiIntegration(unittest.TestCase):
         viewport.sequence_index = 0
         viewport.wipe_pos = 0.5
         viewport.channel_mask = 0
+        viewport.false_color_mode = 0
+        viewport.zebra_lo = 0.02
+        viewport.zebra_hi = 0.98
         viewport.zoom = 1.0
         viewport.zoom_mode = "fit"
         viewport.pan_offset = QPoint(0, 0)

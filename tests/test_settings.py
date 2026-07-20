@@ -39,6 +39,9 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(self.settings.default_fps, 24.0)
         self.assertEqual(self.settings.playback_timing, PLAYBACK_TIMING_EVERY_FRAME)
         self.assertEqual(self.settings.ram_cache_limit_gb, self.settings.decode_cache_limit_gb)
+        self.assertEqual(self.settings.false_color_mode, 0)
+        self.assertAlmostEqual(self.settings.false_color_zebra_lo, 0.02)
+        self.assertAlmostEqual(self.settings.false_color_zebra_hi, 0.98)
 
     def test_save_and_load(self):
         self.settings.reader_threads = 12
@@ -47,6 +50,9 @@ class TestSettings(unittest.TestCase):
         self.settings.default_fps = 30.0
         self.settings.resolution_scale = 0.5
         self.settings.pixel_probe_geometry = [120, 80, 300, 400]
+        self.settings.false_color_mode = 2
+        self.settings.false_color_zebra_lo = 0.05
+        self.settings.false_color_zebra_hi = 0.9
         self.settings.save()
 
         new_settings = Settings(config_dir=self.settings.config_dir)
@@ -58,6 +64,9 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(new_settings.default_fps, 30.0)
         self.assertEqual(new_settings.resolution_scale, 1.0)
         self.assertEqual(new_settings.pixel_probe_geometry, [120, 80, 300, 400])
+        self.assertEqual(new_settings.false_color_mode, 2)
+        self.assertAlmostEqual(new_settings.false_color_zebra_lo, 0.05)
+        self.assertAlmostEqual(new_settings.false_color_zebra_hi, 0.9)
 
     def test_legacy_ram_key_migration(self):
         config_path = os.path.join(self.settings.config_dir, "settings.json")

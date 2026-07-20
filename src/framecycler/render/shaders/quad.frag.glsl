@@ -11,6 +11,11 @@ layout(std140, binding = 0) uniform PerFrameUbo {
     int compareMode;
     float wipePos;
     int channelMask;
+    int falseColorMode;
+    float zebraLo;
+    float zebraHi;
+    float _pad0;
+    float _pad1;
 } uFrame;
 
 // OCIO-generated declarations and ocio_to_working()/ocio_to_display() are injected here.
@@ -32,6 +37,55 @@ vec4 fc_asc_cdl(vec4 inColor) {
     float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
     c = mix(vec3(luma), c, sat);
     return vec4(c, inColor.a);
+}
+
+vec3 fc_heatmap_rgb(float luma) {
+    // Display-referred exposure bands (classic review false-color palette).
+    if (luma < 0.02) {
+        return vec3(0.05, 0.05, 0.35);
+    }
+    if (luma < 0.10) {
+        return mix(vec3(0.05, 0.05, 0.35), vec3(0.15, 0.35, 0.85), (luma - 0.02) / 0.08);
+    }
+    if (luma < 0.18) {
+        return mix(vec3(0.15, 0.35, 0.85), vec3(0.15, 0.75, 0.75), (luma - 0.10) / 0.08);
+    }
+    if (luma < 0.45) {
+        return mix(vec3(0.15, 0.75, 0.75), vec3(0.20, 0.85, 0.25), (luma - 0.18) / 0.27);
+    }
+    if (luma < 0.70) {
+        return mix(vec3(0.20, 0.85, 0.25), vec3(0.95, 0.90, 0.20), (luma - 0.45) / 0.25);
+    }
+    if (luma < 0.90) {
+        return mix(vec3(0.95, 0.90, 0.20), vec3(0.95, 0.45, 0.10), (luma - 0.70) / 0.20);
+    }
+    if (luma < 1.0) {
+        return mix(vec3(0.95, 0.45, 0.10), vec3(0.95, 0.15, 0.15), (luma - 0.90) / 0.10);
+    }
+    return vec3(1.0, 0.55, 0.95);
+}
+
+vec4 fc_false_color(vec4 inColor) {
+    if (uFrame.falseColorMode == 0) {
+        return inColor;
+    }
+    float luma = dot(inColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+    if (uFrame.falseColorMode == 1) {
+        return vec4(fc_heatmap_rgb(luma), inColor.a);
+    }
+    if (uFrame.falseColorMode == 2) {
+        float lo = uFrame.zebraLo;
+        float hi = uFrame.zebraHi;
+        bool clip = (luma < lo) || (luma > hi);
+        if (!clip) {
+            return inColor;
+        }
+        // Static diagonal zebra stripes in clipped regions.
+        float stripe = step(0.5, fract((vUV.x + vUV.y) * 28.0));
+        vec3 zebra = mix(vec3(0.0), vec3(1.0), stripe);
+        return vec4(zebra, inColor.a);
+    }
+    return inColor;
 }
 
 void main() {
@@ -69,6 +123,6 @@ void main() {
         finalColor = vec4(lum, lum, lum, 1.0);
     }
 
-    // Order: input→working+grading (OCIO) → ASC CDL → look+display (OCIO)
-    fragColor = ocio_to_display(fc_asc_cdl(ocio_to_working(finalColor)));
+    // Order: input→working+grading (OCIO) → ASC CDL → look+display (OCIO) → false color
+    fragColor = fc_false_color(ocio_to_display(fc_asc_cdl(ocio_to_working(finalColor))));
 }

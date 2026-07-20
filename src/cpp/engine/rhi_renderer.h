@@ -53,6 +53,9 @@ struct RenderParams {
     int sequence_index = 0;
     float wipe_pos = 0.5f;
     int channel_mask = 0;
+    int false_color_mode = 0;  // 0=off, 1=heatmap, 2=zebra
+    float zebra_lo = 0.02f;
+    float zebra_hi = 0.98f;
     float scale_x = 1.0f;
     float scale_y = 1.0f;
     float pan_x = 0.0f;
@@ -75,7 +78,11 @@ struct PerFrameUboData {
     int compare_mode = 0;
     float wipe_pos = 0.5f;
     int channel_mask = 0;
-    int padding = 0;
+    int false_color_mode = 0;
+    float zebra_lo = 0.02f;
+    float zebra_hi = 0.98f;
+    float pad0 = 0.0f;
+    float pad1 = 0.0f;
 };
 
 class RhiRenderer {

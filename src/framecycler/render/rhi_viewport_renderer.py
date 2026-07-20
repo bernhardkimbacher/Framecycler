@@ -32,7 +32,8 @@ from PySide6.QtGui import (
 from .shader_baker import ShaderBaker
 from .shader_pipeline import OcioUniformMember, parse_ocio_ubo_layout
 
-PER_FRAME_UBO_SIZE = 32
+PER_FRAME_UBO_SIZE = 48
+PER_FRAME_UBO_PACK = "<ffffifiiffff"
 DEFAULT_DEPTH_STENCIL_CLEAR = QRhiDepthStencilClearValue(1.0, 0)
 QUAD_VERTICES = np.array(
     [
@@ -412,6 +413,9 @@ class RhiViewportRenderer:
         pan_x: float,
         pan_y: float,
         tile_draws: list[TileDrawParams] | None = None,
+        false_color_mode: int = 0,
+        zebra_lo: float = 0.02,
+        zebra_hi: float = 0.98,
     ) -> None:
         if not self._initialized or self._rhi is None or cb is None or render_target is None:
             return
@@ -423,6 +427,9 @@ class RhiViewportRenderer:
                 sources,
                 channel_mask,
                 tile_draws or [],
+                false_color_mode=false_color_mode,
+                zebra_lo=zebra_lo,
+                zebra_hi=zebra_hi,
             )
             return
 
@@ -491,7 +498,7 @@ class RhiViewportRenderer:
             return
 
         per_frame = struct.pack(
-            "<ffffifii",
+            PER_FRAME_UBO_PACK,
             scale_x,
             scale_y,
             pan_x,
@@ -499,7 +506,11 @@ class RhiViewportRenderer:
             compare_mode,
             wipe_pos,
             channel_mask,
-            0,
+            false_color_mode,
+            zebra_lo,
+            zebra_hi,
+            0.0,
+            0.0,
         )
         batch.updateDynamicBuffer(self._per_frame_ubo, 0, PER_FRAME_UBO_SIZE, per_frame)
 
@@ -541,6 +552,9 @@ class RhiViewportRenderer:
         sources: list[FrameRenderSlot],
         channel_mask: int,
         tile_draws: list[TileDrawParams],
+        false_color_mode: int = 0,
+        zebra_lo: float = 0.02,
+        zebra_hi: float = 0.98,
     ) -> None:
         if not tile_draws:
             return
@@ -602,7 +616,7 @@ class RhiViewportRenderer:
                 continue
 
             per_frame = struct.pack(
-                "<ffffifii",
+                PER_FRAME_UBO_PACK,
                 tile.scale_x,
                 tile.scale_y,
                 tile.offset_x,
@@ -610,7 +624,11 @@ class RhiViewportRenderer:
                 0,
                 0.5,
                 channel_mask,
-                0,
+                false_color_mode,
+                zebra_lo,
+                zebra_hi,
+                0.0,
+                0.0,
             )
             batch = self._rhi.nextResourceUpdateBatch()
             batch.updateDynamicBuffer(self._per_frame_ubo, 0, PER_FRAME_UBO_SIZE, per_frame)

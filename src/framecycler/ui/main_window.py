@@ -56,6 +56,9 @@ from .viewport import (
     COMPARE_DIFFERENCE,
     COMPARE_TILE,
     COMPARE_BLEND,
+    FALSE_COLOR_OFF,
+    FALSE_COLOR_HEATMAP,
+    FALSE_COLOR_ZEBRA,
 )
 from .timeline import Timeline
 from .timeline_editor import TimelineSegmentInfo, TimelineVersionInfo
@@ -210,6 +213,10 @@ class MainWindow(QMainWindow):
             geo = self._pixel_probe.geometry_list()
             if geo[2] > 0 and geo[3] > 0:
                 self.settings.pixel_probe_geometry = geo
+        if hasattr(self, "viewport"):
+            self.settings.false_color_mode = int(self.viewport.false_color_mode)
+            self.settings.false_color_zebra_lo = float(self.viewport.zebra_lo)
+            self.settings.false_color_zebra_hi = float(self.viewport.zebra_hi)
         self.settings.save()
 
     def showEvent(self, event: QShowEvent) -> None:
@@ -691,7 +698,8 @@ class MainWindow(QMainWindow):
             tools_menu.addAction(act)
             self.compare_actions.append((mode, act))
 
-        tools_menu.addSeparator()
+        add_menu_section(tools_menu, "Inspect")
+
         self.act_pixel_probe = QAction("Pixel Probe", self)
         self.act_pixel_probe.setCheckable(True)
         self.act_pixel_probe.setToolTip(
@@ -699,6 +707,22 @@ class MainWindow(QMainWindow):
         )
         self.act_pixel_probe.toggled.connect(self._on_pixel_probe_toggled)
         tools_menu.addAction(self.act_pixel_probe)
+
+        self.false_color_actions = []
+        false_color_modes = [
+            ("False Color: Off", FALSE_COLOR_OFF),
+            ("False Color: Heatmap", FALSE_COLOR_HEATMAP),
+            ("False Color: Zebra", FALSE_COLOR_ZEBRA),
+        ]
+        for label, mode in false_color_modes:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(mode == FALSE_COLOR_OFF)
+            act.triggered.connect(lambda checked=False, m=mode: self._set_false_color_mode(m))
+            tools_menu.addAction(act)
+            self.false_color_actions.append((mode, act))
+
+        self._apply_false_color_from_settings()
         
         # OCIO Pipeline menu
         self.ocio_menu = menubar.addMenu("&OCIO")
@@ -1360,6 +1384,31 @@ class MainWindow(QMainWindow):
         if hasattr(self, "compare_actions"):
             for m, act in self.compare_actions:
                 act.setChecked(m == mode)
+
+    def _apply_false_color_from_settings(self) -> None:
+        mode = int(getattr(self.settings, "false_color_mode", FALSE_COLOR_OFF) or 0)
+        if mode not in (FALSE_COLOR_OFF, FALSE_COLOR_HEATMAP, FALSE_COLOR_ZEBRA):
+            mode = FALSE_COLOR_OFF
+        lo = float(getattr(self.settings, "false_color_zebra_lo", 0.02))
+        hi = float(getattr(self.settings, "false_color_zebra_hi", 0.98))
+        self.viewport.set_zebra_thresholds(lo, hi)
+        self._set_false_color_mode(mode, persist=False)
+
+    def _set_false_color_mode(self, mode: int, *, persist: bool = True):
+        mode = int(mode)
+        if mode not in (FALSE_COLOR_OFF, FALSE_COLOR_HEATMAP, FALSE_COLOR_ZEBRA):
+            mode = FALSE_COLOR_OFF
+        self.viewport.set_false_color_mode(mode)
+        if hasattr(self, "false_color_actions"):
+            for m, act in self.false_color_actions:
+                act.blockSignals(True)
+                act.setChecked(m == mode)
+                act.blockSignals(False)
+        if persist:
+            self.settings.false_color_mode = mode
+            self.settings.false_color_zebra_lo = float(self.viewport.zebra_lo)
+            self.settings.false_color_zebra_hi = float(self.viewport.zebra_hi)
+            self._schedule_layout_persist()
 
     def _set_zoom_mode(self, mode):
         if mode == "fit":

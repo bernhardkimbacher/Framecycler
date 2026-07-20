@@ -1297,7 +1297,11 @@ void RhiRenderer::render_frame()
             tileFrame.compare_mode = 0;
             tileFrame.wipe_pos = 0.5f;
             tileFrame.channel_mask = _active_render_params.channel_mask;
-            tileFrame.padding = 0;
+            tileFrame.false_color_mode = _active_render_params.false_color_mode;
+            tileFrame.zebra_lo = _active_render_params.zebra_lo;
+            tileFrame.zebra_hi = _active_render_params.zebra_hi;
+            tileFrame.pad0 = 0.0f;
+            tileFrame.pad1 = 0.0f;
             std::memcpy(uboBlob.data() + static_cast<size_t>(i) * stride, &tileFrame, sizeof(tileFrame));
         }
         if (_perFrameUbo) {
@@ -1313,7 +1317,11 @@ void RhiRenderer::render_frame()
         perFrame.compare_mode = _active_render_params.compare_mode;
         perFrame.wipe_pos = _active_render_params.wipe_pos;
         perFrame.channel_mask = _active_render_params.channel_mask;
-        perFrame.padding = 0;
+        perFrame.false_color_mode = _active_render_params.false_color_mode;
+        perFrame.zebra_lo = _active_render_params.zebra_lo;
+        perFrame.zebra_hi = _active_render_params.zebra_hi;
+        perFrame.pad0 = 0.0f;
+        perFrame.pad1 = 0.0f;
         if (_perFrameUbo) {
             batch->updateDynamicBuffer(_perFrameUbo, 0, sizeof(perFrame), &perFrame);
         }

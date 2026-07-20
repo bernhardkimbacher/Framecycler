@@ -43,6 +43,10 @@ class Settings:
         self.main_window_geometry: str = ""
         # Pixel probe Tool window: [x, y, width, height] in screen coords; empty = default.
         self.pixel_probe_geometry: list[int] = []
+        # False color (Tools → Inspect): 0=off, 1=heatmap, 2=zebra
+        self.false_color_mode: int = 0
+        self.false_color_zebra_lo: float = 0.02
+        self.false_color_zebra_hi: float = 0.98
         # Review overlays (View → Overlay). Aspect/safe use 0 for Off.
         self.overlay_mask_aspect: float = 0.0  # width/height; 0 = Off
         self.overlay_mask_opacity: float = 0.5  # 0..1
@@ -141,6 +145,16 @@ class Settings:
                     self.pixel_probe_geometry = [int(v) for v in raw_probe]
                 else:
                     self.pixel_probe_geometry = []
+                raw_fc = int(data.get("false_color_mode", self.false_color_mode) or 0)
+                self.false_color_mode = raw_fc if raw_fc in (0, 1, 2) else 0
+                self.false_color_zebra_lo = max(
+                    0.0,
+                    min(1.0, float(data.get("false_color_zebra_lo", self.false_color_zebra_lo))),
+                )
+                self.false_color_zebra_hi = max(
+                    self.false_color_zebra_lo,
+                    min(1.0, float(data.get("false_color_zebra_hi", self.false_color_zebra_hi))),
+                )
                 self.overlay_mask_aspect = float(
                     data.get("overlay_mask_aspect", self.overlay_mask_aspect) or 0.0
                 )
@@ -191,6 +205,9 @@ class Settings:
                 "main_window_state": self.main_window_state,
                 "main_window_geometry": self.main_window_geometry,
                 "pixel_probe_geometry": self.pixel_probe_geometry,
+                "false_color_mode": self.false_color_mode,
+                "false_color_zebra_lo": self.false_color_zebra_lo,
+                "false_color_zebra_hi": self.false_color_zebra_hi,
                 "overlay_mask_aspect": self.overlay_mask_aspect,
                 "overlay_mask_opacity": self.overlay_mask_opacity,
                 "overlay_action_safe": self.overlay_action_safe,

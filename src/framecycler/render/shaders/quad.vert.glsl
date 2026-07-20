@@ -9,6 +9,11 @@ layout(std140, binding = 0) uniform PerFrameUbo {
     int compareMode;
     float wipePos;
     int channelMask;
+    int falseColorMode;
+    float zebraLo;
+    float zebraHi;
+    float _pad0;
+    float _pad1;
 } uFrame;
 
 void main() {
