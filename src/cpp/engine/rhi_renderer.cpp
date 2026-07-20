@@ -3,6 +3,7 @@
 #include "gpu_texture_cache.h"
 #include "display_upload_queue.h"
 #include "hw_frame_ticket.h"
+#include "metal_present_sync.h"
 #include <QWindow>
 #include <QGuiApplication>
 #include <QDebug>
@@ -60,8 +61,9 @@ bool RhiRenderer::initialize(uintptr_t window_ptr)
         _force_null_backend = true;
     }
 
-    _pending_size = _window->size();
-    _resize_pending = true;
+    // Create the platform window on the GUI thread before the render thread
+    // touches winId()/Metal layer (NSWindow must be main-thread only).
+    _window->create();
 
     start_render_thread();
     return true;
@@ -76,7 +78,6 @@ void RhiRenderer::set_viewer_output_mode(ViewerOutputMode mode)
 {
     _requested_viewer_output_mode.store(mode, std::memory_order_relaxed);
     _swap_format_dirty.store(true, std::memory_order_relaxed);
-    _resize_pending.store(true, std::memory_order_relaxed);
     _wake_render_thread();
 }
 
@@ -207,33 +208,28 @@ void RhiRenderer::render_thread_loop()
 
     while (_run_thread) {
         bool needs_render = false;
-        bool resize = false;
         bool transport_playing = false;
         const bool null_backend = _is_fallback_null_backend.load();
-        QSize target_size;
         {
             std::unique_lock<std::mutex> lock(_mutex);
             transport_playing = _transport.is_playing();
+            auto wake_pred = [this]() {
+                return !_run_thread || _redraw_needed
+                    || _clear_cache_pending || _transport_program_dirty.load();
+            };
             if (transport_playing && null_backend) {
                 // Null/offscreen: wall-clock FPS pacing (no real vsync).
                 const auto deadline = _transport.next_deadline();
-                _render_cond.wait_until(lock, deadline, [this]() {
-                    return !_run_thread || _resize_pending || _redraw_needed
-                        || _clear_cache_pending || _transport_program_dirty.load();
-                });
+                _render_cond.wait_until(lock, deadline, wake_pred);
             } else if (transport_playing) {
                 // Present-paced: proceed when exposed so beginFrame/endFrame
                 // provide display cadence; wait while hidden to avoid a CPU spin.
-                _render_cond.wait(lock, [this]() {
-                    return !_run_thread || _resize_pending || _redraw_needed
-                        || _clear_cache_pending || _transport_program_dirty.load()
+                _render_cond.wait(lock, [this, wake_pred]() {
+                    return wake_pred()
                         || (_transport.is_playing() && _exposed.load());
                 });
             } else {
-                _render_cond.wait(lock, [this]() {
-                    return !_run_thread || _resize_pending || _redraw_needed
-                        || _clear_cache_pending || _transport_program_dirty.load();
-                });
+                _render_cond.wait(lock, wake_pred);
             }
 
             if (!_run_thread) {
@@ -243,8 +239,6 @@ void RhiRenderer::render_thread_loop()
             needs_render = _redraw_needed || _clear_cache_pending || _transport.is_playing()
                 || _transport_program_dirty.load() || _render_params_dirty;
             _redraw_needed = false;
-            resize = _resize_pending.exchange(false);
-            target_size = _pending_size;
         }
 
         if (null_backend) {
@@ -255,8 +249,8 @@ void RhiRenderer::render_thread_loop()
             _prepare_transport_program_and_slots();
         }
 
-        if (resize || needs_render || _transport.is_playing()) {
-            sync_and_render_on_thread(resize, target_size);
+        if (needs_render || _transport.is_playing()) {
+            sync_and_render_on_thread();
         }
     }
 
@@ -1110,7 +1104,7 @@ void RhiRenderer::sync_and_render()
     _wake_render_thread();
 }
 
-void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_size)
+void RhiRenderer::sync_and_render_on_thread()
 {
     if (!_rhi || !_window) {
         return;
@@ -1256,20 +1250,40 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
     }
 
     const bool format_dirty = _swap_format_dirty.load(std::memory_order_relaxed);
-    if (format_dirty || resize) {
+    if (format_dirty) {
         _apply_viewer_output_format_unlocked();
     }
 
-    if ((resize || format_dirty) && target_size.width() > 0 && target_size.height() > 0) {
-        if (_swapChain->createOrResize()) {
-            build_pipeline(_swapChain->renderPassDescriptor(), true);
+    // Single resize gate: live surface size owns the swapchain (Qt RHI pattern).
+    const bool surface_mismatch =
+        _swapChain->currentPixelSize() != _swapChain->surfacePixelSize();
+    const bool need_resize = format_dirty || surface_mismatch;
+    if (need_resize) {
+        if (!_swapChain->createOrResize()) {
+            qWarning() << "RhiRenderer: Failed to create/resize swap chain!";
+            return;
         }
-    } else if (!_swapChain->createOrResize()) {
-        qWarning() << "RhiRenderer: Failed to create/resize swap chain!";
-        return;
+    } else if (_swapChain->currentPixelSize().isEmpty()) {
+        // First present: swapchain not created yet.
+        if (!_swapChain->createOrResize()) {
+            qWarning() << "RhiRenderer: Failed to create swap chain!";
+            return;
+        }
+    }
+    if (format_dirty) {
+        build_pipeline(_swapChain->renderPassDescriptor(), true);
     }
 
-    render_frame();
+    // Enable presentsWithTransaction once the CAMetalLayer exists (after
+    // createOrResize). Never toggle afterward.
+    if (!_metal_pwt_applied && !_is_fallback_null_backend.load()) {
+        _metal_pwt_applied = fc_metal_set_presents_with_transaction(_window, true);
+    }
+
+    // Size-only: skip uploads/lookahead; no PWT side effects.
+    const bool size_only =
+        need_resize && !format_dirty && !shaders_dirty && !lut_count_changed;
+    render_frame(size_only);
 }
 
 void RhiRenderer::set_grading_uniform(const std::string& name, float value)
@@ -1375,11 +1389,8 @@ void RhiRenderer::set_exposed(bool exposed)
     _wake_render_thread();
 }
 
-void RhiRenderer::set_pending_size(int width, int height)
+void RhiRenderer::notify_surface_changed()
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    _pending_size = QSize(width, height);
-    _resize_pending = true;
     _wake_render_thread();
 }
 
@@ -1469,7 +1480,7 @@ void RhiRenderer::clear_ocio_luts()
 
 
 
-void RhiRenderer::render_frame()
+void RhiRenderer::render_frame(bool size_only)
 {
     using Clock = std::chrono::steady_clock;
     const auto frame_start = Clock::now();
@@ -1484,8 +1495,14 @@ void RhiRenderer::render_frame()
 
     QRhi::FrameOpResult result = _rhi->beginFrame(_swapChain);
     if (result != QRhi::FrameOpSuccess) {
-        _debug_stats.begin_frame_fail++;
-        return;
+        // OutOfDate / surface changed: recreate once and retry.
+        if (_swapChain->createOrResize()) {
+            result = _rhi->beginFrame(_swapChain);
+        }
+        if (result != QRhi::FrameOpSuccess) {
+            _debug_stats.begin_frame_fail++;
+            return;
+        }
     }
     _debug_stats.begin_frame_ok++;
 
@@ -1495,104 +1512,108 @@ void RhiRenderer::render_frame()
 
     const auto upload_start = Clock::now();
 
-    // Complete prior GPU uploads, put into display cache, then submit new jobs.
-    {
-        std::lock_guard<std::mutex> lock(_mutex);
-        if (_completed_upload_generation > 0) {
-            _uploadQueue.complete_generation(_completed_upload_generation);
-        }
-    }
-    put_ready_upload_jobs();
-    enqueue_gpu_lookahead();
-    drain_upload_queue(batch);
-
-    // Present: bind from display cache (or sync upload when cache disabled).
-    const int compare_mode = _active_render_params.compare_mode;
-    bool bindings_dirty = false;
-    for (auto slot : _active_render_params.slots) {
-        CacheManager* cpu_cache = nullptr;
+    if (!size_only) {
+        // Complete prior GPU uploads, put into display cache, then submit new jobs.
         {
             std::lock_guard<std::mutex> lock(_mutex);
-            auto it = _caches.find(slot.source_index);
-            if (it != _caches.end()) {
-                cpu_cache = it->second;
+            if (_completed_upload_generation > 0) {
+                _uploadQueue.complete_generation(_completed_upload_generation);
             }
         }
-        if (cpu_cache) {
-            int w = 0, h = 0, channels = 0;
-            bool have_dims = false;
+        put_ready_upload_jobs();
+        enqueue_gpu_lookahead();
+        drain_upload_queue(batch);
+
+        // Present: bind from display cache (or sync upload when cache disabled).
+        const int compare_mode = _active_render_params.compare_mode;
+        bool bindings_dirty = false;
+        for (auto slot : _active_render_params.slots) {
+            CacheManager* cpu_cache = nullptr;
             {
                 std::lock_guard<std::mutex> lock(_mutex);
-                have_dims = _resolve_slot_dimensions(
-                    slot.source_index, slot.frame_index, cpu_cache, w, h, channels);
+                auto it = _caches.find(slot.source_index);
+                if (it != _caches.end()) {
+                    cpu_cache = it->second;
+                }
             }
-            if (have_dims) {
-                _debug_stats.cache_hits++;
-                slot.width = w;
-                slot.height = h;
-                slot.channels = channels;
-                slot.data_size = static_cast<size_t>(w * h * channels);
+            if (cpu_cache) {
+                int w = 0, h = 0, channels = 0;
+                bool have_dims = false;
+                {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    have_dims = _resolve_slot_dimensions(
+                        slot.source_index, slot.frame_index, cpu_cache, w, h, channels);
+                }
+                if (have_dims) {
+                    _debug_stats.cache_hits++;
+                    slot.width = w;
+                    slot.height = h;
+                    slot.channels = channels;
+                    slot.data_size = static_cast<size_t>(w * h * channels);
 
-                if (compare_mode == 3) {
-                    while (static_cast<int>(_texturePool.size()) <= slot.source_index) {
-                        _texturePool.push_back(TextureState());
-                    }
-                    resolve_display_texture(
-                        slot.source_index,
-                        cpu_cache,
-                        slot,
-                        _texturePool[slot.source_index],
-                        batch,
-                        bindings_dirty);
-                } else if (compare_mode == 0) {
-                    if (slot.source_index == _active_render_params.sequence_index) {
+                    if (compare_mode == 3) {
+                        while (static_cast<int>(_texturePool.size()) <= slot.source_index) {
+                            _texturePool.push_back(TextureState());
+                        }
                         resolve_display_texture(
                             slot.source_index,
                             cpu_cache,
                             slot,
-                            _texAState,
+                            _texturePool[slot.source_index],
                             batch,
                             bindings_dirty);
+                    } else if (compare_mode == 0) {
+                        if (slot.source_index == _active_render_params.sequence_index) {
+                            resolve_display_texture(
+                                slot.source_index,
+                                cpu_cache,
+                                slot,
+                                _texAState,
+                                batch,
+                                bindings_dirty);
+                        }
+                    } else {
+                        if (slot.source_index == 0) {
+                            resolve_display_texture(
+                                slot.source_index,
+                                cpu_cache,
+                                slot,
+                                _texAState,
+                                batch,
+                                bindings_dirty);
+                        } else if (slot.source_index == 1) {
+                            resolve_display_texture(
+                                slot.source_index,
+                                cpu_cache,
+                                slot,
+                                _texBState,
+                                batch,
+                                bindings_dirty);
+                        }
                     }
                 } else {
-                    if (slot.source_index == 0) {
-                        resolve_display_texture(
-                            slot.source_index,
-                            cpu_cache,
-                            slot,
-                            _texAState,
-                            batch,
-                            bindings_dirty);
-                    } else if (slot.source_index == 1) {
-                        resolve_display_texture(
-                            slot.source_index,
-                            cpu_cache,
-                            slot,
-                            _texBState,
-                            batch,
-                            bindings_dirty);
-                    }
+                    _debug_stats.cache_misses++;
                 }
-            } else {
-                _debug_stats.cache_misses++;
             }
         }
-    }
 
-    {
-        auto display_stats = _displayCache.stats();
-        _debug_stats.gpu_cache_hits = display_stats.hits;
-        _debug_stats.gpu_cache_misses = display_stats.misses;
-        if (_displayCache.enabled()) {
-            _debug_stats.textures_created = display_stats.textures_created;
-            _debug_stats.textures_pooled_reuses = display_stats.textures_pooled_reuses;
+        {
+            auto display_stats = _displayCache.stats();
+            _debug_stats.gpu_cache_hits = display_stats.hits;
+            _debug_stats.gpu_cache_misses = display_stats.misses;
+            if (_displayCache.enabled()) {
+                _debug_stats.textures_created = display_stats.textures_created;
+                _debug_stats.textures_pooled_reuses = display_stats.textures_pooled_reuses;
+            }
+            std::lock_guard<std::mutex> lock(_mutex);
+            _display_stats_snapshot = display_stats;
         }
-        std::lock_guard<std::mutex> lock(_mutex);
-        _display_stats_snapshot = display_stats;
-    }
 
-    if (bindings_dirty || _texAState.texture != _last_bound_tex_a || _texBState.texture != _last_bound_tex_b) {
-        update_srb_resources();
+        if (bindings_dirty || _texAState.texture != _last_bound_tex_a || _texBState.texture != _last_bound_tex_b) {
+            update_srb_resources();
+        }
+    } else {
+        _debug_stats.size_only_presents++;
     }
 
     const auto upload_end = Clock::now();
@@ -1606,17 +1627,19 @@ void RhiRenderer::render_frame()
         _debug_stats.swap_h = swapSize.height();
     }
 
-    // 2. Upload OCIO LUTs (1D-as-2D and 3D)
-    for (auto& lut : _active_ocio_luts) {
-        if (!lut.dirty) {
-            continue;
-        }
-        if (lut.is_3d && lut.size > 0) {
-            upload_texture_3d(lut, batch);
-            lut.dirty = false;
-        } else if (!lut.is_3d && lut.width > 0 && lut.height > 0) {
-            upload_texture_2d_lut(lut, batch);
-            lut.dirty = false;
+    // 2. Upload OCIO LUTs (1D-as-2D and 3D) — skip during size-only; catch up next full present.
+    if (!size_only) {
+        for (auto& lut : _active_ocio_luts) {
+            if (!lut.dirty) {
+                continue;
+            }
+            if (lut.is_3d && lut.size > 0) {
+                upload_texture_3d(lut, batch);
+                lut.dirty = false;
+            } else if (!lut.is_3d && lut.width > 0 && lut.height > 0) {
+                upload_texture_2d_lut(lut, batch);
+                lut.dirty = false;
+            }
         }
     }
 
@@ -1783,9 +1806,11 @@ void RhiRenderer::render_frame()
     }
 
     // Staging/GPU uploads submitted this frame are safe to treat as complete next frame.
-    _completed_upload_generation = _upload_generation;
-    ++_upload_generation;
-    publish_display_cache_snapshot();
+    if (!size_only) {
+        _completed_upload_generation = _upload_generation;
+        ++_upload_generation;
+        publish_display_cache_snapshot();
+    }
     if (_window) {
         _window->requestUpdate();
     }
@@ -1800,7 +1825,7 @@ void RhiRenderer::render_frame()
 
     // Idle GPU warming: keep rendering while the display cache can still absorb
     // CPU-cached frames ahead of the playhead.
-    if (gpu_warmup_work_remaining()) {
+    if (!size_only && gpu_warmup_work_remaining()) {
         _wake_render_thread();
     }
 }

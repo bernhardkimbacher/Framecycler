@@ -139,18 +139,24 @@ class TestViewportQrhiIntegration(unittest.TestCase):
         self.assertFalse(hasattr(framecycler_engine.RenderParams(), "scale_x"))
         self.assertFalse(hasattr(framecycler_engine.RenderParams(), "viewport_width"))
 
-        # Resize always refreshes params (pan/zoom/tiles); aspect stays C++-owned.
-        # Free-zoom (zoom_mode=None) must not require a live QObject signal.
+        # Resize: fit mode skips param storms (swapchain path only). Free-zoom still
+        # refreshes zoom/pan params. Free-zoom must not require a live QObject signal.
         viewport._size = (1600, 600)
         viewport.zoom = 1.5
-        viewport.zoom_mode = None
-        viewport.zoom_mode_changed = type(
-            "Sig", (), {"emit": staticmethod(lambda *_a, **_k: None)}
-        )()
+        viewport.zoom_mode = "fit"
         event = QResizeEvent(QSize(1600, 600), QSize(800, 600))
         with patch.object(QWidget, "resizeEvent", return_value=None):
             with patch.object(QWidget, "update", return_value=None):
                 viewport.resizeEvent(event)
+        self.assertEqual(len(captured), 1, "fit-mode resize must not push RenderParams")
+
+        viewport.zoom_mode = None
+        viewport.zoom_mode_changed = type(
+            "Sig", (), {"emit": staticmethod(lambda *_a, **_k: None)}
+        )()
+        with patch.object(QWidget, "resizeEvent", return_value=None):
+            with patch.object(QWidget, "update", return_value=None):
+                viewport.resizeEvent(QResizeEvent(QSize(1600, 600), QSize(800, 600)))
         self.assertEqual(len(captured), 2)
         self.assertAlmostEqual(captured[1].zoom, 1.5)
         self.assertAlmostEqual(captured[1].pixel_aspect_ratio, 2.0)

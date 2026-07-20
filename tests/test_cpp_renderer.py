@@ -118,6 +118,7 @@ class TestCppRenderer(unittest.TestCase):
             "lut_textures_pooled_reuses",
             "last_upload_ms",
             "last_render_ms",
+            "size_only_presents",
         ):
             self.assertIn(key, stats)
             self.assertIsInstance(stats[key], (int, float))

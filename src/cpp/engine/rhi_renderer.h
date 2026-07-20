@@ -19,6 +19,7 @@
 #include <optional>
 #include <functional>
 #include <cstdint>
+#include <chrono>
 
 #include "gpu_texture_cache.h"
 #include "display_upload_queue.h"
@@ -122,7 +123,8 @@ public:
 
     // Window event listeners (called from RhiViewportWindow on GUI thread)
     void set_exposed(bool exposed);
-    void set_pending_size(int width, int height);
+    /// Wake the render thread so it can sync swapchain to live surfacePixelSize().
+    void notify_surface_changed();
 
     void request_redraw();
     void sync_and_render();
@@ -225,6 +227,8 @@ public:
         /// OCIO LUT free-list reuses (size/format match); separate from frame GpuTextureCache.
         int lut_textures_pooled_reuses = 0;
         int pipeline_lut_count = 0;
+        /// Count of size-only presents (skipped uploads/lookahead).
+        int size_only_presents = 0;
     };
     DebugStats get_debug_stats() const;
     int pipeline_lut_count() const;
@@ -296,7 +300,8 @@ private:
     };
 
     // Thread Loop
-    void render_frame();
+    /// ``size_only``: skip uploads/lookahead; re-present last textures with new fit.
+    void render_frame(bool size_only = false);
     void update_rhi_resources(QRhiResourceUpdateBatch* batch);
     void build_pipeline(QRhiRenderPassDescriptor* rpDesc, bool force_rebuild = false);
     void update_srb_resources();
@@ -369,7 +374,7 @@ private:
     void render_thread_loop();
     bool initialize_rhi_on_thread();
     void shutdown_rhi_on_thread();
-    void sync_and_render_on_thread(bool resize, const QSize& target_size);
+    void sync_and_render_on_thread();
     void _wake_render_thread();
     void _apply_viewer_output_format_unlocked();
     QRhiSwapChain::Format _qrhi_format_for_mode(ViewerOutputMode mode) const;
@@ -409,9 +414,9 @@ private:
     std::atomic<bool> _redraw_needed{false};
     std::atomic<bool> _clear_cache_pending{false};
     std::atomic<bool> _exposed{false};
-    std::atomic<bool> _resize_pending{false};
-    QSize _pending_size;
     QWindow* _window = nullptr;
+    /// Render-thread: presentsWithTransaction applied once after first createOrResize.
+    bool _metal_pwt_applied = false;
     DebugStats _debug_stats;
     DebugStats _debug_stats_published;
     mutable std::mutex _debug_stats_mutex;

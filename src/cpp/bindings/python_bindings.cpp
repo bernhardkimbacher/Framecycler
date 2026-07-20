@@ -764,7 +764,7 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("clear_ocio_luts", &RhiRenderer::clear_ocio_luts)
         .def("cached_pipeline_key", &RhiRenderer::cached_pipeline_key)
         .def("set_exposed", &RhiRenderer::set_exposed)
-        .def("set_pending_size", &RhiRenderer::set_pending_size)
+        .def("notify_surface_changed", &RhiRenderer::notify_surface_changed)
         .def("request_redraw", &RhiRenderer::request_redraw)
         .def("sync_and_render", &RhiRenderer::sync_and_render, py::call_guard<py::gil_scoped_release>())
         .def("set_display_cache_limit_gb", &RhiRenderer::set_display_cache_limit_gb)
@@ -946,6 +946,7 @@ PYBIND11_MODULE(framecycler_engine, m) {
             d["textures_pooled_reuses"] = s.textures_pooled_reuses;
             d["lut_textures_pooled_reuses"] = s.lut_textures_pooled_reuses;
             d["pipeline_lut_count"] = s.pipeline_lut_count;
+            d["size_only_presents"] = s.size_only_presents;
             return d;
         })
         .def("pipeline_lut_count", &RhiRenderer::pipeline_lut_count);

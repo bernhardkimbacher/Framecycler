@@ -25,6 +25,7 @@ class TestGpuChurnCounters(unittest.TestCase):
             "last_upload_jobs",
             "upload_ms_total",
             "end_frame_ms_max",
+            "size_only_presents",
         ):
             self.assertIn(key, stats)
             self.assertEqual(stats[key], 0)

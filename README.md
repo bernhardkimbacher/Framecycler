@@ -127,7 +127,7 @@ Located in [`src/cpp/engine/rhi_renderer.cpp`](src/cpp/engine/rhi_renderer.cpp).
 * **Shaders**: GLSL from Python/OCIO compiled via `QShaderBaker` to platform binaries.
 * **OCIO LUT textures**: 2D/3D `RGBA32F` GPU textures are pooled in `RhiRenderer` by size/format (reuse on view/look changes when dimensions match); frame display textures remain in `GpuTextureCache`.
 * **Compare modes**: Sequence (playhead source), Wipe / Difference / Blend (active vs compare display slots), Tile (aspect-preserving grid).
-* **Resize**: The render thread computes aspect-fit from the live swapchain size and bound texture dimensions each present; Python sends only zoom + pixel aspect (and pan). Scale-only / zoom-only updates skip GPU upload re-enqueue.
+* **Resize**: The render thread syncs the swapchain when `currentPixelSize` ≠ `surfacePixelSize`, then computes aspect-fit from the live render-target size and bound texture dimensions. Python sends only zoom + pixel aspect (and pan). On macOS, `CAMetalLayer.presentsWithTransaction` is enabled once at Metal init (never toggled during resize). Size-only presents skip uploads/lookahead. Fit-mode resize does not re-push RenderParams every tick.
 
 ### F. Playback timing
 

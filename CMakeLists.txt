@@ -70,9 +70,11 @@ pybind11_add_module(framecycler_engine
 if(APPLE)
     target_sources(framecycler_engine PRIVATE
         src/cpp/engine/hw_texture_import_metal.mm
+        src/cpp/engine/metal_present_sync.mm
     )
     set_source_files_properties(
         src/cpp/engine/hw_texture_import_metal.mm
+        src/cpp/engine/metal_present_sync.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc"
     )
 elseif(WIN32)
@@ -110,9 +112,11 @@ if(APPLE)
         "-framework CoreFoundation"
         "-framework Foundation"
         "-framework Metal"
+        "-framework QuartzCore"
         "-framework CoreVideo"
         "-framework CoreMedia"
         "-framework VideoToolbox"
+        "-framework AppKit"
     )
 elseif(WIN32)
     target_link_libraries(framecycler_engine PRIVATE

@@ -90,10 +90,8 @@ class RhiViewportWindow(QWindow):
 
     def resizeEvent(self, event: QResizeEvent):
         if self._renderer:
-            sz = event.size()
-            # Swapchain resize; aspect-fit is recomputed on the render thread
-            # from the live swapchain size each present.
-            self._renderer.set_pending_size(sz.width(), sz.height())
+            # Wake only — swapchain size comes from live surfacePixelSize().
+            self._renderer.notify_surface_changed()
 
 
 @dataclass
@@ -977,11 +975,15 @@ class Viewport(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Percent / free-zoom multipliers depend on widget size; aspect-fit itself
-        # is recomputed on the render thread from the live swapchain each present.
-        if self.zoom_mode != "fit" and self.compare_mode != COMPARE_TILE:
+        # Fit mode: RhiViewportWindow.notify_surface_changed drives the present;
+        # aspect-fit is recomputed on the render thread. Skip update_render_params storms.
+        # Percent / free-zoom and tile compare still need Python-authored params.
+        if self.compare_mode == COMPARE_TILE:
+            self.update()
+            return
+        if self.zoom_mode != "fit":
             self._apply_zoom_mode()
-        self.update()
+            self.update()
 
     def _annotation_overlay(self):
         container = getattr(self, "viewport_container", None)
