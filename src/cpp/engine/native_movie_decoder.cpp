@@ -11,6 +11,18 @@
 #include <iostream>
 #include <vector>
 
+#if defined(_WIN32)
+// Include D3D11 in C++ linkage first so FFmpeg's hwcontext_d3d11va.h does not
+// pull d3d11.h (C++ operator overloads) into the following extern "C" block.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <d3d11.h>
+#endif
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
