@@ -3,7 +3,11 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from .fonts import ui_font
-from .translucent_window import FLOATING_OVERLAY_FLAGS, clear_translucent_backdrop
+from .translucent_window import (
+    FLOATING_OVERLAY_FLAGS,
+    configure_floating_overlay,
+    paint_floating_overlay,
+)
 
 
 class DropTargetMixin:
@@ -98,8 +102,7 @@ class DragDropOverlay(DropTargetMixin, QWidget):
                 parent,
                 FLOATING_OVERLAY_FLAGS | Qt.WindowType.WindowStaysOnTopHint,
             )
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+            configure_floating_overlay(self)
             self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
         else:
             super().__init__(parent)
@@ -122,53 +125,61 @@ class DragDropOverlay(DropTargetMixin, QWidget):
             self.update()
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        rect = self.rect()
-        if self._floating:
-            clear_translucent_backdrop(painter, rect)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w = rect.width()
-        third = w // 3
-        bounds = [
-            (0, third),
-            (third, 2 * third),
-            (2 * third, w),
-        ]
-        zones = [self.ZONE_REPLACE, self.ZONE_SEQUENCE, self.ZONE_STACK]
-        colors = [
-            QColor(40, 90, 160),
-            QColor(40, 140, 90),
-            QColor(140, 90, 40),
-        ]
-        labels = ["Replace All", "Add to Timeline", "Add to Stack"]
-        hints = [
-            "Clear session and\nload dropped files",
-            "Append each file as\na new shot in sequence",
-            "Add as version(s) of\nthe shot under playhead",
-        ]
+        def _paint(painter: QPainter) -> None:
+            rect = self.rect()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            w = rect.width()
+            third = w // 3
+            bounds = [
+                (0, third),
+                (third, 2 * third),
+                (2 * third, w),
+            ]
+            zones = [self.ZONE_REPLACE, self.ZONE_SEQUENCE, self.ZONE_STACK]
+            colors = [
+                QColor(40, 90, 160),
+                QColor(40, 140, 90),
+                QColor(140, 90, 40),
+            ]
+            labels = ["Replace All", "Add to Timeline", "Add to Stack"]
+            hints = [
+                "Clear session and\nload dropped files",
+                "Append each file as\na new shot in sequence",
+                "Add as version(s) of\nthe shot under playhead",
+            ]
 
-        for (x0, x1), zone, color, label, hint in zip(bounds, zones, colors, labels, hints):
-            active = self._active_zone == zone
-            fill = QColor(color.red(), color.green(), color.blue(), 180 if active else 100)
-            painter.fillRect(x0, 0, max(0, x1 - x0), rect.height(), fill)
+            for (x0, x1), zone, color, label, hint in zip(
+                bounds, zones, colors, labels, hints
+            ):
+                active = self._active_zone == zone
+                fill = QColor(
+                    color.red(), color.green(), color.blue(), 180 if active else 100
+                )
+                painter.fillRect(x0, 0, max(0, x1 - x0), rect.height(), fill)
 
-        painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
-        painter.drawLine(third, 0, third, rect.height())
-        painter.drawLine(2 * third, 0, 2 * third, rect.height())
+            painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
+            painter.drawLine(third, 0, third, rect.height())
+            painter.drawLine(2 * third, 0, 2 * third, rect.height())
 
-        font = ui_font(15, QFont.Weight.Bold)
-        painter.setFont(font)
-        painter.setPen(QColor(255, 255, 255))
-        hint_font = ui_font(11)
-
-        for (x0, x1), label, hint in zip(bounds, labels, hints):
-            zone_rect = rect.adjusted(x0, 0, -(w - x1), 0)
+            font = ui_font(15, QFont.Weight.Bold)
             painter.setFont(font)
-            painter.drawText(zone_rect, Qt.AlignmentFlag.AlignCenter, label)
-            painter.setFont(hint_font)
-            painter.drawText(
-                zone_rect.adjusted(10, 44, -10, -10),
-                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-                hint,
-            )
-        painter.end()
+            painter.setPen(QColor(255, 255, 255))
+            hint_font = ui_font(11)
+
+            for (x0, x1), label, hint in zip(bounds, labels, hints):
+                zone_rect = rect.adjusted(x0, 0, -(w - x1), 0)
+                painter.setFont(font)
+                painter.drawText(zone_rect, Qt.AlignmentFlag.AlignCenter, label)
+                painter.setFont(hint_font)
+                painter.drawText(
+                    zone_rect.adjusted(8, 40, -8, -8),
+                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                    hint,
+                )
+
+        if self._floating:
+            paint_floating_overlay(self, _paint)
+        else:
+            painter = QPainter(self)
+            _paint(painter)
+            painter.end()

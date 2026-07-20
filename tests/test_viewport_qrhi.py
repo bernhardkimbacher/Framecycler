@@ -73,8 +73,8 @@ class TestViewportQrhiIntegration(unittest.TestCase):
         self.assertEqual(captured["params"].slots[0].frame_index, 993)
         self.assertNotEqual(captured["params"].slots[0].frame_index, 0)
 
-    def test_resize_event_updates_fit_scales(self):
-        """Fit mode must refresh RenderParams on resize (not wait for playback)."""
+    def test_render_params_send_zoom_and_pixel_aspect(self):
+        """RenderParams carry zoom + PAR; aspect-fit is computed on the render thread."""
         from PySide6.QtCore import QPoint, QSize
         from PySide6.QtGui import QResizeEvent
         from src.framecycler import framecycler_engine
@@ -101,7 +101,7 @@ class TestViewportQrhiIntegration(unittest.TestCase):
                 decoder_frame=10,
                 upload_token=10,
                 cached=True,
-                pixel_aspect_ratio=1.0,
+                pixel_aspect_ratio=2.0,
             )
         ]
 
@@ -109,7 +109,7 @@ class TestViewportQrhiIntegration(unittest.TestCase):
 
         class _FakeRenderer:
             def update_render_params(self, params):
-                captured.append((params.scale_x, params.scale_y))
+                captured.append(params)
 
             def sync_and_render(self):
                 pass
@@ -132,21 +132,30 @@ class TestViewportQrhiIntegration(unittest.TestCase):
         with patch.object(QWidget, "update", return_value=None):
             viewport.update()
         self.assertEqual(len(captured), 1)
-        scale_before = captured[0]
+        self.assertAlmostEqual(captured[0].zoom, 1.0)
+        self.assertAlmostEqual(captured[0].pixel_aspect_ratio, 2.0)
+        self.assertTrue(hasattr(captured[0], "zoom"))
+        self.assertTrue(hasattr(captured[0], "pixel_aspect_ratio"))
+        self.assertFalse(hasattr(framecycler_engine.RenderParams(), "scale_x"))
+        self.assertFalse(hasattr(framecycler_engine.RenderParams(), "viewport_width"))
 
+        # Resize always refreshes params (pan/zoom/tiles); aspect stays C++-owned.
+        # Free-zoom (zoom_mode=None) must not require a live QObject signal.
         viewport._size = (1600, 600)
+        viewport.zoom = 1.5
+        viewport.zoom_mode = None
+        viewport.zoom_mode_changed = type(
+            "Sig", (), {"emit": staticmethod(lambda *_a, **_k: None)}
+        )()
         event = QResizeEvent(QSize(1600, 600), QSize(800, 600))
         with patch.object(QWidget, "resizeEvent", return_value=None):
             with patch.object(QWidget, "update", return_value=None):
                 viewport.resizeEvent(event)
-
         self.assertEqual(len(captured), 2)
-        scale_after = captured[1]
-        self.assertNotEqual(scale_before, scale_after)
-        # Wider widget → letterbox on X for 16:9 frame
-        self.assertLess(scale_after[0], scale_before[0])
+        self.assertAlmostEqual(captured[1].zoom, 1.5)
+        self.assertAlmostEqual(captured[1].pixel_aspect_ratio, 2.0)
 
-        # Tile mode also refreshes on resize
+        # Tile mode still rebuilds tile specs on resize
         captured.clear()
         viewport.compare_mode = COMPARE_TILE
         viewport._size = (400, 400)
@@ -155,6 +164,7 @@ class TestViewportQrhiIntegration(unittest.TestCase):
                 with patch.object(QWidget, "update", return_value=None):
                     viewport.resizeEvent(QResizeEvent(QSize(400, 400), QSize(1600, 600)))
         self.assertEqual(len(captured), 1)
+        self.assertAlmostEqual(captured[0].zoom, 1.0)
 
 
 if __name__ == "__main__":

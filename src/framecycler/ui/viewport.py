@@ -10,7 +10,11 @@ from ..core.tile_layout import TileLayout, compute_tile_layouts
 from .fonts import mono_font, ui_font
 from .drag_drop_overlay import DragDropOverlay
 from .overlay_geometry import aspect_mask_rect, displayed_image_rect, safe_inset_rect
-from .translucent_window import FLOATING_OVERLAY_FLAGS, clear_translucent_backdrop
+from .translucent_window import (
+    FLOATING_OVERLAY_FLAGS,
+    configure_floating_overlay,
+    paint_floating_overlay,
+)
 
 try:
     from .. import framecycler_engine
@@ -87,6 +91,8 @@ class RhiViewportWindow(QWindow):
     def resizeEvent(self, event: QResizeEvent):
         if self._renderer:
             sz = event.size()
+            # Swapchain resize; aspect-fit is recomputed on the render thread
+            # from the live swapchain size each present.
             self._renderer.set_pending_size(sz.width(), sz.height())
 
 
@@ -117,8 +123,7 @@ class ViewportHudOverlay(QWidget):
     def __init__(self, viewport: "Viewport", parent: QWidget, *, floating: bool = False):
         if floating:
             super().__init__(parent, FLOATING_OVERLAY_FLAGS)
-            self.setAttribute(Qt.WA_TranslucentBackground)
-            self.setAttribute(Qt.WA_ShowWithoutActivating)
+            configure_floating_overlay(self)
             self.setAttribute(Qt.WA_TransparentForMouseEvents)
             self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
         else:
@@ -138,38 +143,40 @@ class ViewportHudOverlay(QWidget):
 
     def paintEvent(self, event):
         viewport = self._viewport
-        painter = QPainter(self)
+
+        def _paint(painter: QPainter) -> None:
+            need_paint = (
+                viewport.hud_visible
+                or viewport.adjustment_mode
+                or viewport.has_review_overlays()
+            )
+            if not need_paint:
+                return
+            if viewport.hud_visible:
+                viewport._draw_hud(painter)
+                if self._package_painters_provider is not None:
+                    frame = 0
+                    if self._frame_provider is not None:
+                        try:
+                            frame = int(self._frame_provider())
+                        except Exception:
+                            frame = 0
+                    rect = self.rect()
+                    for spec in self._package_painters_provider():
+                        try:
+                            spec.paint(painter, rect, frame)
+                        except Exception:
+                            pass
+            viewport._draw_review_overlays(painter)
+            if viewport.adjustment_mode:
+                viewport._draw_adjustment_overlay(painter)
+
         if self._floating:
-            clear_translucent_backdrop(painter, self.rect())
-
-        need_paint = (
-            viewport.hud_visible
-            or viewport.adjustment_mode
-            or viewport.has_review_overlays()
-        )
-        if not need_paint:
+            paint_floating_overlay(self, _paint)
+        else:
+            painter = QPainter(self)
+            _paint(painter)
             painter.end()
-            return
-
-        if viewport.hud_visible:
-            viewport._draw_hud(painter)
-            if self._package_painters_provider is not None:
-                frame = 0
-                if self._frame_provider is not None:
-                    try:
-                        frame = int(self._frame_provider())
-                    except Exception:
-                        frame = 0
-                rect = self.rect()
-                for spec in self._package_painters_provider():
-                    try:
-                        spec.paint(painter, rect, frame)
-                    except Exception:
-                        pass
-        viewport._draw_review_overlays(painter)
-        if viewport.adjustment_mode:
-            viewport._draw_adjustment_overlay(painter)
-        painter.end()
 
 
 class ViewportContainer(QWidget):
@@ -237,6 +244,8 @@ class ViewportContainer(QWidget):
         self._position_hud_overlay()
         self._position_annotation_overlay()
         self._position_drag_overlay()
+        # Viewport.resizeEvent (from setGeometry) refreshes zoom/pan/tiles;
+        # aspect-fit is computed on the render thread from the live swapchain.
 
     def _position_hud_overlay(self):
         if self._hud_overlay._floating:
@@ -795,14 +804,16 @@ class Viewport(QWidget):
             params.zebra_lo = self.zebra_lo
             params.zebra_hi = self.zebra_hi
 
-            scale_x, scale_y = self._fit_scales()
             widget_w, widget_h = self.width(), self.height()
             pan_x = (self.pan_offset.x() / widget_w) * 2.0 if widget_w > 0 else 0.0
             pan_y = -(self.pan_offset.y() / widget_h) * 2.0 if widget_h > 0 else 0.0
-            zoom = 1.0 if self.compare_mode == COMPARE_TILE else self.zoom
-
-            params.scale_x = scale_x * zoom
-            params.scale_y = scale_y * zoom
+            # Aspect-fit is computed on the render thread from live swapchain size.
+            params.zoom = 1.0 if self.compare_mode == COMPARE_TILE else float(self.zoom)
+            primary = self._primary_slot()
+            if primary is not None and primary.pixel_aspect_ratio > 0:
+                params.pixel_aspect_ratio = float(primary.pixel_aspect_ratio)
+            else:
+                params.pixel_aspect_ratio = float(self.pixel_aspect_ratio or 1.0)
             params.pan_x = pan_x
             params.pan_y = pan_y
 
@@ -966,8 +977,8 @@ class Viewport(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Always refresh RenderParams: fit/tile scales depend on widget size.
-        # Skipping update() left stale scale uniforms after swapchain resize.
+        # Percent / free-zoom multipliers depend on widget size; aspect-fit itself
+        # is recomputed on the render thread from the live swapchain each present.
         if self.zoom_mode != "fit" and self.compare_mode != COMPARE_TILE:
             self._apply_zoom_mode()
         self.update()

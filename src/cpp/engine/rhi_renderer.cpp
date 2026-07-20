@@ -241,7 +241,7 @@ void RhiRenderer::render_thread_loop()
             }
 
             needs_render = _redraw_needed || _clear_cache_pending || _transport.is_playing()
-                || _transport_program_dirty.load();
+                || _transport_program_dirty.load() || _render_params_dirty;
             _redraw_needed = false;
             resize = _resize_pending.exchange(false);
             target_size = _pending_size;
@@ -1013,27 +1013,68 @@ UploadQueueStats RhiRenderer::get_upload_queue_stats() const
     return _uploadQueue.stats();
 }
 
+void RhiRenderer::_fit_scales_for_size(
+    int tex_w,
+    int tex_h,
+    float pixel_aspect_ratio,
+    QSize output_size,
+    float& out_fit_x,
+    float& out_fit_y)
+{
+    out_fit_x = 1.0f;
+    out_fit_y = 1.0f;
+    if (tex_w <= 0 || tex_h <= 0 || output_size.width() <= 0 || output_size.height() <= 0) {
+        return;
+    }
+    const float par = (pixel_aspect_ratio > 0.0f) ? pixel_aspect_ratio : 1.0f;
+    const float aspect_widget =
+        float(output_size.width()) / float(output_size.height());
+    const float aspect_frame = (float(tex_w) * par) / float(tex_h);
+    if (aspect_widget > aspect_frame) {
+        out_fit_x = aspect_frame / aspect_widget;
+    } else {
+        out_fit_y = aspect_widget / aspect_frame;
+    }
+}
+
 void RhiRenderer::update_render_params(const RenderParams& params)
 {
     std::lock_guard<std::mutex> lock(_mutex);
+    const auto prev_slots = _pending_render_params.slots;
     _pending_render_params = params;
     _render_params_dirty = true;
 
-    // Enqueue every visited slot so coalesced present params cannot skip puts.
-    // Residency is checked against the render-thread snapshot (safe under _mutex).
-    for (const auto& slot : params.slots) {
-        if (slot.frame_index < 0) {
-            continue;
+    // Skip upload enqueue when only transform fields changed — resize/pan/zoom
+    // storms used to re-enqueue every present and stall the render thread once
+    // the display cache was warm.
+    bool slots_changed = prev_slots.size() != params.slots.size();
+    if (!slots_changed) {
+        for (size_t i = 0; i < params.slots.size(); ++i) {
+            const auto& a = prev_slots[i];
+            const auto& b = params.slots[i];
+            if (a.source_index != b.source_index || a.frame_index != b.frame_index
+                || a.upload_token != b.upload_token) {
+                slots_changed = true;
+                break;
+            }
         }
-        bool resident = false;
-        auto snap = _display_frames_snapshot.find(slot.source_index);
-        if (snap != _display_frames_snapshot.end()) {
-            const auto& frames = snap->second;
-            resident = std::binary_search(frames.begin(), frames.end(), slot.frame_index);
+    }
+
+    if (slots_changed) {
+        for (const auto& slot : params.slots) {
+            if (slot.frame_index < 0) {
+                continue;
+            }
+            bool resident = false;
+            auto snap = _display_frames_snapshot.find(slot.source_index);
+            if (snap != _display_frames_snapshot.end()) {
+                const auto& frames = snap->second;
+                resident = std::binary_search(frames.begin(), frames.end(), slot.frame_index);
+            }
+            _uploadQueue.enqueue(
+                UploadJobRequest{slot.source_index, slot.frame_index, slot.upload_token},
+                resident);
         }
-        _uploadQueue.enqueue(
-            UploadJobRequest{slot.source_index, slot.frame_index, slot.upload_token},
-            resident);
     }
 
     _wake_render_thread();
@@ -1609,8 +1650,24 @@ void RhiRenderer::render_frame()
     } else {
         ensure_per_frame_ubo(1);
         PerFrameUboData perFrame;
-        perFrame.scale_x = _active_render_params.scale_x;
-        perFrame.scale_y = _active_render_params.scale_y;
+        // Aspect-fit from live swapchain size + bound texture dims so resize
+        // never presents with stale scales (Python only ships zoom + PAR).
+        float fit_x = 1.0f;
+        float fit_y = 1.0f;
+        QSize outputSize;
+        if (_swapChain && _swapChain->currentFrameRenderTarget()) {
+            outputSize = _swapChain->currentFrameRenderTarget()->pixelSize();
+        }
+        _fit_scales_for_size(
+            _texAState.last_w,
+            _texAState.last_h,
+            _active_render_params.pixel_aspect_ratio,
+            outputSize,
+            fit_x,
+            fit_y);
+        const float zoom = _active_render_params.zoom;
+        perFrame.scale_x = fit_x * zoom;
+        perFrame.scale_y = fit_y * zoom;
         perFrame.pan_x = _active_render_params.pan_x;
         perFrame.pan_y = _active_render_params.pan_y;
         perFrame.compare_mode = _active_render_params.compare_mode;

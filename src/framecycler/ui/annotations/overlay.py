@@ -8,7 +8,11 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPainter, QPaintEvent
 from PySide6.QtWidgets import QInputDialog, QWidget
 
-from ..translucent_window import FLOATING_OVERLAY_FLAGS, clear_translucent_backdrop
+from ..translucent_window import (
+    FLOATING_OVERLAY_FLAGS,
+    configure_floating_overlay,
+    paint_floating_overlay,
+)
 from .geometry import (
     hit_test_topmost,
     image_rect_for_viewport,
@@ -28,8 +32,7 @@ class AnnotationOverlay(QWidget):
     def __init__(self, viewport, parent: QWidget | None = None, *, floating: bool = True):
         if floating:
             super().__init__(parent, FLOATING_OVERLAY_FLAGS)
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+            configure_floating_overlay(self)
             # Always pass-through: native Metal surface owns input; Viewport routes draws.
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
@@ -158,16 +161,19 @@ class AnnotationOverlay(QWidget):
         )
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
-        painter = QPainter(self)
-        if self._floating:
-            clear_translucent_backdrop(painter, self.rect())
+        def _paint(painter: QPainter) -> None:
+            image_rect = self._image_rect()
+            for shape in self._shapes:
+                paint_shape(painter, shape, image_rect)
+            if self._draft is not None:
+                paint_shape(painter, self._draft, image_rect)
 
-        image_rect = self._image_rect()
-        for shape in self._shapes:
-            paint_shape(painter, shape, image_rect)
-        if self._draft is not None:
-            paint_shape(painter, self._draft, image_rect)
-        painter.end()
+        if self._floating:
+            paint_floating_overlay(self, _paint)
+        else:
+            painter = QPainter(self)
+            _paint(painter)
+            painter.end()
 
     # --- Input API called from Viewport (widget coords in viewport space) ---
 

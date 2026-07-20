@@ -56,11 +56,13 @@ struct RenderParams {
     int false_color_mode = 0;  // 0=off, 1=heatmap, 2=zebra
     float zebra_lo = 0.02f;
     float zebra_hi = 0.98f;
-    float scale_x = 1.0f;
-    float scale_y = 1.0f;
+    /// Fit-relative zoom multiplier (1.0 = fit). Aspect-fit is computed on the
+    /// render thread from live swapchain size + texture dims each present.
+    float zoom = 1.0f;
+    float pixel_aspect_ratio = 1.0f;
     float pan_x = 0.0f;
     float pan_y = 0.0f;
-    
+
     std::vector<FrameSlotSpec> slots;
     std::vector<TileSpec> tiles;
 };
@@ -372,6 +374,14 @@ private:
     void _apply_viewer_output_format_unlocked();
     QRhiSwapChain::Format _qrhi_format_for_mode(ViewerOutputMode mode) const;
     ViewerOutputMode _resolve_supported_mode(ViewerOutputMode requested) const;
+    /// Aspect-fit NDC scales for texDims into outputSize (PAR-aware).
+    static void _fit_scales_for_size(
+        int tex_w,
+        int tex_h,
+        float pixel_aspect_ratio,
+        QSize output_size,
+        float& out_fit_x,
+        float& out_fit_y);
 
     bool _transport_can_advance(int global_frame);
     bool _transport_can_advance_unlocked(int global_frame);

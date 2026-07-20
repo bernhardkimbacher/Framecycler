@@ -15,8 +15,10 @@ class TestCppRenderer(unittest.TestCase):
         params.false_color_mode = 1
         params.zebra_lo = 0.05
         params.zebra_hi = 0.95
-        params.scale_x = 1.5
-        params.scale_y = 1.5
+        params.zoom = 1.5
+        params.pixel_aspect_ratio = 1.0
+        params.pan_x = 0.1
+        params.pan_y = -0.2
 
         slot = framecycler_engine.FrameSlotSpec()
         slot.source_index = 0

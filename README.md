@@ -127,7 +127,7 @@ Located in [`src/cpp/engine/rhi_renderer.cpp`](src/cpp/engine/rhi_renderer.cpp).
 * **Shaders**: GLSL from Python/OCIO compiled via `QShaderBaker` to platform binaries.
 * **OCIO LUT textures**: 2D/3D `RGBA32F` GPU textures are pooled in `RhiRenderer` by size/format (reuse on view/look changes when dimensions match); frame display textures remain in `GpuTextureCache`.
 * **Compare modes**: Sequence (playhead source), Wipe / Difference / Blend (active vs compare display slots), Tile (aspect-preserving grid).
-* **Resize**: Viewport always refreshes `RenderParams` (fit/tile scales) on size changes so the image does not stretch until the next seek/play.
+* **Resize**: The render thread computes aspect-fit from the live swapchain size and bound texture dimensions each present; Python sends only zoom + pixel aspect (and pan). Scale-only / zoom-only updates skip GPU upload re-enqueue.
 
 ### F. Playback timing
 
@@ -426,7 +426,7 @@ Located in [`src/framecycler/ui/`](src/framecycler/ui/).
 * **File → Add Media** / drag-and-drop **Replace** (left) vs **Add** (right).
 * **Image menu**: Resolution scale and pixel aspect for the active selection; Sequence readout follows the playhead clip.
 * **Playback timing**: Play Every Frame vs Play Realtime.
-* **HUD**: Wipe divider overlay when Wipe is active.
+* **HUD**: Wipe divider overlay when Wipe is active. Floating Tool overlays (HUD, annotations, drag-drop) use an offscreen clear blit on macOS so translucent-window AA fringes do not ghost after content shrinks.
 * **Timeline**: Position row (`FR` / `FPS` / `TC`), cache indicators for decode RAM and display GPU where applicable.
 * **Grading**: Exposure / gamma / offset drag modes; **Reset Color Grade** / `Home` clears viewer grade (OTIO CDL keys remain).
 * **Plugins**: Actions from enabled packages; empty state when none are enabled.
