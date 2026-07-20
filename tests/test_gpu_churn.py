@@ -21,6 +21,7 @@ class TestGpuChurnCounters(unittest.TestCase):
             "staging_waits",
             "textures_created",
             "textures_pooled_reuses",
+            "lut_textures_pooled_reuses",
             "last_upload_jobs",
             "upload_ms_total",
             "end_frame_ms_max",

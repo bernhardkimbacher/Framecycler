@@ -119,8 +119,11 @@ Located in [`src/cpp/engine/cache_manager.{h,cpp}`](src/cpp/engine/cache_manager
 
 Located in [`src/cpp/engine/rhi_renderer.cpp`](src/cpp/engine/rhi_renderer.cpp). The viewport hosts a native `QWindow` bound to `RhiRenderer` on a dedicated render thread.
 
-* **Backends**: Metal (macOS), D3D11 (Windows), Vulkan (Linux); Null when `QT_QPA_PLATFORM=offscreen`.
+**Present path SSoT:** C++ `RhiRenderer` is the only production present stack. [`src/framecycler/render/`](src/framecycler/render/) provides shared shader baking/tooling for OCIO GLSL — not a second viewport renderer.
+
+* **Backends**: Metal (macOS), D3D11 (Windows), Vulkan (Linux); Null when `QT_QPA_PLATFORM=offscreen` or forced Null (same upload path as real backends).
 * **Shaders**: GLSL from Python/OCIO compiled via `QShaderBaker` to platform binaries.
+* **OCIO LUT textures**: 2D/3D `RGBA32F` GPU textures are pooled in `RhiRenderer` by size/format (reuse on view/look changes when dimensions match); frame display textures remain in `GpuTextureCache`.
 * **Compare modes**: Sequence (playhead source), Wipe / Difference / Blend (active vs compare display slots), Tile (aspect-preserving grid).
 * **Resize**: Viewport always refreshes `RenderParams` (fit/tile scales) on size changes so the image does not stretch until the next seek/play.
 

@@ -209,6 +209,8 @@ public:
         int staging_waits = 0;
         int textures_created = 0;
         int textures_pooled_reuses = 0;
+        /// OCIO LUT free-list reuses (size/format match); separate from frame GpuTextureCache.
+        int lut_textures_pooled_reuses = 0;
         int pipeline_lut_count = 0;
     };
     DebugStats get_debug_stats() const;
@@ -234,6 +236,30 @@ private:
         std::vector<float> rgba_data;
         bool dirty = false;
     };
+
+    struct LutPoolKey {
+        bool is_3d = false;
+        int width = 0;
+        int height = 0;
+        int depth = 0; // 0 for 2D; edge for 3D
+
+        bool operator==(const LutPoolKey& o) const
+        {
+            return is_3d == o.is_3d && width == o.width && height == o.height && depth == o.depth;
+        }
+    };
+
+    struct LutPoolEntry {
+        LutPoolKey key;
+        QRhiTexture* texture = nullptr;
+    };
+
+    static LutPoolKey _lut_pool_key_3d(int edge);
+    static LutPoolKey _lut_pool_key_2d(int width, int height);
+    static bool _lut_texture_matches(const OcioLut& lut, const LutPoolKey& key);
+    QRhiTexture* _acquire_lut_texture(const LutPoolKey& key);
+    void _release_lut_texture(QRhiTexture* texture, const LutPoolKey& key);
+    void _drain_lut_texture_pool();
 
     struct TextureState {
         QRhiTexture* texture = nullptr;
@@ -419,6 +445,8 @@ private:
     std::vector<OcioLut> _active_ocio_luts;
     std::vector<std::string> _ocio_lut_slot_dims; // "2D" or "3D" per slot index
     int _pipeline_lut_count = 0; // LUT slots baked into current SRB layout
+    static constexpr size_t kLutTexturePoolCapacity = 8;
+    std::vector<LutPoolEntry> _lut_texture_pool;
 
     // Per-source (per texA) SRBs for tile compare — layout-compatible with _pipeline
     std::unordered_map<QRhiTexture*, QRhiShaderResourceBindings*> _tileSrbCache;

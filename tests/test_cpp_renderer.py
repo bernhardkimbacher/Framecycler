@@ -113,11 +113,39 @@ class TestCppRenderer(unittest.TestCase):
             "staging_waits",
             "textures_created",
             "textures_pooled_reuses",
+            "lut_textures_pooled_reuses",
             "last_upload_ms",
             "last_render_ms",
         ):
             self.assertIn(key, stats)
             self.assertIsInstance(stats[key], (int, float))
+
+    def test_ocio_lut_pool_counter_exposed(self):
+        """Same-size LUT reupload path exposes lut_textures_pooled_reuses (finding #9).
+
+        Full GPU reuse requires an active RHI present; without it the counter stays 0
+        but clear/reupload must not raise and the field must remain in debug_stats.
+        """
+        renderer = framecycler_engine.RhiRenderer()
+        # 4x1 single-channel path
+        data_1d = [0.0, 0.33, 0.66, 1.0]
+        renderer.set_ocio_lut_slot_dims(["2D"])
+        renderer.upload_ocio_lut_2d(0, 4, 1, 1, data_1d)
+        renderer.clear_ocio_luts()
+        renderer.set_ocio_lut_slot_dims(["2D"])
+        renderer.upload_ocio_lut_2d(0, 4, 1, 1, data_1d)
+        stats = renderer.get_debug_stats()
+        self.assertIn("lut_textures_pooled_reuses", stats)
+        self.assertGreaterEqual(stats["lut_textures_pooled_reuses"], 0)
+        # 3D same-size round-trip API
+        edge = 2
+        cube = [0.0] * (edge * edge * edge * 3)
+        renderer.set_ocio_lut_slot_dims(["3D"])
+        renderer.upload_ocio_lut_3d(0, edge, cube)
+        renderer.clear_ocio_luts()
+        renderer.set_ocio_lut_slot_dims(["3D"])
+        renderer.upload_ocio_lut_3d(0, edge, cube)
+        self.assertEqual(renderer.pipeline_lut_count(), 0)
 
 
 if __name__ == "__main__":

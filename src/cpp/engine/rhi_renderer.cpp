@@ -1047,17 +1047,11 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
             }
         }
         if (_ocio_luts_dirty) {
-            // Destroy old active textures first (since we are on the render thread!)
-            for (auto& lut : _active_ocio_luts) {
-                if (lut.texture) {
-                    lut.texture->destroy();
-                    delete lut.texture;
-                    lut.texture = nullptr;
-                }
-            }
+            // Rebuild active LUTs from pending. Prefer keeping same-size textures
+            // (in-slot reuse); otherwise release into the LUT free-list.
+            std::vector<OcioLut> previous = std::move(_active_ocio_luts);
             _active_ocio_luts.clear();
 
-            // Build new active LUTs list from pending
             for (const auto& pending : _pending_ocio_luts) {
                 while (static_cast<int>(_active_ocio_luts.size()) <= pending.index) {
                     _active_ocio_luts.push_back(OcioLut());
@@ -1070,6 +1064,28 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
                 lut.channels = pending.channels;
                 lut.rgba_data = pending.rgba_data;
                 lut.dirty = true;
+
+                const LutPoolKey want = pending.is_3d
+                    ? _lut_pool_key_3d(pending.size)
+                    : _lut_pool_key_2d(pending.width, pending.height);
+                if (pending.index < static_cast<int>(previous.size())
+                    && previous[pending.index].texture
+                    && _lut_texture_matches(previous[pending.index], want)) {
+                    lut.texture = previous[pending.index].texture;
+                    previous[pending.index].texture = nullptr;
+                    _debug_stats.lut_textures_pooled_reuses++;
+                }
+            }
+
+            for (auto& old : previous) {
+                if (!old.texture) {
+                    continue;
+                }
+                const LutPoolKey key = old.is_3d
+                    ? _lut_pool_key_3d(old.size)
+                    : _lut_pool_key_2d(old.width, old.height);
+                _release_lut_texture(old.texture, key);
+                old.texture = nullptr;
             }
             _ocio_luts_dirty = false;
         }
@@ -3117,14 +3133,20 @@ void RhiRenderer::upload_texture_3d(OcioLut& lut, QRhiResourceUpdateBatch* batch
         return;
     }
 
-    if (lut.texture) {
-        lut.texture->destroy();
-        delete lut.texture;
+    const LutPoolKey key = _lut_pool_key_3d(lut.size);
+    if (!_lut_texture_matches(lut, key)) {
+        if (lut.texture) {
+            // Dim mismatch after field update — cannot recover old pool key; destroy.
+            lut.texture->destroy();
+            delete lut.texture;
+            lut.texture = nullptr;
+        }
+        lut.texture = _acquire_lut_texture(key);
     }
 
-    // depth > 0 implies ThreeDimensional; sampleCount must stay 1 (not the flag value).
-    lut.texture = _rhi->newTexture(QRhiTexture::RGBA32F, lut.size, lut.size, lut.size);
-    lut.texture->create();
+    if (!lut.texture) {
+        return;
+    }
 
     int rowStride = lut.size * 4 * sizeof(float);
     std::vector<QRhiTextureUploadEntry> entries;
@@ -3161,13 +3183,19 @@ void RhiRenderer::upload_texture_2d_lut(OcioLut& lut, QRhiResourceUpdateBatch* b
         return;
     }
 
-    if (lut.texture) {
-        lut.texture->destroy();
-        delete lut.texture;
+    const LutPoolKey key = _lut_pool_key_2d(lut.width, lut.height);
+    if (!_lut_texture_matches(lut, key)) {
+        if (lut.texture) {
+            lut.texture->destroy();
+            delete lut.texture;
+            lut.texture = nullptr;
+        }
+        lut.texture = _acquire_lut_texture(key);
     }
 
-    lut.texture = _rhi->newTexture(QRhiTexture::RGBA32F, QSize(lut.width, lut.height));
-    lut.texture->create();
+    if (!lut.texture) {
+        return;
+    }
 
     const int rowStride = lut.width * 4 * static_cast<int>(sizeof(float));
     QByteArray data = QByteArray::fromRawData(
@@ -3188,6 +3216,96 @@ void RhiRenderer::upload_texture_2d_lut(OcioLut& lut, QRhiResourceUpdateBatch* b
     } else {
         update_srb_resources();
     }
+}
+
+RhiRenderer::LutPoolKey RhiRenderer::_lut_pool_key_3d(int edge)
+{
+    LutPoolKey key;
+    key.is_3d = true;
+    key.width = edge;
+    key.height = edge;
+    key.depth = edge;
+    return key;
+}
+
+RhiRenderer::LutPoolKey RhiRenderer::_lut_pool_key_2d(int width, int height)
+{
+    LutPoolKey key;
+    key.is_3d = false;
+    key.width = width;
+    key.height = height;
+    key.depth = 0;
+    return key;
+}
+
+bool RhiRenderer::_lut_texture_matches(const OcioLut& lut, const LutPoolKey& key)
+{
+    if (!lut.texture) {
+        return false;
+    }
+    if (key.is_3d) {
+        return lut.is_3d && lut.size > 0 && lut.size == key.width && lut.size == key.depth;
+    }
+    return !lut.is_3d && lut.width == key.width && lut.height == key.height;
+}
+
+QRhiTexture* RhiRenderer::_acquire_lut_texture(const LutPoolKey& key)
+{
+    if (!_rhi) {
+        return nullptr;
+    }
+    for (size_t i = 0; i < _lut_texture_pool.size(); ++i) {
+        if (_lut_texture_pool[i].key == key && _lut_texture_pool[i].texture) {
+            QRhiTexture* tex = _lut_texture_pool[i].texture;
+            _lut_texture_pool.erase(_lut_texture_pool.begin() + static_cast<std::ptrdiff_t>(i));
+            _debug_stats.lut_textures_pooled_reuses++;
+            return tex;
+        }
+    }
+
+    QRhiTexture* tex = nullptr;
+    if (key.is_3d) {
+        tex = _rhi->newTexture(QRhiTexture::RGBA32F, key.width, key.height, key.depth);
+    } else {
+        tex = _rhi->newTexture(QRhiTexture::RGBA32F, QSize(key.width, key.height));
+    }
+    if (tex) {
+        tex->create();
+        _debug_stats.textures_created++;
+    }
+    return tex;
+}
+
+void RhiRenderer::_release_lut_texture(QRhiTexture* texture, const LutPoolKey& key)
+{
+    if (!texture) {
+        return;
+    }
+    if (texture == _placeholderLut2D || texture == _placeholderLut3D) {
+        return;
+    }
+    if (_lut_texture_pool.size() < kLutTexturePoolCapacity
+        && ((key.is_3d && key.depth > 0) || (!key.is_3d && key.width > 0 && key.height > 0))) {
+        LutPoolEntry entry;
+        entry.key = key;
+        entry.texture = texture;
+        _lut_texture_pool.push_back(entry);
+        return;
+    }
+    texture->destroy();
+    delete texture;
+}
+
+void RhiRenderer::_drain_lut_texture_pool()
+{
+    for (auto& entry : _lut_texture_pool) {
+        if (entry.texture) {
+            entry.texture->destroy();
+            delete entry.texture;
+            entry.texture = nullptr;
+        }
+    }
+    _lut_texture_pool.clear();
 }
 
 void RhiRenderer::_release_gpu_resources() {
@@ -3233,11 +3351,15 @@ void RhiRenderer::_release_gpu_resources() {
 
     for (auto& lut : _active_ocio_luts) {
         if (lut.texture) {
-            lut.texture->destroy();
-            delete lut.texture;
+            const LutPoolKey key = lut.is_3d
+                ? _lut_pool_key_3d(lut.size)
+                : _lut_pool_key_2d(lut.width, lut.height);
+            _release_lut_texture(lut.texture, key);
+            lut.texture = nullptr;
         }
     }
     _active_ocio_luts.clear();
+    _drain_lut_texture_pool();
 
     // Placeholders are destroyed in shutdown_rhi_on_thread after this.
 }

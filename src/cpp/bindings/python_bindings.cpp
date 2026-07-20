@@ -918,6 +918,7 @@ PYBIND11_MODULE(framecycler_engine, m) {
             d["staging_waits"] = s.staging_waits;
             d["textures_created"] = s.textures_created;
             d["textures_pooled_reuses"] = s.textures_pooled_reuses;
+            d["lut_textures_pooled_reuses"] = s.lut_textures_pooled_reuses;
             d["pipeline_lut_count"] = s.pipeline_lut_count;
             return d;
         })
