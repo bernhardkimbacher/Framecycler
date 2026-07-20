@@ -94,7 +94,7 @@ void main() {
     if (uFrame.sampleMode == 1) {
         // NV12 biplanar: texA = luma (R), texB = chroma (RG). BT.709.
         float y = texture(texA, vUV).r;
-        float2 cbcr = texture(texB, vUV).rg;
+        vec2 cbcr = texture(texB, vUV).rg;
         float cb = cbcr.x - 0.5;
         float cr = cbcr.y - 0.5;
         float r = y + 1.5748 * cr;
