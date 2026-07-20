@@ -61,6 +61,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
+          # Runner C:\vcpkg is often a shallow/stale clone; fetch the pinned
+          # builtin-baseline so `git show <sha>:versions/baseline.json` works.
+          BASELINE=$(${{ matrix.python }} -c "import json; print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          git -C "$VCPKG_INSTALLATION_ROOT" fetch --depth=1 origin "$BASELINE"
           echo "set(VCPKG_BUILD_TYPE release)" >> "$VCPKG_INSTALLATION_ROOT/triplets/x64-windows.cmake"
           # Manifest mode: pinned openimageio + ffmpeg via vcpkg.json
           vcpkg install --triplet x64-windows --x-manifest-root=.

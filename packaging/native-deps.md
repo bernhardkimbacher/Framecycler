@@ -17,6 +17,8 @@ installed packages drift outside the expected major.minor (see
 
 [`vcpkg.json`](../vcpkg.json) pins packages and a `builtin-baseline`. CI/package
 workflows install from the manifest root instead of floating package names.
+Windows runners ship a shallow/stale `C:\vcpkg`; workflows `git fetch` the
+pinned baseline commit before `vcpkg install` so version resolution works.
 
 ## macOS / Linux
 
