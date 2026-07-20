@@ -50,12 +50,13 @@ jobs:
         if: runner.os == 'Windows'
         uses: actions/cache@v4
         with:
+          # Manifest mode installs to ./vcpkg_installed (not C:\vcpkg\installed).
           path: |
-            ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
+            vcpkg_installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}/downloads
-          key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json', '**/CMakeLists.txt') }}
+          key: ${{ runner.os }}-vcpkg-manifest-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-
+            ${{ runner.os }}-vcpkg-manifest-
 
       - name: Install system dependencies (Windows)
         if: runner.os == 'Windows'

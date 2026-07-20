@@ -20,6 +20,8 @@ workflows install from the manifest root instead of floating package names.
 Windows runners ship a shallow/stale `C:\vcpkg`; workflows `git fetch` +
 `git reset --hard` to the pinned baseline (then re-bootstrap) before
 `vcpkg install` so the on-disk `ports/` and `versions/` match `baseline.json`.
+Manifest mode installs into `./vcpkg_installed` (cached in CI along with
+`C:\vcpkg\downloads`); classic `C:\vcpkg\installed` is unused.
 
 ## macOS / Linux
 

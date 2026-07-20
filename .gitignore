@@ -14,6 +14,7 @@ build/
 bin/
 lib/
 .qt/
+vcpkg_installed/
 CMakeCache.txt
 CMakeFiles/
 Makefile
