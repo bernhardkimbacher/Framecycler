@@ -945,9 +945,16 @@ void RhiRenderer::request_redraw()
 
 RhiRenderer::DebugStats RhiRenderer::get_debug_stats() const
 {
-    DebugStats stats = _debug_stats;
-    stats.pipeline_lut_count = _pipeline_lut_count;
-    return stats;
+    std::lock_guard<std::mutex> lock(_debug_stats_mutex);
+    return _debug_stats_published;
+}
+
+void RhiRenderer::_publish_debug_stats()
+{
+    DebugStats snap = _debug_stats;
+    snap.pipeline_lut_count = _pipeline_lut_count;
+    std::lock_guard<std::mutex> lock(_debug_stats_mutex);
+    _debug_stats_published = snap;
 }
 
 int RhiRenderer::pipeline_lut_count() const
@@ -1610,6 +1617,7 @@ void RhiRenderer::render_frame()
     _debug_stats.last_render_ms = std::chrono::duration<double, std::milli>(frame_end - frame_start).count();
     _debug_stats.last_upload_jobs = _debug_stats.last_upload_count;
     _debug_stats.upload_ms_total += _debug_stats.last_upload_ms;
+    _publish_debug_stats();
 
     // Idle GPU warming: keep rendering while the display cache can still absorb
     // CPU-cached frames ahead of the playhead.

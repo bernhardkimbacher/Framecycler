@@ -144,10 +144,20 @@ class CacheEngine:
     def _python_decode_frame(self, frame_index: int) -> bool:
         """Called from C++ PrefetchEngine workers under the GIL for PythonFallback sources."""
         try:
-            frame_data = self.decoder.read_frame(
-                frame_index, resolution_scale=self.resolution_scale
-            )
+            mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
+            try:
+                frame_data = self.decoder.read_frame(
+                    frame_index,
+                    resolution_scale=self.resolution_scale,
+                    missing_frame_mode=mode,
+                )
+            except TypeError:
+                frame_data = self.decoder.read_frame(
+                    frame_index, resolution_scale=self.resolution_scale
+                )
             img, channels = self._prepare_cache_image(frame_data["data"])
+            if img.size == 0:
+                return False
             self.native_cache.write_frame(frame_index, img.shape[1], img.shape[0], channels, img)
             return True
         except Exception as exc:

@@ -272,6 +272,51 @@ class TestCppCache(unittest.TestCase):
         self.assertFalse(cache.has_frame(0))
         self.assertEqual(cache.get_cached_frames(), [])
 
+    def test_write_frame_rejects_empty(self):
+        cache = framecycler_engine.CacheManager(0.1)
+        empty = np.zeros((0, 0, 4), dtype=np.float16)
+        cache.write_frame(7, 0, 0, 4, empty)
+        self.assertFalse(cache.has_frame(7))
+        # Mismatched size vs dims
+        data = np.zeros((4, 4, 4), dtype=np.float16)
+        cache.write_frame(8, 4, 4, 4, data[:2])  # wrong element count via binding uses full array size
+        # Binding passes info.size from the array; pass explicit wrong dims instead:
+        cache.write_frame(8, 8, 8, 4, data)
+        self.assertFalse(cache.has_frame(8))
+        cache.write_frame(9, 4, 4, 4, data)
+        self.assertTrue(cache.has_frame(9))
+
+    def test_direction_aware_eviction_prefers_behind(self):
+        # ~1.22 MB/frame; 0.0025 GB ≈ 2.68 MB fits two frames, third forces eviction.
+        cache = framecycler_engine.CacheManager(0.0025)
+        w, h, c = 400, 400, 4
+        ahead = np.ones((h, w, c), dtype=np.float16) * np.float16(0.2)
+        behind = np.ones((h, w, c), dtype=np.float16) * np.float16(0.3)
+
+        # Play forward at frame 50; behind=40, ahead=60 — same circular distance.
+        cache.set_playhead(50, 1, 0, 100)
+        cache.write_frame(40, w, h, c, behind)
+        cache.write_frame(60, w, h, c, ahead)
+        self.assertTrue(cache.has_frame(40))
+        self.assertTrue(cache.has_frame(60))
+
+        # Inserting a third frame must evict behind (40) before ahead (60).
+        new = np.ones((h, w, c), dtype=np.float16) * np.float16(0.4)
+        cache.write_frame(50, w, h, c, new)
+        self.assertTrue(cache.has_frame(50))
+        self.assertFalse(cache.has_frame(40), "should evict behind playhead first")
+        self.assertTrue(cache.has_frame(60), "look-ahead should survive")
+
+        # Reverse direction: behind is now 60.
+        cache.clear()
+        cache.set_playhead(50, -1, 0, 100)
+        cache.write_frame(40, w, h, c, behind)
+        cache.write_frame(60, w, h, c, ahead)
+        cache.write_frame(50, w, h, c, new)
+        self.assertTrue(cache.has_frame(50))
+        self.assertFalse(cache.has_frame(60), "should evict behind (forward on timeline) when reversing")
+        self.assertTrue(cache.has_frame(40))
+
 
 class TestNativeDecodePath(unittest.TestCase):
     @classmethod

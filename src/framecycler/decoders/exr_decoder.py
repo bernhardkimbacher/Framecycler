@@ -2,7 +2,7 @@ import os
 import re
 import numpy as np
 from typing import Dict, Any, List, Tuple, Optional
-from .base import BaseDecoder
+from .base import BaseDecoder, pattern_frame_regex, placeholder_rgba, _frame_token_match
 from . import image_io
 from ..core.timecode import Timecode
 
@@ -39,7 +39,7 @@ class EXRDecoder(BaseDecoder):
             # Fallback to single file
             base = os.path.basename(pattern)
             name_part, ext = os.path.splitext(base)
-            match = re.search(r'(\d+)(?:\D*)$', name_part)
+            match = _frame_token_match(name_part) or re.search(r"(\d+)(?:\D*)$", name_part)
             frame_num = int(match.group(1)) if match else 0
             return [(frame_num, os.path.abspath(pattern))]
             
@@ -50,14 +50,8 @@ class EXRDecoder(BaseDecoder):
         if not os.path.isdir(dir_name):
             return []
             
-        # Convert #### to a regex match group for digits
-        regex_pattern = base_name.replace("####", r"(\d+)")
-        # Convert %04d to regex
-        regex_pattern = re.sub(r"%\d*d", r"(\\d+)", regex_pattern)
-        
-        # Escape other characters for regex
-        regex_pattern = "^" + regex_pattern.replace(".", r"\.") + "$"
-        regex_compiled = re.compile(regex_pattern)
+        # Convert #### / %04d to a fixed-width digit capture (not variable \d+).
+        regex_compiled = re.compile(pattern_frame_regex(base_name))
         
         matched_files = []
         for file in os.listdir(dir_name):
@@ -98,25 +92,41 @@ class EXRDecoder(BaseDecoder):
     def get_metadata(self) -> Dict[str, Any]:
         return self.metadata
 
-    def read_frame(self, frame_index: int, layer: Optional[str] = None, resolution_scale: float = 1.0) -> Dict[str, Any]:
+    def read_frame(
+        self,
+        frame_index: int,
+        layer: Optional[str] = None,
+        resolution_scale: float = 1.0,
+        missing_frame_mode: str = "Nearest Frame",
+    ) -> Dict[str, Any]:
         if frame_index < self.start_frame or frame_index > self.end_frame:
             raise IndexError(f"Frame index {frame_index} out of bounds ({self.start_frame}-{self.end_frame})")
-            
-        # Get path for the requested frame, or closest available frame if missing
-        file_path = self.frame_map.get(frame_index)
-        if not file_path:
-            closest_frame = min(self.existing_frame_numbers, key=lambda x: abs(x - frame_index))
-            print(
-                f"ExrDecoder: frame {frame_index} not in frame_map, "
-                f"serving nearest available frame {closest_frame}"
-            )
-            file_path = self.frame_map[closest_frame]
 
-        read_layer = layer if layer is not None else self.active_layer
-        img = image_io.read_pixels(file_path, layer=read_layer, resolution_scale=resolution_scale)
-        
+        file_path = self.frame_map.get(frame_index)
+        img = None
+        if not file_path:
+            mode = missing_frame_mode or "Nearest Frame"
+            if mode == "Nearest Frame" and self.existing_frame_numbers:
+                closest_frame = min(self.existing_frame_numbers, key=lambda x: abs(x - frame_index))
+                print(
+                    f"ExrDecoder: frame {frame_index} not in frame_map, "
+                    f"serving nearest available frame {closest_frame}"
+                )
+                file_path = self.frame_map[closest_frame]
+            else:
+                w = int(self.metadata.get("width", 64) or 64)
+                h = int(self.metadata.get("height", 64) or 64)
+                if resolution_scale > 0 and resolution_scale < 1.0:
+                    w = max(1, int(w * resolution_scale))
+                    h = max(1, int(h * resolution_scale))
+                img = placeholder_rgba(w, h, mode)
+
+        if img is None:
+            read_layer = layer if layer is not None else self.active_layer
+            img = image_io.read_pixels(file_path, layer=read_layer, resolution_scale=resolution_scale)
+
         tc = Timecode.frame_to_timecode(frame_index, self.metadata["fps"], 0)
-        
+
         return {
             "data": img,
             "channels": self.metadata["channels"],

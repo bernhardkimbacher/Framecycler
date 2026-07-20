@@ -105,7 +105,7 @@ private:
 
     float _resolution_scale = 1.0f;
     std::string _layer;
-    std::string _fallback_mode = "Flat Gray";
+    std::string _fallback_mode = "Nearest Frame";
     int _placeholder_width = 0;
     int _placeholder_height = 0;
     PrefetchDecodeMode _decode_mode = PrefetchDecodeMode::NativePath;

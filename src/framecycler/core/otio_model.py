@@ -425,13 +425,15 @@ def _shot_name_from_path(path: str) -> str:
 
 def _sequence_parts_from_path(path: str) -> Optional[Dict[str, Any]]:
     """Derive ImageSequenceReference fields from a representative file path."""
+    from ..decoders.base import _frame_token_match
+
     abs_path = os.path.abspath(path)
     if not os.path.isfile(abs_path):
         return None
     dir_name = os.path.dirname(abs_path)
     base_name = os.path.basename(abs_path)
     name_part, ext = os.path.splitext(base_name)
-    match = re.search(r"(\d+)(?:\D*)$", name_part)
+    match = _frame_token_match(name_part)
     if not match:
         return None
     digit_string = match.group(1)

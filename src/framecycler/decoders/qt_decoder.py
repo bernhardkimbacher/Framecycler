@@ -85,7 +85,12 @@ class QuickTimeDecoder(BaseDecoder):
     def get_metadata(self) -> Dict[str, Any]:
         return self.metadata
 
-    def read_frame(self, frame_index: int, resolution_scale: float = 1.0) -> Dict[str, Any]:
+    def read_frame(
+        self,
+        frame_index: int,
+        resolution_scale: float = 1.0,
+        missing_frame_mode: str = "Nearest Frame",
+    ) -> Dict[str, Any]:
         if frame_index < self.start_frame or frame_index > self.end_frame:
             raise IndexError(
                 f"Frame index {frame_index} out of bounds ({self.start_frame}-{self.end_frame})"

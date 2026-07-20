@@ -199,10 +199,21 @@ int GpuTextureCache::playhead_distance(const GpuFrameKey& key, int source_index)
         return 0;
     }
     const SourcePlayhead& ph = it->second;
-    int frame_count = std::max(1, ph.out_point - ph.in_point + 1);
-    int direct_dist = std::abs(key.decoder_frame - ph.playhead);
-    int wrapped_dist = std::abs(frame_count - direct_dist);
-    return std::min(direct_dist, wrapped_dist);
+    const int span = std::max(1, ph.out_point - ph.in_point + 1);
+    const int dir = (ph.direction >= 0) ? 1 : -1;
+    const int in_pt = ph.in_point;
+    const int f = ((key.decoder_frame - in_pt) % span + span) % span;
+    const int p = ((ph.playhead - in_pt) % span + span) % span;
+    const int steps_along_play =
+        (dir >= 0) ? ((f - p + span) % span) : ((p - f + span) % span);
+    const int circ = std::min(steps_along_play, span - steps_along_play);
+    bool behind = false;
+    if (steps_along_play != 0) {
+        const int steps_opposite = span - steps_along_play;
+        behind = steps_opposite <= steps_along_play;
+    }
+    // Higher score = better eviction victim (behind first, then furthest).
+    return (behind ? 1'000'000 : 0) + circ;
 }
 
 void GpuTextureCache::evict_before_insert(size_t incoming_bytes, int source_index)

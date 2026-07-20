@@ -19,7 +19,7 @@ struct DecodeResult {
 DecodeResult decode_frame(const std::string& file_path,
                           float resolution_scale,
                           const std::string& layer = "",
-                          const std::string& fallback_mode = "Flat Gray",
+                          const std::string& fallback_mode = "Nearest Frame",
                           int placeholder_width = 0,
                           int placeholder_height = 0);
 
@@ -37,7 +37,7 @@ bool decode_frame_into(const std::string& file_path,
                        int& out_height,
                        int& out_channels,
                        bool& wrote_placeholder,
-                       const std::string& fallback_mode = "Flat Gray",
+                       const std::string& fallback_mode = "Nearest Frame",
                        int placeholder_width = 0,
                        int placeholder_height = 0);
 
@@ -53,7 +53,7 @@ bool decode_with_allocator(const std::string& file_path,
                            int& out_height,
                            int& out_channels,
                            bool& wrote_placeholder,
-                           const std::string& fallback_mode = "Flat Gray",
+                           const std::string& fallback_mode = "Nearest Frame",
                            int placeholder_width = 0,
                            int placeholder_height = 0);
 

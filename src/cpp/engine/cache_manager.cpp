@@ -82,6 +82,14 @@ size_t CacheManager::_find_unmapped_inactive_slot() const {
 }
 
 void CacheManager::write_frame(int frame_index, int width, int height, int channels, const uint16_t* pixel_data, size_t data_size) {
+    const size_t expected =
+        static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(channels);
+    if (!pixel_data || width <= 0 || height <= 0 || channels <= 0 || data_size == 0
+        || data_size != expected) {
+        // Reject empty/mismatched payloads so has_frame never becomes a sticky poison hit.
+        return;
+    }
+
     std::unique_lock<std::shared_mutex> lock(_mutex);
 
     if (_max_bytes == 0) {
@@ -282,10 +290,14 @@ void CacheManager::commit_write_slot(int frame_index, bool success)
     auto& slot = _slots[slot_idx];
     // Only surface the frame if it was acquired in the current epoch. A clear()
     // that ran mid-decode bumps the epoch so stale layer/resolution pixels stay hidden.
-    if (success && slot.epoch == _epoch) {
+    const size_t expected =
+        static_cast<size_t>(slot.width) * static_cast<size_t>(slot.height)
+        * static_cast<size_t>(slot.channels);
+    if (success && slot.epoch == _epoch && slot.width > 0 && slot.height > 0 && slot.channels > 0
+        && slot.data.size() == expected) {
         slot.active = true;
     } else {
-        // Unmap failed / stale decode so the slot can be reused; keep capacity.
+        // Unmap failed / stale / empty decode so the slot can be reused; keep capacity.
         slot.active = false;
         _unmap_slot(slot_idx);
     }
@@ -354,23 +366,6 @@ bool CacheManager::decode_and_cache_frame(int frame_index, const std::string& fi
     }
     release_decode_claim(frame_index);
     return ok;
-}
-
-const uint16_t* CacheManager::get_frame_data(int frame_index, int& width, int& height, int& channels) {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-    auto it = _frame_to_slot.find(frame_index);
-    if (it == _frame_to_slot.end()) {
-        return nullptr;
-    }
-    size_t idx = it->second;
-    const auto& slot = _slots[idx];
-    if (!slot.active) {
-        return nullptr;
-    }
-    width = slot.width;
-    height = slot.height;
-    channels = slot.channels;
-    return slot.data.data();
 }
 
 bool CacheManager::get_frame_dimensions(int frame_index, int& width, int& height, int& channels) {
@@ -514,7 +509,10 @@ size_t CacheManager::_find_slot_to_evict(int frame_count) {
     }
 
     size_t furthest_idx = static_cast<size_t>(-1);
-    int max_distance = -1;
+    int best_score = -1;
+    const int span = std::max(1, frame_count);
+    const int dir = (_play_direction >= 0) ? 1 : -1;
+    const int in_pt = _in_point;
 
     for (size_t i = 0; i < _slots.size(); ++i) {
         auto sit = _slot_to_frame.find(i);
@@ -529,12 +527,21 @@ size_t CacheManager::_find_slot_to_evict(int frame_count) {
             continue; // handled above
         }
 
-        int direct_dist = std::abs(frame_num - _current_playhead);
-        int wrapped_dist = std::abs(frame_count - direct_dist);
-        int dist = std::min(direct_dist, wrapped_dist);
+        const int f = ((frame_num - in_pt) % span + span) % span;
+        const int p = ((_current_playhead - in_pt) % span + span) % span;
+        const int steps_along_play =
+            (dir >= 0) ? ((f - p + span) % span) : ((p - f + span) % span);
+        const int circ = std::min(steps_along_play, span - steps_along_play);
+        // Prefer victims behind the playhead (opposite play direction).
+        bool behind = false;
+        if (steps_along_play != 0) {
+            const int steps_opposite = span - steps_along_play;
+            behind = steps_opposite <= steps_along_play;
+        }
+        const int score = (behind ? 1'000'000 : 0) + circ;
 
-        if (dist > max_distance) {
-            max_distance = dist;
+        if (score > best_score) {
+            best_score = score;
             furthest_idx = i;
         }
     }

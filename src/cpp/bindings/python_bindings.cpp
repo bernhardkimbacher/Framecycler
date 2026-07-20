@@ -379,21 +379,26 @@ PYBIND11_MODULE(framecycler_engine, m) {
             }
         })
         .def("get_frame_data", [](CacheManager& self, int frame_index) -> py::object {
-            // Copy under CacheManager locks. Returning a view into _slots is unsafe:
-            // concurrent write_frame can reallocate the slot vector and dangling
-            // pointers segfault (observed on Ubuntu/libstdc++ during prefetch tests).
-            int width = 0, height = 0, channels = 0;
+            // Owned float16 copy taken under a single shared lock via with_active_frame.
             auto* owned = new std::vector<uint16_t>();
+            int width = 0;
+            int height = 0;
+            int channels = 0;
             bool ok = false;
             {
                 py::gil_scoped_release release;
-                if (self.get_frame_dimensions(frame_index, width, height, channels)
-                    && width > 0 && height > 0 && channels > 0) {
-                    owned->resize(static_cast<size_t>(width) * height * channels);
-                    ok = self.copy_frame_data(frame_index, owned->data(), owned->size());
-                }
+                ok = self.with_active_frame(
+                    frame_index,
+                    [&](const uint16_t* data, int w, int h, int c) {
+                        width = w;
+                        height = h;
+                        channels = c;
+                        const size_t n =
+                            static_cast<size_t>(w) * static_cast<size_t>(h) * static_cast<size_t>(c);
+                        owned->assign(data, data + n);
+                    });
             }
-            if (!ok) {
+            if (!ok || owned->empty() || width <= 0 || height <= 0 || channels <= 0) {
                 delete owned;
                 return py::none();
             }
@@ -419,7 +424,7 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("bytes_per_frame", &CacheManager::bytes_per_frame)
         .def("decode_and_cache_frame", &CacheManager::decode_and_cache_frame,
              py::arg("frame_index"), py::arg("file_path"), py::arg("resolution_scale"),
-             py::arg("layer") = "", py::arg("fallback_mode") = "Flat Gray",
+             py::arg("layer") = "", py::arg("fallback_mode") = "Nearest Frame",
              py::arg("placeholder_width") = 0, py::arg("placeholder_height") = 0,
              py::call_guard<py::gil_scoped_release>())
         .def("try_claim_decode", &CacheManager::try_claim_decode)
@@ -470,7 +475,7 @@ PYBIND11_MODULE(framecycler_engine, m) {
             &PrefetchEngine::set_options,
             py::arg("resolution_scale"),
             py::arg("layer") = "",
-            py::arg("fallback_mode") = "Flat Gray",
+            py::arg("fallback_mode") = "Nearest Frame",
             py::arg("placeholder_width") = 0,
             py::arg("placeholder_height") = 0,
             py::arg("decode_mode") = PrefetchDecodeMode::NativePath)

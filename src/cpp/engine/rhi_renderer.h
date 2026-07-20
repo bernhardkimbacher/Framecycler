@@ -363,6 +363,9 @@ private:
     QSize _pending_size;
     QWindow* _window = nullptr;
     DebugStats _debug_stats;
+    DebugStats _debug_stats_published;
+    mutable std::mutex _debug_stats_mutex;
+    void _publish_debug_stats();
 
     // Double-buffered inputs
     struct PendingOcioLut {
