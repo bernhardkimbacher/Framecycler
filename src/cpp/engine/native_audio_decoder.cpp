@@ -6,6 +6,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
+#include <libavutil/version.h>
 #include <libswresample/swresample.h>
 }
 
@@ -148,15 +149,16 @@ bool NativeAudioDecoder::_ensure_swr(AVFrame* frame)
         _swr = nullptr;
     }
 
+    int ret = -1;
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    // FFmpeg 5.1+ / libavutil 57+: AVChannelLayout API
     AVChannelLayout out_layout;
     av_channel_layout_default(&out_layout, kOutputChannels);
-
-#if LIBAVUTIL_VERSION_MAJOR >= 57
     AVChannelLayout in_layout = frame->ch_layout;
     if (in_layout.nb_channels <= 0) {
         av_channel_layout_default(&in_layout, std::max(1, in_ch));
     }
-    int ret = swr_alloc_set_opts2(
+    ret = swr_alloc_set_opts2(
         &_swr,
         &out_layout,
         AV_SAMPLE_FMT_FLT,
@@ -167,6 +169,7 @@ bool NativeAudioDecoder::_ensure_swr(AVFrame* frame)
         0,
         nullptr);
 #else
+    // Older Ubuntu/system FFmpeg: legacy channel_layout mask API
     int64_t in_layout = frame->channel_layout;
     if (!in_layout) {
         in_layout = av_get_default_channel_layout(std::max(1, in_ch));
@@ -181,7 +184,7 @@ bool NativeAudioDecoder::_ensure_swr(AVFrame* frame)
         in_rate,
         0,
         nullptr);
-    int ret = _swr ? 0 : -1;
+    ret = _swr ? 0 : -1;
 #endif
     if (ret < 0 || !_swr || swr_init(_swr) < 0) {
         if (_swr) {
