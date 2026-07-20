@@ -45,7 +45,33 @@ class QuickTimeDecoder(BaseDecoder):
             "timecode_start": self.timecode_start,
             "channels": self.channels,
             "file_metadata": dict(probe.get("file_metadata") or {}),
+            "has_audio": False,
         }
+        self._audio_peaks: list[float] = []
+        try:
+            audio = framecycler_engine.NativeAudioDecoder()
+            if audio.open(self.file_path) and audio.has_audio():
+                self.metadata["has_audio"] = True
+            audio.close()
+        except Exception:
+            pass
+
+    def ensure_audio_peaks(self, peaks_per_second: int = 300) -> list[float]:
+        if self._audio_peaks:
+            return self._audio_peaks
+        if not self.metadata.get("has_audio"):
+            return []
+        try:
+            audio = framecycler_engine.NativeAudioDecoder()
+            if not audio.open(self.file_path) or not audio.has_audio():
+                audio.close()
+                return []
+            peaks = audio.build_peaks(peaks_per_second)
+            audio.close()
+            self._audio_peaks = [float(x) for x in peaks.tolist()] if hasattr(peaks, "tolist") else list(peaks)
+            return self._audio_peaks
+        except Exception:
+            return []
 
     def get_native_movie_decoder(self):
         return self._native

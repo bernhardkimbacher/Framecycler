@@ -105,6 +105,7 @@ class MediaPool:
         cache = CacheEngine(decoder, self.settings, resolution_scale=1.0)
         meta = decoder.get_metadata()
         frame_count = int(meta.get("frame_count", 0))
+        has_audio = bool(meta.get("has_audio", False))
         return MediaSource(
             path=path,
             decoder=decoder,
@@ -117,6 +118,8 @@ class MediaPool:
             pixel_aspect_ratio=float(meta.get("pixel_aspect_ratio", SQUARE_PIXEL_ASPECT)),
             metadata=meta,
             offline=False,
+            has_audio=has_audio,
+            audio_peaks=[],
         )
 
     def make_offline_placeholder(self, path: str, metadata: Optional[dict] = None) -> MediaSource:

@@ -56,6 +56,7 @@ class SettingsDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.addTab(self._build_general_tab(), "General")
+        tabs.addTab(self._build_audio_tab(), "Audio")
         tabs.addTab(self._build_packages_tab(), "Packages")
         layout.addWidget(tabs)
 
@@ -164,6 +165,70 @@ class SettingsDialog(QDialog):
 
         layout.addStretch(1)
         return page
+
+    def _build_audio_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        layout.addWidget(QLabel("Output Device:"))
+        self.audio_device_combo = QComboBox()
+        self.audio_device_combo.setMinimumWidth(320)
+        self._populate_audio_devices()
+        layout.addWidget(self.audio_device_combo)
+
+        refresh_row = QHBoxLayout()
+        btn_refresh = QPushButton("Refresh Devices")
+        btn_refresh.clicked.connect(self._populate_audio_devices)
+        refresh_row.addWidget(btn_refresh)
+        refresh_row.addStretch(1)
+        layout.addLayout(refresh_row)
+
+        hint = QLabel(
+            "System Default follows the OS output device. "
+            "Choose a specific device if Framecycler is routed to the wrong output."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #aaa;")
+        layout.addWidget(hint)
+
+        self.scrub_audio_check = QCheckBox("Scrub audio while seeking")
+        self.scrub_audio_check.setChecked(bool(self.settings.scrub_audio))
+        layout.addWidget(self.scrub_audio_check)
+
+        layout.addStretch(1)
+        return page
+
+    def _populate_audio_devices(self) -> None:
+        current = str(getattr(self.settings, "audio_output_device_id", "") or "")
+        self.audio_device_combo.blockSignals(True)
+        self.audio_device_combo.clear()
+        devices = []
+        try:
+            from .. import framecycler_engine
+
+            devices = list(framecycler_engine.list_audio_output_devices() or [])
+        except Exception:
+            devices = [{"id": "", "name": "System Default", "is_default": True}]
+        if not devices:
+            devices = [{"id": "", "name": "System Default", "is_default": True}]
+
+        selected_index = 0
+        for i, device in enumerate(devices):
+            device_id = str(device.get("id", "") or "")
+            name = str(device.get("name", "Device") or "Device")
+            label = name
+            if device.get("is_default") and device_id:
+                label = f"{name} (default)"
+            self.audio_device_combo.addItem(label, device_id)
+            if device_id == current:
+                selected_index = i
+        # If saved id is missing (unplugged), keep System Default selected but preserve
+        # the saved value until the user picks something else — match by id only.
+        if current and selected_index == 0 and self.audio_device_combo.itemData(0) != current:
+            self.audio_device_combo.insertItem(1, f"Unavailable device ({current[:8]}…)", current)
+            selected_index = 1
+        self.audio_device_combo.setCurrentIndex(selected_index)
+        self.audio_device_combo.blockSignals(False)
 
     def _build_packages_tab(self) -> QWidget:
         page = QWidget()
@@ -357,6 +422,11 @@ class SettingsDialog(QDialog):
         )
         self.settings.ocio_config_path = self.ocio_path_edit.text().strip()
         self.settings.missing_frame_mode = self.missing_frame_combo.currentText()
+        if hasattr(self, "audio_device_combo"):
+            device_id = self.audio_device_combo.currentData()
+            self.settings.audio_output_device_id = str(device_id or "")
+        if hasattr(self, "scrub_audio_check"):
+            self.settings.scrub_audio = bool(self.scrub_audio_check.isChecked())
 
         overrides: dict[str, bool] = {}
         for manifest in self._package_manifests:

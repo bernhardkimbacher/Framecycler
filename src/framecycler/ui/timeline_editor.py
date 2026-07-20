@@ -15,6 +15,7 @@ from .fonts import ui_font
 
 RULER_H = 22
 LANE_H = 22
+WAVEFORM_H = 28
 MARGIN_X = 10
 TRIM_HANDLE_W = 6
 MIN_PPF = 0.05
@@ -39,6 +40,7 @@ class TimelineSegmentInfo:
     global_start: int
     global_end: int
     versions: List[TimelineVersionInfo] = field(default_factory=list)
+    audio_peaks: List[float] = field(default_factory=list)
 
     @property
     def active_index(self) -> int:
@@ -84,6 +86,8 @@ class _DragMode(Enum):
 
 class TimelineEditor(QWidget):
     frame_changed = Signal(int)
+    scrub_started = Signal()  # playhead scrub drag began (mouse press)
+    scrub_finished = Signal()  # mouse released after playhead scrub drag
     in_out_changed = Signal(int, int)
     active_version_changed = Signal(int, int)  # shot_index, version_index
     shots_reordered = Signal(object)  # list[int] permutation
@@ -105,6 +109,7 @@ class TimelineEditor(QWidget):
         self.cached_frames: Set[int] = set()
         self.display_cached_frames: Set[int] = set()
         self.segments: List[TimelineSegmentInfo] = []
+        self.show_waveform = False
 
         self._view_start = 0.0
         self._ppf = 2.0
@@ -127,6 +132,21 @@ class TimelineEditor(QWidget):
         self.show_timecode = show_timecode
         self.fps = fps
         self.update()
+
+    def set_show_waveform(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self.show_waveform == enabled:
+            return
+        self.show_waveform = enabled
+        self.setMinimumHeight(64 + (WAVEFORM_H if enabled else 0))
+        self.update()
+
+    def set_segment_audio_peaks(self, shot_index: int, peaks: Sequence[float] | None) -> None:
+        for seg in self.segments:
+            if seg.index == shot_index:
+                seg.audio_peaks = list(peaks or [])
+                self.update()
+                return
 
     def set_range(self, start: int, end: int):
         old_start, old_end = self.start_frame, self.end_frame
@@ -223,10 +243,18 @@ class TimelineEditor(QWidget):
         return RULER_H
 
     def _body_height(self) -> int:
-        return max(LANE_H * 3, self.height() - RULER_H)
+        extra = WAVEFORM_H + 6 if self.show_waveform else 0
+        return max(LANE_H * 3 + extra, self.height() - RULER_H)
 
     def _display_lane_y(self) -> int:
-        return self._body_top() + self._body_height() // 2 - LANE_H // 2
+        # Keep display lane slightly above center so waveform fits below when enabled.
+        base = self._body_top() + self._body_height() // 2 - LANE_H // 2
+        if self.show_waveform:
+            return max(self._body_top() + 4, base - WAVEFORM_H // 2)
+        return base
+
+    def _waveform_lane_y(self) -> int:
+        return self._display_lane_y() + LANE_H + 3
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -349,10 +377,7 @@ class TimelineEditor(QWidget):
         self._drag_start_frame = self._frame_from_x(pos.x())
 
         if pos.y() < self._body_top():
-            self._drag = _DragMode.SCRUB
-            frame = self._frame_from_x(pos.x())
-            self.set_current_frame(frame)
-            self.frame_changed.emit(frame)
+            self._begin_scrub_drag(self._frame_from_x(pos.x()))
             return
 
         seg = self._segment_at_x(pos.x())
@@ -376,10 +401,7 @@ class TimelineEditor(QWidget):
                 self._preview_offset = 0.0
                 return
 
-        self._drag = _DragMode.SCRUB
-        frame = self._frame_from_x(pos.x())
-        self.set_current_frame(frame)
-        self.frame_changed.emit(frame)
+        self._begin_scrub_drag(self._frame_from_x(pos.x()))
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
@@ -454,6 +476,8 @@ class TimelineEditor(QWidget):
         if event.button() not in (Qt.LeftButton, Qt.MiddleButton):
             return
 
+        was_scrub_drag = self._drag == _DragMode.SCRUB
+
         if self._drag == _DragMode.STACK_VERTICAL and self._drag_shot >= 0:
             seg = next((s for s in self.segments if s.index == self._drag_shot), None)
             if seg is not None and seg.versions:
@@ -481,6 +505,14 @@ class TimelineEditor(QWidget):
         self._reorder_preview = None
         self.setCursor(Qt.ArrowCursor)
         self.update()
+        if was_scrub_drag:
+            self.scrub_finished.emit()
+
+    def _begin_scrub_drag(self, frame: int) -> None:
+        self._drag = _DragMode.SCRUB
+        self.set_current_frame(frame)
+        self.scrub_started.emit()
+        self.frame_changed.emit(frame)
 
     def _update_reorder_preview(self, x: int):
         if not self.segments:
@@ -547,6 +579,9 @@ class TimelineEditor(QWidget):
         # Segments / version stacks
         for seg in self._layout_segments_for_draw():
             self._paint_segment(painter, seg)
+
+        if self.show_waveform:
+            self._paint_waveforms(painter)
 
         # In/out brackets
         painter.setPen(QPen(QColor(255, 180, 0), 2))
@@ -655,6 +690,32 @@ class TimelineEditor(QWidget):
                 # Trim handles
                 painter.fillRect(rect.left(), rect.top(), 3, rect.height(), QColor(255, 200, 80))
                 painter.fillRect(rect.right() - 2, rect.top(), 3, rect.height(), QColor(255, 200, 80))
+
+    def _paint_waveforms(self, painter: QPainter) -> None:
+        y = self._waveform_lane_y()
+        h = WAVEFORM_H
+        mid = y + h // 2
+        painter.fillRect(MARGIN_X, y, self._track_width(), h, QBrush(QColor(28, 32, 36)))
+        painter.setPen(QPen(QColor(55, 60, 68)))
+        painter.drawLine(MARGIN_X, mid, MARGIN_X + self._track_width(), mid)
+        fill = QColor(90, 170, 130, 200)
+        for seg in self._layout_segments_for_draw():
+            peaks = seg.audio_peaks
+            if not peaks:
+                continue
+            x0 = self._x_from_frame(seg.global_start)
+            x1 = self._x_from_frame(seg.global_end + 1)
+            width = max(1, x1 - x0)
+            n = len(peaks)
+            for px in range(width):
+                # Map pixel column → peak bin
+                t = px / float(width)
+                bin_i = min(n - 1, int(t * n))
+                amp = max(0.0, min(1.0, float(peaks[bin_i])))
+                half = int(round((h // 2 - 1) * amp))
+                if half <= 0:
+                    continue
+                painter.fillRect(x0 + px, mid - half, 1, half * 2 + 1, fill)
 
     def _paint_playhead(self, painter: QPainter, body_top: int):
         x = self._x_from_frame(self.current_frame)

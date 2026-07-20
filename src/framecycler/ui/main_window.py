@@ -132,6 +132,8 @@ class MainWindow(QMainWindow):
         self._applied_cdl_key: str | None = None
         self._applied_input_colorspace_key: str | None = None
         self._transport_shot_key: tuple | None = None
+        self._timeline_scrub_gesture = False
+        self._scrub_epoch = 0
         self._transport_callbacks_wired = False
 
         self.playing = False
@@ -231,6 +233,8 @@ class MainWindow(QMainWindow):
         self._apply_renderer_cache_settings()
         self.viewport.wipe_changed.connect(self._on_wipe_moved)
         self.viewport.frame_scrubbed.connect(self._on_timeline_scrub)
+        self.viewport.scrub_started.connect(self._on_timeline_scrub_started)
+        self.viewport.scrub_finished.connect(self._on_timeline_scrub_finished)
         self.viewport.zoom_mode_changed.connect(self._sync_zoom_actions)
         self.viewport.zoom_mode_changed.connect(self._probe_on_view_changed)
 
@@ -250,6 +254,8 @@ class MainWindow(QMainWindow):
         # NLE timeline editor
         self.timeline = Timeline(self)
         self.timeline.frame_changed.connect(self._on_timeline_scrub)
+        self.timeline.scrub_started.connect(self._on_timeline_scrub_started)
+        self.timeline.scrub_finished.connect(self._on_timeline_scrub_finished)
         self.timeline.in_out_changed.connect(self._on_in_out_changed)
         self.timeline.active_version_changed.connect(self._on_active_version_changed)
         self.timeline.shots_reordered.connect(self._on_shot_order_changed)
@@ -414,6 +420,22 @@ class MainWindow(QMainWindow):
             self.btn_end,
         ):
             transport_layout.addWidget(btn)
+
+        self.btn_mute = self._make_transport_button("M", transport_font)
+        self.btn_mute.setToolTip("Mute audio")
+        self.btn_mute.setCheckable(True)
+        self.btn_mute.setChecked(bool(self.settings.audio_muted))
+        self.btn_mute.toggled.connect(self._on_audio_mute_toggled)
+        transport_layout.addWidget(self.btn_mute)
+
+        self.slider_volume = QSlider(Qt.Orientation.Horizontal)
+        self.slider_volume.setRange(0, 100)
+        self.slider_volume.setFixedWidth(90)
+        self.slider_volume.setValue(int(round(float(self.settings.audio_volume) * 100)))
+        self.slider_volume.setToolTip("Audio volume")
+        self.slider_volume.valueChanged.connect(self._on_audio_volume_changed)
+        transport_layout.addWidget(self.slider_volume)
+
         transport_layout.addStretch()
         viewer_layout.addLayout(transport_layout)
 
@@ -430,9 +452,11 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.main_splitter, stretch=1)
 
         self.timeline.set_display_options(self.settings.timecode_mode, self.fps)
+        self.timeline.set_show_waveform(bool(self.settings.timeline_show_waveform))
         self._update_readout_display()
         self._setup_hotkeys()
         self._build_menu()
+        self._apply_audio_settings_to_renderer()
         self.statusBar().showMessage("Ready.")
 
     def _build_menu(self):
@@ -501,6 +525,20 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, m=mode: self._set_zoom_mode(m))
             view_menu.addAction(act)
             self.zoom_actions.append((mode, act))
+
+        # Timeline menu
+        timeline_menu = menubar.addMenu("&Timeline")
+        self.act_show_waveform = QAction("Show Waveform", self)
+        self.act_show_waveform.setCheckable(True)
+        self.act_show_waveform.setChecked(bool(self.settings.timeline_show_waveform))
+        self.act_show_waveform.toggled.connect(self._on_show_waveform_toggled)
+        timeline_menu.addAction(self.act_show_waveform)
+
+        self.act_scrub_audio = QAction("Scrub Audio", self)
+        self.act_scrub_audio.setCheckable(True)
+        self.act_scrub_audio.setChecked(bool(self.settings.scrub_audio))
+        self.act_scrub_audio.toggled.connect(self._on_scrub_audio_toggled)
+        timeline_menu.addAction(self.act_scrub_audio)
 
         # Image menu
         image_menu = menubar.addMenu("&Image")
@@ -1690,9 +1728,26 @@ class MainWindow(QMainWindow):
                     global_start=seg.global_start,
                     global_end=seg.global_end,
                     versions=versions,
+                    audio_peaks=self._peaks_for_segment(seg),
                 )
             )
         self.timeline.set_segments(segments)
+
+    def _peaks_for_segment(self, seg) -> list[float]:
+        if not self.settings.timeline_show_waveform:
+            return []
+        active = seg.active
+        if active is None or active.source is None or not active.source.has_audio:
+            return []
+        source = active.source
+        if source.audio_peaks:
+            return list(source.audio_peaks)
+        ensure = getattr(source.decoder, "ensure_audio_peaks", None)
+        if callable(ensure):
+            peaks = ensure()
+            source.audio_peaks = list(peaks or [])
+            return list(source.audio_peaks)
+        return []
 
     def _remove_shot(self, shot_index: int):
         self.viewport.clear_frames()
@@ -1762,10 +1817,46 @@ class MainWindow(QMainWindow):
         self.viewport.update()
         self.statusBar().showMessage("Viewer inputs cleared.")
 
+    def _on_timeline_scrub_started(self) -> None:
+        """Mouse pressed for playhead scrub — allow scrub-preview audio until release."""
+        self._scrub_epoch += 1
+        self._timeline_scrub_gesture = True
+        if not bool(getattr(self.settings, "scrub_audio", False)):
+            return
+        if self.playing:
+            self.stop_playback()
+        if not self._has_cpp_transport():
+            return
+        try:
+            self.viewport.native_renderer.begin_audio_scrub()
+        except Exception:
+            pass
+
     def _on_timeline_scrub(self, frame: int):
         if self.playing:
             self.stop_playback()
         self.seek_to_frame(frame)
+
+    def _on_timeline_scrub_finished(self) -> None:
+        """Mouse released after dragging the playhead — stop scrub preview audio immediately."""
+        finished_epoch = self._scrub_epoch
+        self._timeline_scrub_gesture = False
+        self._end_audio_scrub_now()
+        # Catch late seeks from the same drag; ignore if a new scrub started.
+        QTimer.singleShot(0, lambda: self._end_audio_scrub_if_epoch(finished_epoch))
+
+    def _end_audio_scrub_if_epoch(self, epoch: int) -> None:
+        if self._timeline_scrub_gesture or self._scrub_epoch != epoch:
+            return
+        self._end_audio_scrub_now()
+
+    def _end_audio_scrub_now(self) -> None:
+        if self.playing or not self._has_cpp_transport():
+            return
+        try:
+            self.viewport.native_renderer.end_audio_scrub()
+        except Exception:
+            pass
 
     def _apply_resolved_cdl(self, *, force: bool = False) -> None:
         """Apply Clip > Stack > Timeline CDL for the playhead active version."""
@@ -1868,6 +1959,12 @@ class MainWindow(QMainWindow):
                     break
         shot_key = (segment.index, version_key)
 
+        scrub_preview = bool(
+            getattr(self, "_timeline_scrub_gesture", False)
+            and getattr(self.settings, "scrub_audio", False)
+            and not self.playing
+        )
+
         if (
             not force_heavy
             and shot_key == self._transport_shot_key
@@ -1875,11 +1972,13 @@ class MainWindow(QMainWindow):
         ):
             self._seek_light(frame, segment)
             if self._has_cpp_transport():
-                self.viewport.native_renderer.transport_seek(frame)
+                self.viewport.native_renderer.transport_seek(frame, scrub_preview)
             return
 
         self._seek_heavy(frame, segment, shot_key)
         self._push_transport_program(playing=self.playing)
+        if self._has_cpp_transport():
+            self.viewport.native_renderer.transport_seek(frame, scrub_preview)
 
     def _seek_light(self, frame: int, segment) -> None:
         """Per-frame path: playhead / readout / packages only (same shot)."""
@@ -2032,6 +2131,73 @@ class MainWindow(QMainWindow):
             playing=playing,
         )
         self.viewport.native_renderer.set_transport_program(prog)
+        self._sync_audio_media_for_playhead()
+
+    def _sync_audio_media_for_playhead(self) -> None:
+        if not self._has_cpp_transport():
+            return
+        path = ""
+        origin = 0
+        plan = self.session.plan
+        if not plan.empty:
+            segment = plan.segment_at(self.current_frame)
+            if segment is not None and segment.active is not None and segment.active.source is not None:
+                source = segment.active.source
+                if source.has_audio and not source.offline:
+                    path = source.path
+                    origin = int(getattr(source, "decoder_start_frame", 0) or 0)
+        try:
+            self.viewport.native_renderer.set_audio_media_path(path or "", origin)
+            # Volume/mute/device may have been skipped at init if the renderer
+            # was not ready yet — re-apply whenever we bind media.
+            self._apply_audio_settings_to_renderer()
+        except Exception:
+            pass
+
+    def _apply_audio_settings_to_renderer(self) -> None:
+        if not self._has_cpp_transport():
+            return
+        r = self.viewport.native_renderer
+        try:
+            r.set_audio_muted(bool(self.settings.audio_muted))
+            r.set_audio_volume(float(self.settings.audio_volume))
+            r.set_audio_scrub(bool(self.settings.scrub_audio))
+            r.set_audio_output_device(str(self.settings.audio_output_device_id or ""))
+            err = ""
+            try:
+                err = str(r.audio_last_error() or "")
+            except Exception:
+                err = ""
+            if err:
+                self.statusBar().showMessage(f"Audio device error: {err}", 8000)
+        except Exception:
+            pass
+
+    def _on_audio_mute_toggled(self, muted: bool) -> None:
+        self.settings.audio_muted = bool(muted)
+        self._persist_settings()
+        if self._has_cpp_transport():
+            self.viewport.native_renderer.set_audio_muted(bool(muted))
+
+    def _on_audio_volume_changed(self, value: int) -> None:
+        vol = max(0.0, min(1.0, float(value) / 100.0))
+        self.settings.audio_volume = vol
+        self._persist_settings()
+        if self._has_cpp_transport():
+            self.viewport.native_renderer.set_audio_volume(vol)
+
+    def _on_show_waveform_toggled(self, checked: bool) -> None:
+        self.settings.timeline_show_waveform = bool(checked)
+        self._persist_settings()
+        self.timeline.set_show_waveform(bool(checked))
+        # Rebuild peaks into segment paints.
+        self._push_timeline_segments(self.session.plan)
+
+    def _on_scrub_audio_toggled(self, checked: bool) -> None:
+        self.settings.scrub_audio = bool(checked)
+        self._persist_settings()
+        if self._has_cpp_transport():
+            self.viewport.native_renderer.set_audio_scrub(bool(checked))
 
     def _on_transport_frame_changed(self, frame: int, direction: int) -> None:
         self.playback_direction = direction
@@ -2634,6 +2800,7 @@ class MainWindow(QMainWindow):
         old_mode = getattr(self.settings, "missing_frame_mode", "Nearest Frame")
         old_timing = normalize_playback_timing(self.settings.playback_timing)
         old_package_enabled = dict(self.settings.package_enabled)
+        old_ocio = str(getattr(self.settings, "ocio_config_path", "") or "")
         if dialog.exec():
             # Apply changes (include current dock layout so it is not overwritten stale).
             self._persist_settings()
@@ -2651,11 +2818,18 @@ class MainWindow(QMainWindow):
                     source.cache.clear()
                 source.cache.update_settings()
             self._apply_renderer_cache_settings()
-            # Reload OCIO if path changed
-            self.ocio_manager.load_config(self.settings.ocio_config_path)
-            self.viewport.update_ocio_pipeline()
-            self._populate_look_combo()
-            self._build_ocio_submenu()
+            # Audio/device changes must not touch color — only reload OCIO when path changes.
+            new_ocio = str(getattr(self.settings, "ocio_config_path", "") or "")
+            if new_ocio != old_ocio:
+                self.ocio_manager.load_config(self.settings.ocio_config_path)
+                self.viewport.update_ocio_pipeline()
+                self._populate_look_combo()
+                self._build_ocio_submenu()
+            self._apply_audio_settings_to_renderer()
+            if hasattr(self, "act_scrub_audio"):
+                self.act_scrub_audio.blockSignals(True)
+                self.act_scrub_audio.setChecked(bool(self.settings.scrub_audio))
+                self.act_scrub_audio.blockSignals(False)
             if old_mode != new_mode:
                 self.seek_to_frame(self.current_frame)
             if self.settings.package_enabled != old_package_enabled:

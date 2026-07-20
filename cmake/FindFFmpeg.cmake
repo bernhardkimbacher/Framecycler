@@ -1,4 +1,4 @@
-# FindFFmpeg.cmake — locates libavformat, libavcodec, libavutil, libswscale.
+# FindFFmpeg.cmake — locates libavformat, libavcodec, libavutil, libswscale, libswresample.
 #
 # Sets:
 #   FFmpeg_FOUND
@@ -12,6 +12,7 @@ if(PkgConfig_FOUND)
     pkg_check_modules(PC_AVCODEC QUIET libavcodec)
     pkg_check_modules(PC_AVUTIL QUIET libavutil)
     pkg_check_modules(PC_SWSCALE QUIET libswscale)
+    pkg_check_modules(PC_SWRESAMPLE QUIET libswresample)
 endif()
 
 set(_FFMPEG_HINTS
@@ -66,6 +67,15 @@ find_library(FFmpeg_SWSCALE_LIBRARY
     PATH_SUFFIXES lib
 )
 
+find_library(FFmpeg_SWRESAMPLE_LIBRARY
+    NAMES swresample
+    HINTS
+        ${PC_SWRESAMPLE_LIBRARY_DIRS}
+        ${_FFMPEG_HINTS}
+        ENV FFMPEG_ROOT
+    PATH_SUFFIXES lib
+)
+
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(FFmpeg
     REQUIRED_VARS
@@ -74,6 +84,7 @@ find_package_handle_standard_args(FFmpeg
         FFmpeg_AVCODEC_LIBRARY
         FFmpeg_AVUTIL_LIBRARY
         FFmpeg_SWSCALE_LIBRARY
+        FFmpeg_SWRESAMPLE_LIBRARY
 )
 
 if(FFmpeg_FOUND)
@@ -83,6 +94,7 @@ if(FFmpeg_FOUND)
         ${FFmpeg_AVCODEC_LIBRARY}
         ${FFmpeg_AVUTIL_LIBRARY}
         ${FFmpeg_SWSCALE_LIBRARY}
+        ${FFmpeg_SWRESAMPLE_LIBRARY}
     )
 
     if(NOT TARGET FFmpeg::FFmpeg)
@@ -100,4 +112,5 @@ mark_as_advanced(
     FFmpeg_AVCODEC_LIBRARY
     FFmpeg_AVUTIL_LIBRARY
     FFmpeg_SWSCALE_LIBRARY
+    FFmpeg_SWRESAMPLE_LIBRARY
 )

@@ -6,6 +6,7 @@
 #include "prefetch_engine.h"
 #include "native_decoder.h"
 #include "native_movie_decoder.h"
+#include "native_audio_decoder.h"
 #include "rhi_renderer.h"
 #include "display_upload_queue.h"
 #include "transport_clock.h"
@@ -246,6 +247,76 @@ PYBIND11_MODULE(framecycler_engine, m) {
                 d["channels"] = channels;
                 return d;
             });
+
+    py::class_<NativeAudioDecoder, std::shared_ptr<NativeAudioDecoder>>(m, "NativeAudioDecoder")
+        .def(py::init<>())
+        .def("open", &NativeAudioDecoder::open, py::arg("path"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("close", &NativeAudioDecoder::close, py::call_guard<py::gil_scoped_release>())
+        .def("is_open", &NativeAudioDecoder::is_open)
+        .def("has_audio", &NativeAudioDecoder::has_audio)
+        .def_property_readonly("path", &NativeAudioDecoder::path)
+        .def_property_readonly("duration_seconds", &NativeAudioDecoder::duration_seconds)
+        .def_property_readonly("sample_rate", &NativeAudioDecoder::sample_rate)
+        .def_property_readonly("channels", &NativeAudioDecoder::channels)
+        .def("seek", &NativeAudioDecoder::seek, py::arg("time_sec"),
+             py::call_guard<py::gil_scoped_release>())
+        .def(
+            "decode_frames",
+            [](NativeAudioDecoder& self, int max_frames) -> py::object {
+                if (max_frames <= 0) {
+                    return py::none();
+                }
+                std::vector<float> buf(
+                    static_cast<size_t>(max_frames * NativeAudioDecoder::kOutputChannels));
+                int got = 0;
+                {
+                    py::gil_scoped_release release;
+                    got = self.decode_frames(buf.data(), max_frames);
+                }
+                if (got <= 0) {
+                    return py::none();
+                }
+                buf.resize(static_cast<size_t>(got * NativeAudioDecoder::kOutputChannels));
+                py::array_t<float> arr({got, NativeAudioDecoder::kOutputChannels});
+                std::memcpy(arr.mutable_data(), buf.data(), buf.size() * sizeof(float));
+                return arr;
+            },
+            py::arg("max_frames") = 4096)
+        .def(
+            "build_peaks",
+            [](NativeAudioDecoder& self, int peaks_per_second) {
+                std::vector<float> peaks;
+                {
+                    py::gil_scoped_release release;
+                    peaks = self.build_peaks(peaks_per_second);
+                }
+                py::array_t<float> arr(static_cast<py::ssize_t>(peaks.size()));
+                if (!peaks.empty()) {
+                    std::memcpy(arr.mutable_data(), peaks.data(), peaks.size() * sizeof(float));
+                }
+                return arr;
+            },
+            py::arg("peaks_per_second") = 300);
+
+    m.def(
+        "list_audio_output_devices",
+        []() {
+            std::vector<AudioDeviceInfo> devices;
+            {
+                py::gil_scoped_release release;
+                devices = AudioEngine::list_output_devices();
+            }
+            py::list out;
+            for (const auto& d : devices) {
+                py::dict item;
+                item["id"] = d.id;
+                item["name"] = d.name;
+                item["is_default"] = d.is_default;
+                out.append(item);
+            }
+            return out;
+        });
 
     py::class_<DisplayUploadQueue>(m, "DisplayUploadQueue")
         .def(py::init<>())
@@ -633,10 +704,57 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("set_transport_program", &RhiRenderer::set_transport_program)
         .def("transport_play", &RhiRenderer::transport_play)
         .def("transport_pause", &RhiRenderer::transport_pause)
-        .def("transport_seek", &RhiRenderer::transport_seek, py::arg("global_frame"))
+        .def("transport_seek", &RhiRenderer::transport_seek,
+             py::arg("global_frame"), py::arg("scrub_preview") = false)
         .def("get_transport_frame", &RhiRenderer::get_transport_frame)
         .def("get_transport_direction", &RhiRenderer::get_transport_direction)
         .def("is_transport_playing", &RhiRenderer::is_transport_playing)
+        .def("set_audio_media_path", &RhiRenderer::set_audio_media_path,
+             py::arg("path"), py::arg("media_origin_frame") = 0,
+             py::call_guard<py::gil_scoped_release>())
+        .def("set_audio_volume", &RhiRenderer::set_audio_volume, py::arg("volume"))
+        .def("set_audio_muted", &RhiRenderer::set_audio_muted, py::arg("muted"))
+        .def("set_audio_scrub", &RhiRenderer::set_audio_scrub, py::arg("enabled"))
+        .def("begin_audio_scrub", &RhiRenderer::begin_audio_scrub)
+        .def("end_audio_scrub", &RhiRenderer::end_audio_scrub)
+        .def("set_audio_output_device", &RhiRenderer::set_audio_output_device, py::arg("device_id"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("audio_output_device", &RhiRenderer::audio_output_device)
+        .def("audio_last_error", &RhiRenderer::audio_last_error)
+        .def("audio_has_audio", &RhiRenderer::audio_has_audio)
+        .def(
+            "list_audio_output_devices",
+            [](RhiRenderer& /*self*/) {
+                std::vector<AudioDeviceInfo> devices;
+                {
+                    py::gil_scoped_release release;
+                    devices = RhiRenderer::list_audio_output_devices();
+                }
+                py::list out;
+                for (const auto& d : devices) {
+                    py::dict item;
+                    item["id"] = d.id;
+                    item["name"] = d.name;
+                    item["is_default"] = d.is_default;
+                    out.append(item);
+                }
+                return out;
+            })
+        .def(
+            "audio_peaks",
+            [](RhiRenderer& self, int peaks_per_second) {
+                std::vector<float> peaks;
+                {
+                    py::gil_scoped_release release;
+                    peaks = self.audio_peaks(peaks_per_second);
+                }
+                py::array_t<float> arr(static_cast<py::ssize_t>(peaks.size()));
+                if (!peaks.empty()) {
+                    std::memcpy(arr.mutable_data(), peaks.data(), peaks.size() * sizeof(float));
+                }
+                return arr;
+            },
+            py::arg("peaks_per_second") = 300)
         .def("ack_transport_frame_notify", &RhiRenderer::ack_transport_frame_notify)
         .def(
             "poll_transport_frame_notify",

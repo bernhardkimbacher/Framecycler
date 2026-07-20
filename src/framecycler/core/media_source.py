@@ -25,6 +25,8 @@ class MediaSource:
     resolution_scale: float = 1.0
     metadata: dict = field(default_factory=dict)
     offline: bool = False
+    has_audio: bool = False
+    audio_peaks: list[float] = field(default_factory=list)
 
     @property
     def display_name(self) -> str:

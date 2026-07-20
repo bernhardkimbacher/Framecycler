@@ -23,6 +23,7 @@
 #include "gpu_texture_cache.h"
 #include "display_upload_queue.h"
 #include "transport_clock.h"
+#include "audio_engine.h"
 
 class CacheManager;
 
@@ -136,10 +137,27 @@ public:
     void set_transport_program(const TransportProgram& program);
     void transport_play();
     void transport_pause();
-    void transport_seek(int global_frame);
+    void transport_seek(int global_frame, bool scrub_preview = false);
     int get_transport_frame() const;
     int get_transport_direction() const;
     bool is_transport_playing() const;
+
+    /// Presentation-slave audio (bound to active movie path from Python).
+    AudioEngine& audio_engine() { return _audio; }
+    /// Bind movie audio. ``media_origin_frame`` is the file's decoder start frame
+    /// (usually 0 for QT); media time = (decoder_frame - origin) / fps.
+    void set_audio_media_path(const std::string& path, int media_origin_frame = 0);
+    void set_audio_volume(float volume);
+    void set_audio_muted(bool muted);
+    void set_audio_scrub(bool enabled);
+    void begin_audio_scrub();
+    void end_audio_scrub();
+    void set_audio_output_device(const std::string& device_id);
+    std::string audio_output_device() const;
+    std::string audio_last_error() const;
+    bool audio_has_audio() const;
+    std::vector<float> audio_peaks(int peaks_per_second = 300);
+    static std::vector<AudioDeviceInfo> list_audio_output_devices();
     void set_frame_changed_callback(std::function<void(int frame, int direction)> cb);
     void set_segment_boundary_callback(std::function<void(int frame, int direction)> cb);
     /// Python ack after draining a coalesced frame notification.
@@ -296,6 +314,8 @@ private:
     void _emit_transport_frame_changed(int frame, int direction);
     void _emit_transport_segment_boundary(int frame, int direction);
     void _tick_transport_and_prepare();
+    /// Shot-local media seconds for the audio decoder (requires `_mutex`).
+    double _audio_media_time_unlocked(int global_frame) const;
 
     std::vector<QRhiShaderResourceBinding> build_srb_bindings(
         QRhiTexture* tex_a,
@@ -401,6 +421,9 @@ private:
     bool _force_null_backend = false;
 
     TransportClock _transport;
+    AudioEngine _audio;
+    /// File decoder-frame origin for audio media time (under `_mutex`).
+    int _audio_media_origin_frame = 0;
     std::function<void(int, int)> _frame_changed_callback;
     std::function<void(int, int)> _segment_boundary_callback;
     std::atomic<int> _pending_notify_frame{-1};

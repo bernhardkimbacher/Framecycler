@@ -285,28 +285,129 @@ void RhiRenderer::set_transport_program(const TransportProgram& program)
 
 void RhiRenderer::transport_play()
 {
+    double media_t = 0.0;
     {
         std::lock_guard<std::mutex> lock(_mutex);
         _transport.play();
+        media_t = _audio_media_time_unlocked(_transport.current_frame());
     }
+    _audio.seek_media_time(media_t);
+    _audio.play();
     _wake_render_thread();
 }
 
 void RhiRenderer::transport_pause()
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    _transport.pause();
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _transport.pause();
+    }
+    _audio.pause();
 }
 
-void RhiRenderer::transport_seek(int global_frame)
+void RhiRenderer::transport_seek(int global_frame, bool scrub_preview)
 {
+    double media_t = 0.0;
+    bool playing = false;
     {
         std::lock_guard<std::mutex> lock(_mutex);
         _transport.seek(global_frame);
         _apply_transport_frame_to_params(_pending_render_params, _transport.current_frame());
         _render_params_dirty = true;
+        media_t = _audio_media_time_unlocked(_transport.current_frame());
+        playing = _transport.is_playing();
     }
+    // Trust the UI preview flag (already gated on the scrub-audio preference).
+    const bool preview = scrub_preview && !playing;
+    _audio.seek_media_time(media_t, preview);
     _wake_render_thread();
+}
+
+void RhiRenderer::set_audio_media_path(const std::string& path, int media_origin_frame)
+{
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _audio_media_origin_frame = media_origin_frame;
+    }
+    _audio.set_media_path(path);
+}
+
+double RhiRenderer::_audio_media_time_unlocked(int global_frame) const
+{
+    const double fps = std::max(1e-6, _transport.fps());
+    const auto prog = _transport.program();
+    if (!prog.slots.empty()) {
+        // Slot 0 is the active A version — same source Python binds for audio.
+        const int source_index = prog.slots[0].source_index;
+        const int dec = _transport.decoder_frame_for_source(source_index, global_frame);
+        if (dec >= 0) {
+            const double t =
+                static_cast<double>(dec - _audio_media_origin_frame) / fps;
+            return std::max(0.0, t);
+        }
+        const auto& slot = prog.slots[0];
+        int local = global_frame - slot.segment_global_start;
+        if (local < 0) {
+            local = 0;
+        }
+        return static_cast<double>(local) / fps;
+    }
+    return static_cast<double>(std::max(0, global_frame - _audio_media_origin_frame)) / fps;
+}
+
+void RhiRenderer::set_audio_volume(float volume)
+{
+    _audio.set_volume(volume);
+}
+
+void RhiRenderer::set_audio_muted(bool muted)
+{
+    _audio.set_muted(muted);
+}
+
+void RhiRenderer::set_audio_scrub(bool enabled)
+{
+    _audio.set_scrub_audio(enabled);
+}
+
+void RhiRenderer::begin_audio_scrub()
+{
+    _audio.begin_scrub();
+}
+
+void RhiRenderer::end_audio_scrub()
+{
+    _audio.end_scrub();
+}
+
+void RhiRenderer::set_audio_output_device(const std::string& device_id)
+{
+    _audio.set_output_device(device_id);
+}
+
+std::string RhiRenderer::audio_output_device() const
+{
+    return _audio.output_device_id();
+}
+
+std::string RhiRenderer::audio_last_error() const
+{
+    return _audio.last_error();
+}
+
+bool RhiRenderer::audio_has_audio() const
+{
+    return _audio.has_audio();
+}
+
+std::vector<float> RhiRenderer::audio_peaks(int peaks_per_second)
+{
+    return _audio.peaks(peaks_per_second);
+}
+
+std::vector<AudioDeviceInfo> RhiRenderer::list_audio_output_devices()
+{
+    return AudioEngine::list_output_devices();
 }
 
 int RhiRenderer::get_transport_frame() const
@@ -535,6 +636,15 @@ void RhiRenderer::_tick_transport_and_prepare()
         should_emit_boundary = advanced.segment_boundary;
         should_emit_move = advanced.moved;
         should_emit_stop = advanced.stop;
+
+        // Presentation-master → audio slave.
+        // Use shot-local media time (not global_frame/fps), otherwise audio seeks
+        // past EOF on non-zero timeline origins and plays silence.
+        {
+            const double t = _audio_media_time_unlocked(_transport.current_frame());
+            _audio.sync_to_media_time(
+                t, _transport.is_playing(), _transport.direction());
+        }
     }
 
     for (const auto& apply : playhead_applies) {

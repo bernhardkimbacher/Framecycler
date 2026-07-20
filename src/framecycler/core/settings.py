@@ -48,6 +48,13 @@ class Settings:
         self.overlay_mask_opacity: float = 0.5  # 0..1
         self.overlay_action_safe: float = 0.0  # per-side inset fraction; 0 = Off
         self.overlay_title_safe: float = 0.0
+        # Audio / A/V
+        self.audio_muted: bool = False
+        self.audio_volume: float = 1.0  # 0..1
+        self.scrub_audio: bool = False
+        self.timeline_show_waveform: bool = False
+        # Empty string = system default output device
+        self.audio_output_device_id: str = ""
 
         self.load()
 
@@ -149,6 +156,17 @@ class Settings:
                     0.0,
                     min(0.49, float(data.get("overlay_title_safe", self.overlay_title_safe) or 0.0)),
                 )
+                self.audio_muted = bool(data.get("audio_muted", self.audio_muted))
+                self.audio_volume = max(
+                    0.0, min(1.0, float(data.get("audio_volume", self.audio_volume)))
+                )
+                self.scrub_audio = bool(data.get("scrub_audio", self.scrub_audio))
+                self.timeline_show_waveform = bool(
+                    data.get("timeline_show_waveform", self.timeline_show_waveform)
+                )
+                self.audio_output_device_id = str(
+                    data.get("audio_output_device_id", self.audio_output_device_id) or ""
+                )
         except Exception as e:
             print(f"Error loading settings: {e}")
         self.clamp_cache_limits_to_platform()
@@ -177,6 +195,11 @@ class Settings:
                 "overlay_mask_opacity": self.overlay_mask_opacity,
                 "overlay_action_safe": self.overlay_action_safe,
                 "overlay_title_safe": self.overlay_title_safe,
+                "audio_muted": self.audio_muted,
+                "audio_volume": self.audio_volume,
+                "scrub_audio": self.scrub_audio,
+                "timeline_show_waveform": self.timeline_show_waveform,
+                "audio_output_device_id": self.audio_output_device_id,
             }
             with open(self.config_path, "w") as f:
                 json.dump(data, f, indent=4)

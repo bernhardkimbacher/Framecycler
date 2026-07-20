@@ -357,6 +357,8 @@ class ViewportContainer(QWidget):
 class Viewport(QWidget):
     wipe_changed = Signal(float)
     frame_scrubbed = Signal(int)
+    scrub_started = Signal()
+    scrub_finished = Signal()
     zoom_mode_changed = Signal(object)
 
     def __init__(self, ocio_manager: OCIOManager, parent=None, container=None):
@@ -1057,6 +1059,7 @@ class Viewport(QWidget):
                 if self.main_window and self.main_window.playing:
                     self.main_window.stop_playback()
                 self.setCursor(Qt.SizeHorCursor)
+                self.scrub_started.emit()
             if self.scrubbing_frames:
                 frame_offset = int((event.position().x() - self.scrub_start_x) / self.scrub_sensitivity)
                 target_frame = self.scrub_start_frame + frame_offset
@@ -1101,6 +1104,7 @@ class Viewport(QWidget):
             self.setCursor(Qt.ArrowCursor)
             return
 
+        was_frame_scrub = bool(self.scrubbing_frames)
         if event.button() == Qt.LeftButton and self.left_press_pos is not None:
             if self.scrubbing_frames and self.main_window:
                 frame_offset = int(
@@ -1123,6 +1127,8 @@ class Viewport(QWidget):
         self.left_press_pos = None
         self.left_drag_started = False
         self.setCursor(Qt.ArrowCursor)
+        if was_frame_scrub:
+            self.scrub_finished.emit()
 
     def wheelEvent(self, event):
         if self.compare_mode == COMPARE_TILE:
