@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import subprocess
@@ -38,7 +39,7 @@ def find_cmake():
             "Please install CMake using your package manager (e.g., 'brew install cmake' on macOS, or 'sudo apt install cmake' on Linux)."
         )
 
-def build_extension():
+def build_extension(*, clean: bool = False):
     print("=== Framecycler C++ Engine Build Script ===")
 
     version_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "generate_version.py")
@@ -53,8 +54,8 @@ def build_extension():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     build_dir = os.path.join(current_dir, "build")
     
-    # Recreate build directory to clean previous failures
-    if os.path.exists(build_dir):
+    if clean and os.path.exists(build_dir):
+        print(f"Cleaning build directory (--clean): {build_dir}")
         shutil.rmtree(build_dir)
     os.makedirs(build_dir, exist_ok=True)
     
@@ -166,8 +167,15 @@ def build_extension():
     print("=== Build Completed Successfully ===")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Build framecycler_engine")
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete the CMake build/ directory before configuring (CI/package default)",
+    )
+    cli = parser.parse_args()
     try:
-        build_extension()
+        build_extension(clean=cli.clean)
     except Exception as e:
         print(f"Build failed: {e}")
         sys.exit(1)

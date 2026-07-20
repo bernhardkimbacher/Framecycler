@@ -1,9 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_dynamic_libs
+
+# Ensure packaging/ is importable when PyInstaller runs this spec.
+sys.path.insert(0, str(Path(SPECPATH).resolve()))
+from bundle_filter import PYINSTALLER_EXCLUDES, filter_binaries  # noqa: E402
 
 block_cipher = None
 root = Path(SPECPATH).resolve().parent
@@ -37,6 +42,17 @@ def pyside6_qsb_binaries() -> list[tuple[str, str]]:
             return [(str(candidate), "PySide6")]
     return []
 
+
+# macOS: optional Developer ID from env (release package.yml). Leave unset for local.
+_macos_identity = os.environ.get("MACOS_CODESIGN_IDENTITY") or None
+_macos_entitlements = os.environ.get("MACOS_ENTITLEMENTS") or None
+if _macos_entitlements and not Path(_macos_entitlements).is_file():
+    _macos_entitlements = None
+if sys.platform == "darwin" and _macos_entitlements is None:
+    _default_ent = root / "packaging" / "macos" / "entitlements.plist"
+    if _macos_identity and _default_ent.is_file():
+        _macos_entitlements = str(_default_ent)
+
 a = Analysis(
     [str(root / "src" / "framecycler" / "__main__.py")],
     pathex=[str(root / "src")],
@@ -51,14 +67,20 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=PYINSTALLER_EXCLUDES,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
 
+a.binaries = filter_binaries(a.binaries)
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+# TODO(Authenticode): After Azure Trusted Signing / org code-signing cert is
+# provisioned, sign Framecycler.exe (and shipped DLLs) post-COLLECT / pre-vpk.
+# Not implemented yet — needs account signup.
 
 exe = EXE(
     pyz,
@@ -74,8 +96,8 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
+    codesign_identity=_macos_identity if sys.platform == "darwin" else None,
+    entitlements_file=_macos_entitlements if sys.platform == "darwin" else None,
     icon=icon_path(),
 )
 

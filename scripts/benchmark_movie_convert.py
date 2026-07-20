@@ -8,10 +8,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import statistics
 import sys
 import time
+from pathlib import Path
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(REPO, "src"))
@@ -28,6 +30,11 @@ def main() -> int:
         help="Movie path (default: tests/fixtures/tiny_movie.mp4)",
     )
     parser.add_argument("--frames", type=int, default=60, help="Frames to decode")
+    parser.add_argument(
+        "--json-out",
+        default=os.environ.get("PERF_JSON_OUT", ""),
+        help="Write metrics JSON (or set PERF_JSON_OUT)",
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.path):
@@ -70,6 +77,22 @@ def main() -> int:
         f"({width}x{height} hw={hw})"
     )
     print(f"mean={mean:.3f} ms/frame  p95={p95:.3f} ms  min={min(times_ms):.3f} max={max(times_ms):.3f}")
+    if args.json_out:
+        out = Path(args.json_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "name": "movie_convert",
+            "mean_ms": mean,
+            "p95_ms": p95,
+            "min_ms": min(times_ms),
+            "max_ms": max(times_ms),
+            "frames": count,
+            "width": width,
+            "height": height,
+            "hw": hw,
+        }
+        out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        print(f"wrote {out}")
     return 0
 
 

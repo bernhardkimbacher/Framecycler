@@ -462,12 +462,13 @@ pip install -r requirements.txt
 Requires **CMake**, and on Windows **Visual Studio 2022 Build Tools (MSVC)**. System libraries: **OpenImageIO** and **FFmpeg** (`libavformat`, `libavcodec`, `libavutil`, `libswscale`) — e.g. `brew install openimageio ffmpeg` on macOS, matching `-dev` packages on Linux, or `vcpkg install openimageio ffmpeg` on Windows.
 
 ```bash
-python build.py
+python build.py          # incremental (reuses build/)
+python build.py --clean  # wipe build/ then configure (CI/package)
 ```
 
 * Fetches/resolves the Qt SDK via `aqtinstall` when needed, links Gui / Widgets / ShaderTools (including private modules for RHI), and installs the extension next to the Python package.
-* On macOS the `.so` is ad-hoc signed for Gatekeeper after copy.
-* Pinned UI dependency: `PySide6==6.10.3`.
+* On macOS the `.so` is ad-hoc signed for Gatekeeper after copy (dev imports). Release `.app` signing uses Developer ID when package secrets are set.
+* Pinned UI dependency: `PySide6==6.10.3`. Native OIIO/FFmpeg pins: [`packaging/native-deps.md`](packaging/native-deps.md) + [`vcpkg.json`](vcpkg.json).
 
 ### Running the app and tests
 
@@ -480,10 +481,13 @@ python -m unittest discover -s tests
 
 This is the **shipped installer** path (separate from Python packages/plugins above).
 
-* **Release builds**: [`.github/workflows/package.yml`](.github/workflows/package.yml) on tags like `v0.3.3`. Each platform builds with PyInstaller, packages with [Velopack](https://velopack.io), and publishes to GitHub Releases.
+* **Release builds**: [`.github/workflows/package.yml`](.github/workflows/package.yml) on tags like `v0.3.3`. Each platform builds with PyInstaller (selective binary filter), packages with [Velopack](https://velopack.io), and publishes to GitHub Releases.
 * **First install**: Download the Velopack installer/portable bundle for your OS from the Release page.
 * **Updates**: In a packaged build, **Help → Check for Updates…**. Not available when running from source.
-* **Unsigned builds (current)**: Gatekeeper / SmartScreen may warn; use the usual Open workaround.
+* **macOS signing / notarization**: When GitHub secrets are configured, the package job deep-signs `Framecycler-Reboot.app` with Developer ID and submits to Apple notarization (`scripts/macos_sign_notarize.py`). Without secrets the job still packs an **unsigned** `.app` (Gatekeeper Open workaround). Required secrets:
+  * `MACOS_CERTIFICATE_P12` (base64 PKCS#12), `MACOS_CERTIFICATE_PASSWORD`, `MACOS_CODESIGN_IDENTITY`
+  * Notarize via `APPLE_API_KEY` + `APPLE_API_KEY_ID` + `APPLE_API_ISSUER`, or `APPLE_NOTARY_PROFILE`
+* **Windows Authenticode**: Not implemented yet (needs Azure / Trusted Signing account). Stubbed as `TODO(Authenticode)` in the package workflow and [`packaging/framecycler.spec`](packaging/framecycler.spec).
 * **Retrying a failed release**: Delete the GitHub Release for that tag before a full re-run if assets were partially uploaded; Velopack `--merge` cannot replace existing assets such as `releases.win.json`.
 
 ---

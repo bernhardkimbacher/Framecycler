@@ -37,11 +37,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # Pins: see packaging/native-deps.md (Ubuntu image packages).
           sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0 libxkbcommon-dev libxcb-cursor0 libopenimageio-dev openimageio-tools libopencv-dev libvulkan-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install openimageio ffmpeg
+        run: |
+          # Expected prefixes: openimageio 3.1.*, ffmpeg 8.* (packaging/native-deps.md)
+          brew install openimageio ffmpeg
 
       - name: Cache vcpkg (Windows)
         if: runner.os == 'Windows'
@@ -50,7 +53,7 @@ jobs:
           path: |
             ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}/downloads
-          key: ${{ runner.os }}-vcpkg-${{ hashFiles('**/CMakeLists.txt') }}
+          key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json', '**/CMakeLists.txt') }}
           restore-keys: |
             ${{ runner.os }}-vcpkg-
 
@@ -59,7 +62,12 @@ jobs:
         shell: bash
         run: |
           echo "set(VCPKG_BUILD_TYPE release)" >> "$VCPKG_INSTALLATION_ROOT/triplets/x64-windows.cmake"
-          vcpkg install openimageio:x64-windows ffmpeg:x64-windows
+          # Manifest mode: pinned openimageio + ffmpeg via vcpkg.json
+          vcpkg install --triplet x64-windows --x-manifest-root=.
+
+      - name: Check native dependency pins
+        shell: bash
+        run: ${{ matrix.python }} scripts/check_native_deps.py --strict
 
       - name: Cache Qt SDK
         uses: actions/cache@v4
@@ -75,7 +83,7 @@ jobs:
           ${{ matrix.python }} -m pip install -r requirements.txt
 
       - name: Compile native C++ core
-        run: ${{ matrix.python }} build.py
+        run: ${{ matrix.python }} build.py --clean
 
       - name: Diagnose missing DLLs (temporary)
         if: runner.os == 'Windows'
@@ -97,3 +105,22 @@ jobs:
           done < <(find tests -maxdepth 1 -name 'test_*.py' \
             -exec basename {} .py \; | sort)
           ${{ matrix.python }} -m unittest -v "${test_modules[@]}"
+
+      - name: GPU present smoke
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        shell: bash
+        env:
+          FRAMECYCLER_REQUIRE_GPU: "1"
+        run: ${{ matrix.python }} -m unittest -v tests.test_gpu_present_smoke
+        continue-on-error: true
+
+      - name: Soft perf benchmarks
+        shell: bash
+        run: |
+          mkdir -p artifacts/perf
+          ${{ matrix.python }} scripts/benchmark_movie_convert.py --frames 10 \
+            --json-out artifacts/perf/movie_convert.json || true
+          ${{ matrix.python }} scripts/benchmark_exr_proxy.py --frames 5 --size 512x512 \
+            --json-out artifacts/perf/exr_proxy.json || true
+          ${{ matrix.python }} scripts/ci_soft_perf_gate.py --results-dir artifacts/perf
+        continue-on-error: true

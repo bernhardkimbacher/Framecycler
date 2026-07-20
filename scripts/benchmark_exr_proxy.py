@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import statistics
 import sys
@@ -58,6 +59,11 @@ def main() -> int:
         action="store_true",
         help="Force scanline EXR instead of tiled",
     )
+    parser.add_argument(
+        "--json-out",
+        default=os.environ.get("PERF_JSON_OUT", ""),
+        help="Write metrics JSON (or set PERF_JSON_OUT)",
+    )
     args = parser.parse_args()
     width, height = _parse_size(args.size)
     use_tiled = bool(args.tiled) and not bool(args.scanline)
@@ -84,8 +90,25 @@ def main() -> int:
         print(f"EXR proxy bench {width}x{height} {kind} repeats={args.frames}")
         print(f"  scale=1.0  {fmt(full)}")
         print(f"  scale=0.5  {fmt(proxy)}")
-        ratio = statistics.fmean(proxy) / max(1e-9, statistics.fmean(full))
+        full_mean = statistics.fmean(full)
+        proxy_mean = statistics.fmean(proxy)
+        ratio = proxy_mean / max(1e-9, full_mean)
         print(f"  proxy/full ratio={ratio:.3f} (lower is better for proxy)")
+        if args.json_out:
+            out = Path(args.json_out)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "name": "exr_proxy",
+                "full_mean_ms": full_mean,
+                "proxy_mean_ms": proxy_mean,
+                "ratio": ratio,
+                "width": width,
+                "height": height,
+                "kind": kind,
+                "frames": args.frames,
+            }
+            out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            print(f"wrote {out}")
     return 0
 
 

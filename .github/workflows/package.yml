@@ -67,11 +67,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # Pins: see packaging/native-deps.md
           sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-x11-0 libxkbcommon-dev libxcb-cursor0 libopenimageio-dev openimageio-tools libopencv-dev libvulkan-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev
 
       - name: Install System Dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install openimageio ffmpeg
+        run: |
+          # Expected prefixes: openimageio 3.1.*, ffmpeg 8.* (packaging/native-deps.md)
+          brew install openimageio ffmpeg
 
       - name: Cache vcpkg (Windows)
         if: runner.os == 'Windows'
@@ -80,7 +83,7 @@ jobs:
           path: |
             ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}/downloads
-          key: ${{ runner.os }}-vcpkg-${{ hashFiles('**/CMakeLists.txt') }}
+          key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json', '**/CMakeLists.txt') }}
           restore-keys: |
             ${{ runner.os }}-vcpkg-
 
@@ -89,7 +92,11 @@ jobs:
         shell: bash
         run: |
           echo "set(VCPKG_BUILD_TYPE release)" >> "$VCPKG_INSTALLATION_ROOT/triplets/x64-windows.cmake"
-          vcpkg install openimageio:x64-windows ffmpeg:x64-windows
+          vcpkg install --triplet x64-windows --x-manifest-root=.
+
+      - name: Check native dependency pins
+        shell: bash
+        run: ${{ matrix.python }} scripts/check_native_deps.py --strict
 
       - name: Cache Qt SDK
         uses: actions/cache@v4
@@ -105,7 +112,7 @@ jobs:
           ${{ matrix.python }} -m pip install -r requirements.txt pyinstaller pybind11 pillow
 
       - name: Compile Native C++ Core
-        run: ${{ matrix.python }} build.py
+        run: ${{ matrix.python }} build.py --clean
 
       - name: Generate Build Version Metadata
         env:
@@ -117,6 +124,53 @@ jobs:
 
       - name: Freeze Application with PyInstaller
         run: ${{ matrix.python }} -m PyInstaller --clean --noconfirm packaging/framecycler.spec
+
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS'
+        id: apple_keychain
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+        shell: bash
+        run: |
+          if [ -z "${MACOS_CERTIFICATE_P12}" ] || [ -z "${MACOS_CODESIGN_IDENTITY}" ]; then
+            echo "Apple signing secrets not configured; unsigned .app will be packed."
+            echo "signed=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CERT_PATH="$RUNNER_TEMP/developer_id.p12"
+          KEYCHAIN="$RUNNER_TEMP/framecycler.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "KEYCHAIN_PATH=$KEYCHAIN" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+          echo "MACOS_CODESIGN_IDENTITY=$MACOS_CODESIGN_IDENTITY" >> "$GITHUB_ENV"
+          echo "MACOS_ENTITLEMENTS=$GITHUB_WORKSPACE/packaging/macos/entitlements.plist" >> "$GITHUB_ENV"
+          echo "signed=1" >> "$GITHUB_OUTPUT"
+
+      - name: Sign and notarize macOS app
+        if: runner.os == 'macOS'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_NOTARY_PROFILE: ${{ secrets.APPLE_NOTARY_PROFILE }}
+        run: ${{ matrix.python }} scripts/macos_sign_notarize.py dist/Framecycler-Reboot.app
+
+      - name: Tear down Apple keychain
+        if: runner.os == 'macOS' && always()
+        shell: bash
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v4
@@ -134,6 +188,10 @@ jobs:
             --repoUrl https://github.com/bernhardkimbacher/Framecycler \
             --channel ${{ matrix.vpk_channel }} \
             || echo "No previous release found (first release for this channel)."
+
+      # TODO(Authenticode): Sign dist/Framecycler/Framecycler.exe (and shipped DLLs)
+      # with a Trusted Signing / Azure code-signing certificate once the org account
+      # is provisioned. Then staple/verify before `vpk pack`. Not implemented yet.
 
       - name: Create Velopack release (Windows)
         if: runner.os == 'Windows'

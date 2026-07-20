@@ -1,0 +1,10 @@
+{
+  "name": "framecycler",
+  "version-string": "0.4.0",
+  "description": "Framecycler native dependencies (Windows vcpkg manifest).",
+  "dependencies": [
+    "openimageio",
+    "ffmpeg"
+  ],
+  "builtin-baseline": "a51bb4d1434e6d0927ff79db8033bed8522b85df"
+}

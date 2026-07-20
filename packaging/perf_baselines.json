@@ -1,0 +1,10 @@
+{
+  "movie_convert": {
+    "mean_ms": 50.0,
+    "p95_ms": 80.0
+  },
+  "exr_proxy": {
+    "full_mean_ms": 200.0,
+    "proxy_mean_ms": 80.0
+  }
+}
