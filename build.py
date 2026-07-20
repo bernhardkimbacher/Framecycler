@@ -130,13 +130,32 @@ def build_extension(*, clean: bool = False):
     # On Windows, copy all dependency DLLs from vcpkg alongside the compiled .pyd module
     # so they are automatically resolved by the Windows dynamic loader.
     if sys.platform == "win32":
+        # Prefer manifest-mode installs (./vcpkg_installed or build/vcpkg_installed),
+        # then fall back to classic C:\vcpkg\installed.
+        vcpkg_bin_candidates = [
+            os.path.join(current_dir, "vcpkg_installed", "x64-windows", "bin"),
+            os.path.join(build_dir, "vcpkg_installed", "x64-windows", "bin"),
+            os.path.join(build_dir, "Release"),
+        ]
         vcpkg_root = os.environ.get("VCPKG_INSTALLATION_ROOT") or "C:\\vcpkg"
-        vcpkg_bin = os.path.join(vcpkg_root, "installed", "x64-windows", "bin")
-        if os.path.isdir(vcpkg_bin):
+        vcpkg_bin_candidates.append(
+            os.path.join(vcpkg_root, "installed", "x64-windows", "bin")
+        )
+        copied_dll_names: set[str] = set()
+        for vcpkg_bin in vcpkg_bin_candidates:
+            if not os.path.isdir(vcpkg_bin):
+                continue
             print(f"Copying dependency DLLs from {vcpkg_bin} to {dest_dir}...")
             for file in os.listdir(vcpkg_bin):
-                if file.endswith(".dll"):
-                    shutil.copy2(os.path.join(vcpkg_bin, file), os.path.join(dest_dir, file))
+                if not file.endswith(".dll") or file in copied_dll_names:
+                    continue
+                shutil.copy2(os.path.join(vcpkg_bin, file), os.path.join(dest_dir, file))
+                copied_dll_names.add(file)
+        if not copied_dll_names:
+            print(
+                "Warning: no vcpkg dependency DLLs found to copy "
+                f"(checked: {', '.join(vcpkg_bin_candidates)})"
+            )
 
         # Copy Qt DLLs from the exact SDK used at link time
         qt_bin_dir = os.path.join(qt_sdk_path_str, "bin")

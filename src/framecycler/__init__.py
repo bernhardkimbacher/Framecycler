@@ -15,10 +15,23 @@ if sys.platform == "win32":
     except ImportError:
         pass
 
-    vcpkg_root = os.environ.get("VCPKG_INSTALLATION_ROOT") or "C:\\vcpkg"
-    vcpkg_bin = os.path.join(vcpkg_root, "installed", "x64-windows", "bin")
-    if os.path.isdir(vcpkg_bin):
-        os.add_dll_directory(vcpkg_bin)
+    # Manifest-mode installs land in ./vcpkg_installed (or build/vcpkg_installed).
+    # Classic installs used C:\vcpkg\installed — keep as fallback.
+    _pkg_root = os.path.dirname(os.path.abspath(__file__))
+    _repo_root = os.path.dirname(os.path.dirname(_pkg_root))
+    _vcpkg_bin_candidates = [
+        os.path.join(_repo_root, "vcpkg_installed", "x64-windows", "bin"),
+        os.path.join(_repo_root, "build", "vcpkg_installed", "x64-windows", "bin"),
+        os.path.join(_repo_root, "build", "Release"),
+        _pkg_root,  # build.py copies deps next to the .pyd
+    ]
+    _vcpkg_root = os.environ.get("VCPKG_INSTALLATION_ROOT") or "C:\\vcpkg"
+    _vcpkg_bin_candidates.append(
+        os.path.join(_vcpkg_root, "installed", "x64-windows", "bin")
+    )
+    for _vcpkg_bin in _vcpkg_bin_candidates:
+        if os.path.isdir(_vcpkg_bin):
+            os.add_dll_directory(_vcpkg_bin)
 
 
 # Set default shipped OCIO config if not specified by user
