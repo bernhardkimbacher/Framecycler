@@ -120,6 +120,7 @@ jobs:
           ${{ matrix.python }} -m pip install -r requirements.txt pyinstaller pybind11 pillow
 
       - name: Compile Native C++ Core
+        # Windows: reuses ./vcpkg_installed from the install step (no second ffmpeg build).
         run: ${{ matrix.python }} build.py --clean
 
       - name: Generate Build Version Metadata

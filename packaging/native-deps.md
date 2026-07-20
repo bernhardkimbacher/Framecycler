@@ -22,6 +22,9 @@ Windows runners ship a shallow/stale `C:\vcpkg`; workflows `git fetch` +
 `vcpkg install` so the on-disk `ports/` and `versions/` match `baseline.json`.
 Manifest mode installs into `./vcpkg_installed` (cached in CI along with
 `C:\vcpkg\downloads`); classic `C:\vcpkg\installed` is unused.
+`build.py` points CMake at that tree (`VCPKG_INSTALLED_DIR` +
+`VCPKG_MANIFEST_INSTALL=OFF`) so configure does not reinstall into
+`build/vcpkg_installed`.
 
 ## macOS / Linux
 

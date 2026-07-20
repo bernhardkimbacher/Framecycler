@@ -95,7 +95,15 @@ def build_extension(*, clean: bool = False):
         configure_cmd.append(f"-DPYSIDE6_QT_LIB={pyside_qt_lib_path_str}")
     if vcpkg_toolchain:
         configure_cmd.append(f"-DCMAKE_TOOLCHAIN_FILE={vcpkg_toolchain}")
-        
+        # Reuse the repo-root manifest install (CI caches ./vcpkg_installed).
+        # Otherwise the toolchain auto-installs into build/vcpkg_installed and
+        # rebuilds ffmpeg/openimageio on every --clean configure.
+        vcpkg_installed = os.path.join(current_dir, "vcpkg_installed")
+        if os.path.isdir(os.path.join(vcpkg_installed, "x64-windows")):
+            print(f"Reusing vcpkg install at {vcpkg_installed} (manifest install disabled)")
+            configure_cmd.append(f"-DVCPKG_INSTALLED_DIR={vcpkg_installed}")
+            configure_cmd.append("-DVCPKG_MANIFEST_INSTALL=OFF")
+
     print(f"Configuring project: {configure_cmd}")
     subprocess.run(configure_cmd, check=True)
     
