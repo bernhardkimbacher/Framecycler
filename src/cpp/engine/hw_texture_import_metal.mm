@@ -255,3 +255,73 @@ bool fc_metal_import_cvpixelbuffer_to_rgba16f(
     CVMetalTextureCacheFlush(cache, 0);
     return true;
 }
+
+bool fc_metal_wrap_cvpixelbuffer_planes(
+    HwMetalImportContext* ctx,
+    void* cv_pixel_buffer,
+    int width,
+    int height,
+    void** out_plane0_mtl_texture,
+    void** out_plane1_mtl_texture,
+    int* out_sample_mode,
+    std::string* error)
+{
+    if (out_plane0_mtl_texture) {
+        *out_plane0_mtl_texture = nullptr;
+    }
+    if (out_plane1_mtl_texture) {
+        *out_plane1_mtl_texture = nullptr;
+    }
+    if (out_sample_mode) {
+        *out_sample_mode = 0;
+    }
+    if (!ctx || !ctx->cv_metal_texture_cache || !cv_pixel_buffer || width <= 0 || height <= 0
+        || !out_plane0_mtl_texture || !out_sample_mode) {
+        if (error) {
+            *error = "invalid Metal wrap arguments";
+        }
+        return false;
+    }
+
+    CVPixelBufferRef pix = static_cast<CVPixelBufferRef>(cv_pixel_buffer);
+    CVMetalTextureCacheRef cache =
+        static_cast<CVMetalTextureCacheRef>(ctx->cv_metal_texture_cache);
+    const OSType pix_fmt = CVPixelBufferGetPixelFormatType(pix);
+
+    if (pix_fmt == kCVPixelFormatType_32BGRA) {
+        id<MTLTexture> src = texture_from_cv(
+            cache, pix, MTLPixelFormatBGRA8Unorm, 0, width, height, error);
+        if (!src) {
+            return false;
+        }
+        *out_plane0_mtl_texture = (__bridge void*)src;
+        *out_sample_mode = 2;
+        return true;
+    }
+    if (pix_fmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        || pix_fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
+        id<MTLTexture> yTex = texture_from_cv(
+            cache, pix, MTLPixelFormatR8Unorm, 0, width, height, error);
+        id<MTLTexture> uvTex = texture_from_cv(
+            cache,
+            pix,
+            MTLPixelFormatRG8Unorm,
+            1,
+            width / 2,
+            height / 2,
+            error);
+        if (!yTex || !uvTex) {
+            return false;
+        }
+        *out_plane0_mtl_texture = (__bridge void*)yTex;
+        if (out_plane1_mtl_texture) {
+            *out_plane1_mtl_texture = (__bridge void*)uvTex;
+        }
+        *out_sample_mode = 1;
+        return true;
+    }
+    if (error) {
+        *error = "Unsupported CVPixelBuffer format for Metal direct wrap";
+    }
+    return false;
+}

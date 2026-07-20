@@ -25,6 +25,12 @@ struct GpuFrameKeyHash {
 
 struct GpuCacheEntry {
     QRhiTexture* texture = nullptr;
+    /// Optional chroma plane for NV12 direct-sample entries (texB bind).
+    QRhiTexture* texture_uv = nullptr;
+    /// 0 = RGBA16F, 1 = NV12 planes, 2 = BGRA8 wrapped.
+    int sample_mode = 0;
+    /// Retained CVPixelBuffer (Metal) keeping plane textures alive; CFRelease on destroy.
+    void* retained_cv_pixel_buffer = nullptr;
     int width = 0;
     int height = 0;
     int channels = 0;
@@ -104,6 +110,30 @@ public:
         QRhiTexture* texture,
         size_t bytes,
         bool gpu_only = false);
+
+    /// Planar / wrapped HW entry (sample_mode 1=NV12, 2=BGRA). texture_uv may be null.
+    void put_planar(
+        int source_index,
+        int decoder_frame,
+        int width,
+        int height,
+        int channels,
+        QRhiTexture* texture,
+        QRhiTexture* texture_uv,
+        int sample_mode,
+        void* retained_cv_pixel_buffer,
+        size_t bytes);
+
+    /// Like try_get, but also returns planar bind info when present.
+    QRhiTexture* try_get_ex(
+        int source_index,
+        int decoder_frame,
+        int width,
+        int height,
+        int channels,
+        CacheManager* cpu_cache,
+        QRhiTexture** texture_uv_out,
+        int* sample_mode_out);
 
     void evict_before_insert(size_t incoming_bytes, int source_index);
     Stats stats() const { return _stats; }

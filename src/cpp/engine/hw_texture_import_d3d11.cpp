@@ -15,6 +15,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 namespace {
 
@@ -27,6 +28,37 @@ struct D3D11ImportImpl {
     ID3D11DeviceContext* context = nullptr;
     ID3D11ComputeShader* nv12_cs = nullptr;
     ID3D11ComputeShader* p010_cs = nullptr;
+
+    // Pooled per (width, height, format) import scratch objects.
+    struct PoolKey {
+        int width = 0;
+        int height = 0;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        bool operator==(const PoolKey& o) const
+        {
+            return width == o.width && height == o.height && format == o.format;
+        }
+    };
+    struct PoolKeyHash {
+        size_t operator()(const PoolKey& k) const noexcept
+        {
+            return (static_cast<size_t>(k.width) * 1315423911u)
+                ^ (static_cast<size_t>(k.height) * 2654435761u)
+                ^ static_cast<size_t>(k.format);
+        }
+    };
+    struct PoolEntry {
+        ID3D11Texture2D* copy_tex = nullptr;
+        ID3D11ShaderResourceView* y_srv = nullptr;
+        ID3D11ShaderResourceView* uv_srv = nullptr;
+    };
+    std::unordered_map<PoolKey, PoolEntry, PoolKeyHash> pool;
+    // Last dest UAV (tied to a specific RGBA16F texture pointer).
+    ID3D11Texture2D* last_dest = nullptr;
+    ID3D11UnorderedAccessView* last_uav = nullptr;
+    uint64_t creates = 0;
+    uint64_t reuses = 0;
+    bool pool_enabled = true;
 };
 
 static const char* kNv12Shader = R"(
@@ -240,6 +272,24 @@ void fc_d3d11_release_import_context(HwD3D11ImportContext* ctx)
         return;
     }
     auto* impl = static_cast<D3D11ImportImpl*>(ctx->impl);
+    for (auto& pair : impl->pool) {
+        auto& e = pair.second;
+        if (e.y_srv) {
+            e.y_srv->Release();
+        }
+        if (e.uv_srv) {
+            e.uv_srv->Release();
+        }
+        if (e.copy_tex) {
+            e.copy_tex->Release();
+        }
+    }
+    impl->pool.clear();
+    if (impl->last_uav) {
+        impl->last_uav->Release();
+        impl->last_uav = nullptr;
+    }
+    impl->last_dest = nullptr;
     if (impl->nv12_cs) {
         impl->nv12_cs->Release();
     }
@@ -254,6 +304,37 @@ void fc_d3d11_release_import_context(HwD3D11ImportContext* ctx)
     }
     delete impl;
     ctx->impl = nullptr;
+}
+
+void fc_d3d11_get_import_pool_stats(
+    HwD3D11ImportContext* ctx,
+    uint64_t* creates_out,
+    uint64_t* reuses_out)
+{
+    if (creates_out) {
+        *creates_out = 0;
+    }
+    if (reuses_out) {
+        *reuses_out = 0;
+    }
+    if (!ctx || !ctx->impl) {
+        return;
+    }
+    auto* impl = static_cast<D3D11ImportImpl*>(ctx->impl);
+    if (creates_out) {
+        *creates_out = impl->creates;
+    }
+    if (reuses_out) {
+        *reuses_out = impl->reuses;
+    }
+}
+
+void fc_d3d11_set_import_pool_enabled(HwD3D11ImportContext* ctx, bool enabled)
+{
+    if (!ctx || !ctx->impl) {
+        return;
+    }
+    static_cast<D3D11ImportImpl*>(ctx->impl)->pool_enabled = enabled;
 }
 
 bool fc_d3d11_import_texture_to_rgba16f(
@@ -297,26 +378,75 @@ bool fc_d3d11_import_texture_to_rgba16f(
         return false;
     }
 
-    // Copy decoder slice into a single-layer SRV-capable texture (decoder
-    // pools are often BIND_DECODER-only).
-    D3D11_TEXTURE2D_DESC copyDesc = srcDesc;
-    copyDesc.Width = static_cast<UINT>(width);
-    copyDesc.Height = static_cast<UINT>(height);
-    copyDesc.MipLevels = 1;
-    copyDesc.ArraySize = 1;
-    copyDesc.SampleDesc.Count = 1;
-    copyDesc.SampleDesc.Quality = 0;
-    copyDesc.Usage = D3D11_USAGE_DEFAULT;
-    copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    copyDesc.CPUAccessFlags = 0;
-    copyDesc.MiscFlags = 0;
+    const DXGI_FORMAT y_fmt = is_nv12 ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R16_UNORM;
+    const DXGI_FORMAT uv_fmt = is_nv12 ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_UNORM;
 
     ID3D11Texture2D* copy_tex = nullptr;
-    if (FAILED(device->CreateTexture2D(&copyDesc, nullptr, &copy_tex)) || !copy_tex) {
-        if (error) {
-            *error = "CreateTexture2D (NV12/P010 copy) failed";
+    ID3D11ShaderResourceView* y_srv = nullptr;
+    ID3D11ShaderResourceView* uv_srv = nullptr;
+    bool pooled = false;
+
+    const D3D11ImportImpl::PoolKey key{width, height, srcDesc.Format};
+    if (impl->pool_enabled) {
+        auto it = impl->pool.find(key);
+        if (it != impl->pool.end() && it->second.copy_tex && it->second.y_srv && it->second.uv_srv) {
+            copy_tex = it->second.copy_tex;
+            y_srv = it->second.y_srv;
+            uv_srv = it->second.uv_srv;
+            pooled = true;
+            ++impl->reuses;
         }
-        return false;
+    }
+
+    if (!pooled) {
+        // Copy decoder slice into a single-layer SRV-capable texture (decoder
+        // pools are often BIND_DECODER-only).
+        D3D11_TEXTURE2D_DESC copyDesc = srcDesc;
+        copyDesc.Width = static_cast<UINT>(width);
+        copyDesc.Height = static_cast<UINT>(height);
+        copyDesc.MipLevels = 1;
+        copyDesc.ArraySize = 1;
+        copyDesc.SampleDesc.Count = 1;
+        copyDesc.SampleDesc.Quality = 0;
+        copyDesc.Usage = D3D11_USAGE_DEFAULT;
+        copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        copyDesc.CPUAccessFlags = 0;
+        copyDesc.MiscFlags = 0;
+
+        if (FAILED(device->CreateTexture2D(&copyDesc, nullptr, &copy_tex)) || !copy_tex) {
+            if (error) {
+                *error = "CreateTexture2D (NV12/P010 copy) failed";
+            }
+            return false;
+        }
+
+        if (!create_plane_srvs(device, copy_tex, y_fmt, uv_fmt, &y_srv, &uv_srv, error)) {
+            copy_tex->Release();
+            return false;
+        }
+        ++impl->creates;
+
+        if (impl->pool_enabled) {
+            // Replace any existing entry for this key.
+            auto it = impl->pool.find(key);
+            if (it != impl->pool.end()) {
+                if (it->second.y_srv) {
+                    it->second.y_srv->Release();
+                }
+                if (it->second.uv_srv) {
+                    it->second.uv_srv->Release();
+                }
+                if (it->second.copy_tex) {
+                    it->second.copy_tex->Release();
+                }
+            }
+            D3D11ImportImpl::PoolEntry entry;
+            entry.copy_tex = copy_tex;
+            entry.y_srv = y_srv;
+            entry.uv_srv = uv_srv;
+            impl->pool[key] = entry;
+            pooled = true; // ownership now in pool; do not Release at end
+        }
     }
 
     context->CopySubresourceRegion(
@@ -329,28 +459,36 @@ bool fc_d3d11_import_texture_to_rgba16f(
         static_cast<UINT>(array_index),
         nullptr);
 
-    ID3D11ShaderResourceView* y_srv = nullptr;
-    ID3D11ShaderResourceView* uv_srv = nullptr;
-    const DXGI_FORMAT y_fmt = is_nv12 ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R16_UNORM;
-    const DXGI_FORMAT uv_fmt = is_nv12 ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_UNORM;
-    if (!create_plane_srvs(device, copy_tex, y_fmt, uv_fmt, &y_srv, &uv_srv, error)) {
-        copy_tex->Release();
-        return false;
-    }
-
-    D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-    uavDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-    uavDesc.Texture2D.MipSlice = 0;
     ID3D11UnorderedAccessView* uav = nullptr;
-    if (FAILED(device->CreateUnorderedAccessView(dst, &uavDesc, &uav)) || !uav) {
-        y_srv->Release();
-        uv_srv->Release();
-        copy_tex->Release();
-        if (error) {
-            *error = "CreateUnorderedAccessView (RGBA16F) failed";
+    if (impl->pool_enabled && impl->last_dest == dst && impl->last_uav) {
+        uav = impl->last_uav;
+        ++impl->reuses;
+    } else {
+        if (impl->last_uav) {
+            impl->last_uav->Release();
+            impl->last_uav = nullptr;
         }
-        return false;
+        impl->last_dest = nullptr;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        uavDesc.Texture2D.MipSlice = 0;
+        if (FAILED(device->CreateUnorderedAccessView(dst, &uavDesc, &uav)) || !uav) {
+            if (!pooled) {
+                y_srv->Release();
+                uv_srv->Release();
+                copy_tex->Release();
+            }
+            if (error) {
+                *error = "CreateUnorderedAccessView (RGBA16F) failed";
+            }
+            return false;
+        }
+        ++impl->creates;
+        if (impl->pool_enabled) {
+            impl->last_dest = dst;
+            impl->last_uav = uav;
+        }
     }
 
     ID3D11ComputeShader* cs = is_nv12 ? impl->nv12_cs : impl->p010_cs;
@@ -369,10 +507,12 @@ bool fc_d3d11_import_texture_to_rgba16f(
     context->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
     context->CSSetShader(nullptr, nullptr, 0);
 
-    uav->Release();
-    y_srv->Release();
-    uv_srv->Release();
-    copy_tex->Release();
+    if (!impl->pool_enabled) {
+        uav->Release();
+        y_srv->Release();
+        uv_srv->Release();
+        copy_tex->Release();
+    }
     return true;
 }
 

@@ -44,6 +44,9 @@ struct UploadJob {
     };
     State state = State::Queued;
     void* texture = nullptr; // QRhiTexture*; owned until put/fail cleanup
+    void* texture_uv = nullptr; // optional chroma plane (NV12 direct)
+    int sample_mode = 0; // 0=RGBA, 1=NV12, 2=BGRA
+    void* retained_cv_pixel_buffer = nullptr; // CFRetain'd; released by display cache
     size_t staging_slot = 0;
     uint64_t submit_generation = 0;
 };
@@ -99,6 +102,13 @@ public:
                 destroy_texture(job.texture);
                 job.texture = nullptr;
             }
+            if (job.texture_uv) {
+                destroy_texture(job.texture_uv);
+                job.texture_uv = nullptr;
+            }
+            // retained_cv_pixel_buffer ownership transfers on put_planar; if still
+            // set here the renderer clear path must CFRelease it.
+            job.retained_cv_pixel_buffer = nullptr;
         }
         clear();
     }

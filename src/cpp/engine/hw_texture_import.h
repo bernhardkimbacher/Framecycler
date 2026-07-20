@@ -40,6 +40,20 @@ bool fc_metal_import_cvpixelbuffer_to_rgba16f(
     int height,
     std::string* error);
 
+/// Wrap CVPixelBuffer planes as MTLTextures without RGBA16F convert.
+/// On success: *out_plane0 / *out_plane1 are id<MTLTexture> (bridge cast),
+/// *out_sample_mode is 1 (NV12) or 2 (BGRA). Caller must CFRetain the pixel
+/// buffer for the lifetime of the wrapped textures. plane1 is null for BGRA.
+bool fc_metal_wrap_cvpixelbuffer_planes(
+    HwMetalImportContext* ctx,
+    void* cv_pixel_buffer,
+    int width,
+    int height,
+    void** out_plane0_mtl_texture,
+    void** out_plane1_mtl_texture,
+    int* out_sample_mode,
+    std::string* error);
+
 #else
 
 inline void* fc_metal_create_cv_texture_cache(void*, std::string* error)
@@ -58,6 +72,22 @@ inline bool fc_metal_import_cvpixelbuffer_to_rgba16f(
     void*,
     int,
     int,
+    std::string* error)
+{
+    if (error) {
+        *error = "Metal HW import not available on this platform";
+    }
+    return false;
+}
+
+inline bool fc_metal_wrap_cvpixelbuffer_planes(
+    HwMetalImportContext*,
+    void*,
+    int,
+    int,
+    void**,
+    void**,
+    int*,
     std::string* error)
 {
     if (error) {
@@ -89,6 +119,12 @@ bool fc_d3d11_import_texture_to_rgba16f(
     int height,
     std::string* error);
 
+void fc_d3d11_get_import_pool_stats(
+    HwD3D11ImportContext* ctx,
+    uint64_t* creates_out,
+    uint64_t* reuses_out);
+void fc_d3d11_set_import_pool_enabled(HwD3D11ImportContext* ctx, bool enabled);
+
 #else
 
 inline void fc_d3d11_set_shared_device(void*, void*) {}
@@ -119,6 +155,17 @@ inline bool fc_d3d11_import_texture_to_rgba16f(
     }
     return false;
 }
+
+inline void fc_d3d11_get_import_pool_stats(HwD3D11ImportContext*, uint64_t* c, uint64_t* r)
+{
+    if (c) {
+        *c = 0;
+    }
+    if (r) {
+        *r = 0;
+    }
+}
+inline void fc_d3d11_set_import_pool_enabled(HwD3D11ImportContext*, bool) {}
 
 #endif
 

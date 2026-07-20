@@ -26,8 +26,7 @@
 #include "hw_texture_import.h"
 #include "transport_clock.h"
 #include "audio_engine.h"
-
-class CacheManager;
+#include "cache_manager.h"
 
 // Structure to pass frame render slot specifications from Python/Cache
 struct FrameSlotSpec {
@@ -84,7 +83,8 @@ struct PerFrameUboData {
     int false_color_mode = 0;
     float zebra_lo = 0.02f;
     float zebra_hi = 0.98f;
-    float pad0 = 0.0f;
+    /// 0 = RGBA texA, 1 = NV12 (texA=Y, texB=UV), 2 = BGRA swizzle on texA.
+    int sample_mode = 0;
     float pad1 = 0.0f;
 };
 
@@ -229,6 +229,12 @@ public:
         int pipeline_lut_count = 0;
         /// Count of size-only presents (skipped uploads/lookahead).
         int size_only_presents = 0;
+        /// D3D/Vulkan HW import object pool counters (durable).
+        int hw_import_creates = 0;
+        int hw_import_reuses = 0;
+        /// Zero-copy CPU map uploads vs memcpy fallback this process.
+        int zc_map_uploads = 0;
+        int zc_copy_uploads = 0;
     };
     DebugStats get_debug_stats() const;
     int pipeline_lut_count() const;
@@ -241,6 +247,9 @@ private:
         int channels = 0;
         int upload_token = 0;
         int frame_index = -1;
+        /// When set, upload reads pin.data directly (no memcpy into data).
+        CacheManager* pin_cache = nullptr;
+        FramePin pin;
     };
 
     struct OcioLut {
@@ -280,6 +289,8 @@ private:
 
     struct TextureState {
         QRhiTexture* texture = nullptr;
+        QRhiTexture* texture_uv = nullptr;
+        int sample_mode = 0;
         int last_w = 0;
         int last_h = 0;
         int last_channels = 0;
@@ -345,6 +356,14 @@ private:
     void _reset_present_upload_budget();
     size_t _present_upload_job_cap() const;
     bool _try_consume_upload_job();
+    bool _try_consume_upload_bytes(size_t byte_size);
+    void _update_adaptive_upload_budget();
+    void _release_staging_pin(size_t slot);
+    bool _fill_staging_from_cache(
+        CacheManager* cpu_cache,
+        int frame_index,
+        size_t req_elements,
+        StagingBuffer& ringBuf);
 
     // Staging ring: returns slot index, or nullopt if all slots still in flight.
     std::optional<size_t> acquire_staging_slot();
@@ -492,7 +511,14 @@ private:
     /// Per-present upload job budget (reset each render_frame).
     size_t _present_upload_job_limit = 0;
     size_t _present_upload_jobs_done = 0;
+    size_t _present_upload_bytes_done = 0;
+    size_t _present_upload_byte_limit = 0;
+    /// Adaptive playing budget (job count), adjusted from end-frame / upload latency.
+    size_t _adaptive_upload_jobs = 2;
     static constexpr size_t kPlayingUploadJobsPerPresent = 2;
+    static constexpr size_t kPlayingUploadJobsMax = 4;
+    /// Soft byte ceiling while playing (~one 8K RGBA16F frame).
+    static constexpr size_t kPlayingUploadBytesPerPresent = 8ull * 1024ull * 1024ull * 8ull;
 
     std::unordered_map<int, CacheManager*> _caches;
     GpuTextureCache _displayCache;

@@ -1,0 +1,68 @@
+{
+  "timestamp": "2026-07-20T19:15:23.901519+00:00",
+  "description": "Zero-copy hot path A/B: CPU pin+map upload vs copy_frame_data; D3D import pool; adaptive upload budget; Metal direct YUV/BGRA when eligible.",
+  "methodology": "MainWindow hosted QWindow (not Null). Load sequence/movie; wait CPU cache warm; (1) isolated cold uploads with clear_display_cache between seeks; (2) warm scrub (display hits). Original A/B used FRAMECYCLER_ZC_* kill-switches (removed after validation; pin+map / pool / adaptive / direct are default).",
+  "footage": ".temp/TestFootage/KPO_012_0140",
+  "display_cache_gb": 4.0,
+  "path": "cpu_upload",
+  "before": {
+    "n_frames": 6,
+    "display_cache_gb": 4.0,
+    "path": "cpu_upload",
+    "footage": ".temp/TestFootage/KPO_012_0140",
+    "isolated_mean_upload_ms": 6706.293340333334,
+    "isolated_p95_upload_ms": 16160.094625,
+    "isolated_mean_upload_bytes": 541082304.0,
+    "isolated_staging_waits_delta": 2,
+    "warm_mean_upload_ms": 767.7327220000001,
+    "warm_mean_upload_bytes": 927569664.0,
+    "end_frame_ms_max": 0.149333,
+    "staging_waits": 4,
+    "zc_map_uploads": 0,
+    "zc_copy_uploads": 28,
+    "hw_import_creates": 0,
+    "hw_import_reuses": 0,
+    "frames_drawn": 0,
+    "env": {
+      "FRAMECYCLER_ZC_MAP": "0",
+      "FRAMECYCLER_ZC_D3D_POOL": "0",
+      "FRAMECYCLER_ZC_ADAPTIVE_BUDGET": "0",
+      "FRAMECYCLER_ZC_DIRECT_YUV": "0"
+    },
+    "label": "before_copy_path"
+  },
+  "after": {
+    "n_frames": 6,
+    "display_cache_gb": 4.0,
+    "path": "cpu_upload",
+    "footage": ".temp/TestFootage/KPO_012_0140",
+    "isolated_mean_upload_ms": 766.8417428333333,
+    "isolated_p95_upload_ms": 920.209708,
+    "isolated_mean_upload_bytes": 128829120.0,
+    "isolated_staging_waits_delta": 0,
+    "warm_mean_upload_ms": 920.209708,
+    "warm_mean_upload_bytes": 154594944.0,
+    "end_frame_ms_max": 11.334709,
+    "staging_waits": 0,
+    "zc_map_uploads": 1,
+    "zc_copy_uploads": 0,
+    "hw_import_creates": 0,
+    "hw_import_reuses": 0,
+    "frames_drawn": 0,
+    "env": {
+      "FRAMECYCLER_ZC_MAP": "1",
+      "FRAMECYCLER_ZC_D3D_POOL": "1",
+      "FRAMECYCLER_ZC_ADAPTIVE_BUDGET": "1",
+      "FRAMECYCLER_ZC_DIRECT_YUV": "1"
+    },
+    "label": "after_zero_copy"
+  },
+  "gate": {
+    "name": "zero_copy_hotpath",
+    "mean_upload_ms": 766.8417428333333,
+    "p95_upload_ms": 920.209708,
+    "mean_upload_bytes": 128829120.0,
+    "zc_map_uploads": 1,
+    "hw_import_reuses": 0
+  }
+}

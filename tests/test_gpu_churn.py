@@ -26,6 +26,10 @@ class TestGpuChurnCounters(unittest.TestCase):
             "upload_ms_total",
             "end_frame_ms_max",
             "size_only_presents",
+            "hw_import_creates",
+            "hw_import_reuses",
+            "zc_map_uploads",
+            "zc_copy_uploads",
         ):
             self.assertIn(key, stats)
             self.assertEqual(stats[key], 0)

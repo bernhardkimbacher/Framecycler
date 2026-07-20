@@ -119,6 +119,10 @@ class TestCppRenderer(unittest.TestCase):
             "last_upload_ms",
             "last_render_ms",
             "size_only_presents",
+            "hw_import_creates",
+            "hw_import_reuses",
+            "zc_map_uploads",
+            "zc_copy_uploads",
         ):
             self.assertIn(key, stats)
             self.assertIsInstance(stats[key], (int, float))

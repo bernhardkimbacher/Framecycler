@@ -112,6 +112,9 @@ Located in [`src/cpp/engine/cache_manager.{h,cpp}`](src/cpp/engine/cache_manager
 | `DisplayUploadQueue` | [`display_upload_queue.{h,cpp}`](src/cpp/engine/display_upload_queue.h) | CPU-side upload job bookkeeping |
 
 * **Present-authoritative**: On display miss + CPU hit, upload into the current RHI batch and bind immediately.
+* **Zero-copy CPU upload**: `CacheManager::pin_frame` keeps float16 memory stable across the staging generation; `QByteArray::fromRawData` uploads without `copy_frame_data` memcpy (fallback copy if pin fails). Staging ring slots hold pin handles, not pixel payloads.
+* **Adaptive upload budget**: While playing, job count adapts from `last_upload_ms` / `last_end_frame_ms` with a byte ceiling; one present-authoritative sync slot is always reserved.
+* **HW movie import**: Metal can sample NV12/BGRA planes directly (`movie_present=zerocopy_metal_direct`); otherwise convert→RGBA16F. D3D pools copy-tex/SRV/UAV objects (`hw_import_creates` / `hw_import_reuses`).
 * **Upload policy** follows playback timing: Every Frame enqueues distinctly; Realtime coalesces per source.
 * Timeline overlay can show both RAM and GPU residency.
 

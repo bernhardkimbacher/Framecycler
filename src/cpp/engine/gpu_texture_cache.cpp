@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <cmath>
 
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
 GpuTextureCache::~GpuTextureCache()
 {
     clear();
@@ -169,12 +173,29 @@ void GpuTextureCache::release_to_pool(
 
 void GpuTextureCache::destroy_entry(GpuCacheEntry& entry)
 {
+    if (entry.sample_mode != 0) {
+        // Wrapped native planes — never return to the RGBA16F free-list.
+        destroy_texture(entry.texture);
+        destroy_texture(entry.texture_uv);
+        entry.texture = nullptr;
+        entry.texture_uv = nullptr;
+#if defined(__APPLE__)
+        if (entry.retained_cv_pixel_buffer) {
+            CFRelease(static_cast<CFTypeRef>(entry.retained_cv_pixel_buffer));
+            entry.retained_cv_pixel_buffer = nullptr;
+        }
+#endif
+        entry.sample_mode = 0;
+        entry.bytes = 0;
+        return;
+    }
     if (entry.texture) {
         QRhiTexture::Format format =
             (entry.channels == 1) ? QRhiTexture::R16F : QRhiTexture::RGBA16F;
         release_to_pool(entry.texture, entry.width, entry.height, format);
         entry.texture = nullptr;
     }
+    entry.texture_uv = nullptr;
     entry.bytes = 0;
 }
 
@@ -327,8 +348,104 @@ void GpuTextureCache::put(
     entry.channels = channels;
     entry.bytes = bytes;
     entry.gpu_only = gpu_only;
+    entry.sample_mode = 0;
     _entries[key] = entry;
     _resident_bytes += bytes;
     _stats.resident_bytes = _resident_bytes;
     _stats.resident_frames = static_cast<int>(_entries.size());
+}
+
+void GpuTextureCache::put_planar(
+    int source_index,
+    int decoder_frame,
+    int width,
+    int height,
+    int channels,
+    QRhiTexture* texture,
+    QRhiTexture* texture_uv,
+    int sample_mode,
+    void* retained_cv_pixel_buffer,
+    size_t bytes)
+{
+    if (_max_bytes == 0 || !texture || sample_mode == 0) {
+        return;
+    }
+
+    GpuFrameKey key{source_index, decoder_frame};
+    auto it = _entries.find(key);
+    if (it != _entries.end()) {
+        _resident_bytes -= it->second.bytes;
+        destroy_entry(it->second);
+        _entries.erase(it);
+    } else {
+        evict_before_insert(bytes, source_index);
+    }
+
+    GpuCacheEntry entry;
+    entry.texture = texture;
+    entry.texture_uv = texture_uv;
+    entry.sample_mode = sample_mode;
+    entry.retained_cv_pixel_buffer = retained_cv_pixel_buffer;
+    entry.width = width;
+    entry.height = height;
+    entry.channels = channels;
+    entry.bytes = bytes;
+    entry.gpu_only = true;
+    _entries[key] = entry;
+    _resident_bytes += bytes;
+    _stats.resident_bytes = _resident_bytes;
+    _stats.resident_frames = static_cast<int>(_entries.size());
+}
+
+QRhiTexture* GpuTextureCache::try_get_ex(
+    int source_index,
+    int decoder_frame,
+    int width,
+    int height,
+    int channels,
+    CacheManager* cpu_cache,
+    QRhiTexture** texture_uv_out,
+    int* sample_mode_out)
+{
+    if (texture_uv_out) {
+        *texture_uv_out = nullptr;
+    }
+    if (sample_mode_out) {
+        *sample_mode_out = 0;
+    }
+    if (_max_bytes == 0) {
+        return nullptr;
+    }
+
+    GpuFrameKey key{source_index, decoder_frame};
+    auto it = _entries.find(key);
+    if (it == _entries.end()) {
+        _stats.misses++;
+        return nullptr;
+    }
+
+    const GpuCacheEntry& entry = it->second;
+    if (!entry.gpu_only) {
+        if (!cpu_cache || !cpu_cache->has_frame(decoder_frame)) {
+            erase_key(key);
+            _stats.misses++;
+            return nullptr;
+        }
+    }
+
+    if (entry.width != width || entry.height != height || entry.channels != channels
+        || !entry.texture) {
+        erase_key(key);
+        _stats.misses++;
+        return nullptr;
+    }
+
+    _stats.hits++;
+    if (texture_uv_out) {
+        *texture_uv_out = entry.texture_uv;
+    }
+    if (sample_mode_out) {
+        *sample_mode_out = entry.sample_mode;
+    }
+    return entry.texture;
 }

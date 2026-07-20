@@ -15,6 +15,24 @@ struct FrameBuffer {
     std::vector<uint16_t> data;
     bool active = false;
     uint64_t epoch = 0;
+    /// Upload pins: eviction/clear must not free pixel storage while > 0.
+    int pin_count = 0;
+};
+
+/// Stable view of a CPU-cached frame for zero-copy GPU upload.
+/// Valid until matching ``unpin_frame``; do not hold across CacheManager clear
+/// without unpinning first.
+struct FramePin {
+    int frame_index = -1;
+    uint64_t epoch = 0;
+    size_t slot_idx = static_cast<size_t>(-1);
+    const uint16_t* data = nullptr;
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    size_t element_count = 0;
+
+    bool valid() const { return data != nullptr && element_count > 0; }
 };
 
 class CacheManager {
@@ -42,6 +60,11 @@ public:
 
     bool get_frame_dimensions(int frame_index, int& width, int& height, int& channels);
     bool copy_frame_data(int frame_index, uint16_t* dest_ptr, size_t dest_size_elements);
+
+    /// Pin pixel memory for zero-copy upload. Eviction skips pinned slots.
+    /// Pair with ``unpin_frame`` after the GPU staging generation completes.
+    bool pin_frame(int frame_index, FramePin& out);
+    void unpin_frame(const FramePin& pin);
 
     /// Call *fn* while holding the shared cache lock with a stable frame pointer.
     /// Returns false if the frame is missing/inactive.

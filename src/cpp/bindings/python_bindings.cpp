@@ -947,6 +947,10 @@ PYBIND11_MODULE(framecycler_engine, m) {
             d["lut_textures_pooled_reuses"] = s.lut_textures_pooled_reuses;
             d["pipeline_lut_count"] = s.pipeline_lut_count;
             d["size_only_presents"] = s.size_only_presents;
+            d["hw_import_creates"] = s.hw_import_creates;
+            d["hw_import_reuses"] = s.hw_import_reuses;
+            d["zc_map_uploads"] = s.zc_map_uploads;
+            d["zc_copy_uploads"] = s.zc_copy_uploads;
             return d;
         })
         .def("pipeline_lut_count", &RhiRenderer::pipeline_lut_count);

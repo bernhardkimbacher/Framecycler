@@ -14,7 +14,7 @@ layout(std140, binding = 0) uniform PerFrameUbo {
     int falseColorMode;
     float zebraLo;
     float zebraHi;
-    float _pad0;
+    int sampleMode;
     float _pad1;
 } uFrame;
 
@@ -89,8 +89,27 @@ vec4 fc_false_color(vec4 inColor) {
 }
 
 void main() {
-    vec4 colorA = texture(texA, vUV);
-    vec4 colorB = texture(texB, vUV);
+    vec4 colorA;
+    vec4 colorB;
+    if (uFrame.sampleMode == 1) {
+        // NV12 biplanar: texA = luma (R), texB = chroma (RG). BT.709.
+        float y = texture(texA, vUV).r;
+        float2 cbcr = texture(texB, vUV).rg;
+        float cb = cbcr.x - 0.5;
+        float cr = cbcr.y - 0.5;
+        float r = y + 1.5748 * cr;
+        float g = y - 0.1873 * cb - 0.4681 * cr;
+        float b = y + 1.8556 * cb;
+        colorA = vec4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), 1.0);
+        colorB = colorA;
+    } else if (uFrame.sampleMode == 2) {
+        vec4 s = texture(texA, vUV);
+        colorA = vec4(s.b, s.g, s.r, s.a);
+        colorB = texture(texB, vUV);
+    } else {
+        colorA = texture(texA, vUV);
+        colorB = texture(texB, vUV);
+    }
     vec4 finalColor = colorA;
 
     if (uFrame.compareMode == 1) {

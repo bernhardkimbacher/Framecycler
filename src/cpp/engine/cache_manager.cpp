@@ -59,6 +59,11 @@ void CacheManager::_unmap_slot(size_t slot_idx) {
 
 void CacheManager::_release_slot_capacity(size_t slot_idx) {
     auto& slot = _slots[slot_idx];
+    if (slot.pin_count > 0) {
+        // Pinned for GPU upload — keep backing store; mark inactive for readers.
+        slot.active = false;
+        return;
+    }
     _allocated_bytes -= slot.data.size() * sizeof(uint16_t);
     slot.data.clear();
     slot.data.shrink_to_fit();
@@ -66,6 +71,7 @@ void CacheManager::_release_slot_capacity(size_t slot_idx) {
     slot.height = 0;
     slot.channels = 0;
     slot.active = false;
+    slot.pin_count = 0;
 }
 
 size_t CacheManager::_find_unmapped_inactive_slot() const {
@@ -404,6 +410,54 @@ bool CacheManager::copy_frame_data(int frame_index, uint16_t* dest_ptr, size_t d
     return true;
 }
 
+bool CacheManager::pin_frame(int frame_index, FramePin& out)
+{
+    out = FramePin{};
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+    auto it = _frame_to_slot.find(frame_index);
+    if (it == _frame_to_slot.end()) {
+        return false;
+    }
+    size_t idx = it->second;
+    auto& slot = _slots[idx];
+    if (!slot.active || slot.data.empty()) {
+        return false;
+    }
+    const size_t elements =
+        static_cast<size_t>(slot.width) * static_cast<size_t>(slot.height)
+        * static_cast<size_t>(slot.channels);
+    if (elements == 0 || slot.data.size() < elements) {
+        return false;
+    }
+    ++slot.pin_count;
+    out.frame_index = frame_index;
+    out.epoch = slot.epoch;
+    out.slot_idx = idx;
+    out.data = slot.data.data();
+    out.width = slot.width;
+    out.height = slot.height;
+    out.channels = slot.channels;
+    out.element_count = elements;
+    return true;
+}
+
+void CacheManager::unpin_frame(const FramePin& pin)
+{
+    if (!pin.valid() || pin.slot_idx == static_cast<size_t>(-1)) {
+        return;
+    }
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+    if (pin.slot_idx >= _slots.size()) {
+        return;
+    }
+    auto& slot = _slots[pin.slot_idx];
+    // Only unpin if this pin still matches the slot identity.
+    if (slot.epoch != pin.epoch || slot.pin_count <= 0) {
+        return;
+    }
+    --slot.pin_count;
+}
+
 bool CacheManager::with_active_frame(
     int frame_index,
     const std::function<void(const uint16_t* data, int width, int height, int channels)>& fn)
@@ -467,8 +521,10 @@ void CacheManager::clear() {
         const bool inflight =
             sit != _slot_to_frame.end() &&
             _inflight_decodes.find(sit->second) != _inflight_decodes.end();
-        if (inflight) {
+        const bool pinned = _slots[i].pin_count > 0;
+        if (inflight || pinned) {
             // Keep mapping and capacity; mark inactive so readers cannot see it.
+            // Pinned slots stay until unpin (GPU staging generation completes).
             _slots[i].active = false;
             continue;
         }
@@ -489,8 +545,11 @@ size_t CacheManager::_find_slot_to_evict(int frame_count) {
         return static_cast<size_t>(-1);
     }
 
-    // Prefer inactive slots that are NOT mid-write (inflight claim).
+    // Prefer inactive slots that are NOT mid-write (inflight claim) or pinned.
     for (size_t i = 0; i < _slots.size(); ++i) {
+        if (_slots[i].pin_count > 0) {
+            continue; // GPU upload pin — never evict
+        }
         if (!_slots[i].active) {
             auto sit = _slot_to_frame.find(i);
             if (sit != _slot_to_frame.end() &&
@@ -522,6 +581,9 @@ size_t CacheManager::_find_slot_to_evict(int frame_count) {
         const int frame_num = sit->second;
         if (_inflight_decodes.find(frame_num) != _inflight_decodes.end()) {
             continue; // never evict in-flight writes
+        }
+        if (_slots[i].pin_count > 0) {
+            continue; // never evict pinned upload frames
         }
         if (!_slots[i].active) {
             continue; // handled above
