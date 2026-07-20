@@ -69,3 +69,44 @@ def write_uint16_dpx(path: Path, width: int = 32, height: int = 16) -> None:
     if out is None or not out.open(str(path), spec) or not out.write_image(rgb):
         raise RuntimeError(f"Failed to write DPX: {oiio.geterror()}")
     out.close()
+
+
+def write_tiled_float_exr(
+    path: Path,
+    width: int = 128,
+    height: int = 96,
+    value: float = 0.5,
+    tile_size: int = 64,
+) -> None:
+    """Constant-fill tiled OpenEXR for proxy tile-read tests."""
+    require_oiio()
+    spec = oiio.ImageSpec(width, height, 3, oiio.FLOAT)
+    spec.channelnames = ("R", "G", "B")
+    spec.tile_width = tile_size
+    spec.tile_height = tile_size
+    rgb = np.full((height, width, 3), value, dtype=np.float32)
+    out = oiio.ImageOutput.create(str(path))
+    if out is None or not out.open(str(path), spec) or not out.write_image(rgb):
+        raise RuntimeError(f"Failed to write tiled EXR: {oiio.geterror()}")
+    out.close()
+
+
+def write_mipmapped_float_exr(
+    path: Path,
+    width: int = 64,
+    height: int = 32,
+    base_value: float = 0.5,
+) -> None:
+    """Constant-fill EXR with MIP levels via ImageBufAlgo.make_texture."""
+    require_oiio()
+    if width < 2 or height < 2:
+        raise ValueError("mipmapped EXR needs width/height >= 2")
+
+    spec = oiio.ImageSpec(width, height, 3, oiio.FLOAT)
+    spec.channelnames = ("R", "G", "B")
+    buf = oiio.ImageBuf(spec)
+    if not oiio.ImageBufAlgo.fill(buf, (base_value, base_value, base_value)):
+        raise RuntimeError(f"Failed to fill mip source: {oiio.geterror()}")
+    config = oiio.ImageSpec()
+    if not oiio.ImageBufAlgo.make_texture(oiio.MakeTxTexture, buf, str(path), config):
+        raise RuntimeError(f"Failed to write mipmapped EXR: {oiio.geterror()}")

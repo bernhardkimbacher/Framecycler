@@ -11,7 +11,9 @@ from tests.oiio_fixtures import (
     require_oiio,
     write_float_exr,
     write_layered_exr,
+    write_mipmapped_float_exr,
     write_scattered_channel_exr,
+    write_tiled_float_exr,
     write_uint16_dpx,
 )
 
@@ -324,6 +326,41 @@ class TestNativeDecodePath(unittest.TestCase):
         data = self.cache.get_frame_data(1)
         self.assertEqual(data.shape, (16, 32, 4))
         self.assertTrue(np.allclose(data[..., :3].astype(np.float32), 0.5, atol=0.02))
+
+    def test_decode_tiled_exr_proxy_scales(self):
+        path = self.tmp_path / "tiled.1001.exr"
+        write_tiled_float_exr(path, width=128, height=96, value=0.4, tile_size=64)
+        self.assertTrue(self.cache.decode_and_cache_frame(10, str(path), 0.5))
+        half = self.cache.get_frame_data(10)
+        self.assertEqual(half.shape, (48, 64, 4))
+        self.assertTrue(np.allclose(half[..., :3].astype(np.float32), 0.4, atol=0.02))
+
+        self.assertTrue(self.cache.decode_and_cache_frame(11, str(path), 0.25))
+        quarter = self.cache.get_frame_data(11)
+        self.assertEqual(quarter.shape, (24, 32, 4))
+        self.assertTrue(np.allclose(quarter[..., :3].astype(np.float32), 0.4, atol=0.02))
+
+    def test_decode_proxy_scanline_matches_constant(self):
+        """Scanline EXR at 0.5 must match constant fill (band path)."""
+        path = self.tmp_path / "scan.1001.exr"
+        write_float_exr(path, width=80, height=40, value=0.6)
+        self.assertTrue(self.cache.decode_and_cache_frame(1, str(path), 0.5))
+        data = self.cache.get_frame_data(1)
+        self.assertEqual(data.shape, (20, 40, 4))
+        self.assertTrue(np.allclose(data[..., :3].astype(np.float32), 0.6, atol=0.02))
+
+    def test_decode_mipmapped_exact_mip(self):
+        path = self.tmp_path / "mip.1001.exr"
+        try:
+            write_mipmapped_float_exr(path, width=64, height=32, base_value=0.5)
+        except RuntimeError as exc:
+            self.skipTest(f"mipmapped EXR write unsupported: {exc}")
+
+        # scale 0.5 → 32×16 matches mip level 1; constant fill stays ~0.5
+        self.assertTrue(self.cache.decode_and_cache_frame(1, str(path), 0.5))
+        data = self.cache.get_frame_data(1)
+        self.assertEqual(data.shape, (16, 32, 4))
+        self.assertTrue(np.allclose(data[..., :3].astype(np.float32), 0.5, atol=0.05))
 
     def test_decode_dpx(self):
         path = self.tmp_path / "plate.1001.dpx"

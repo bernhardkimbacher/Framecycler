@@ -8,6 +8,7 @@
 #include <iostream>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 namespace NativeDecoder {
 
@@ -196,6 +197,46 @@ bool read_channels_fullres(OIIO::ImageInput& in,
     return true;
 }
 
+void channel_range(const std::vector<int>& target_channels, int& ch_min, int& ch_max)
+{
+    ch_min = target_channels[0];
+    ch_max = target_channels[0];
+    for (int ch : target_channels) {
+        ch_min = std::min(ch_min, ch);
+        ch_max = std::max(ch_max, ch);
+    }
+}
+
+void expand_alpha_float(float* dest, size_t pixel_count, int out_channels, int n_target)
+{
+    if (out_channels == 4 && n_target == 3) {
+        for (size_t p = 0; p < pixel_count; ++p) {
+            dest[p * 4 + 3] = 1.0f;
+        }
+    }
+}
+
+void gather_channels_float(const float* scratch,
+                           float* dest,
+                           size_t pixel_count,
+                           int range,
+                           int ch_min,
+                           const std::vector<int>& target_channels,
+                           int out_channels)
+{
+    const int n_target = static_cast<int>(target_channels.size());
+    for (size_t p = 0; p < pixel_count; ++p) {
+        for (int c = 0; c < n_target; ++c) {
+            const int src_c = target_channels[c] - ch_min;
+            dest[p * out_channels + c] =
+                scratch[p * static_cast<size_t>(range) + src_c];
+        }
+        if (out_channels == 4 && n_target == 3) {
+            dest[p * 4 + 3] = 1.0f;
+        }
+    }
+}
+
 bool read_channels_float(OIIO::ImageInput& in,
                          int miplevel,
                          int width,
@@ -221,35 +262,307 @@ bool read_channels_float(OIIO::ImageInput& in,
                            xstride)) {
             return false;
         }
-        if (out_channels == 4 && n_target == 3) {
-            for (size_t p = 0; p < pixel_count; ++p) {
-                dest[p * 4 + 3] = 1.0f;
-            }
-        }
+        expand_alpha_float(dest, pixel_count, out_channels, n_target);
         return true;
     }
 
-    int ch_min = target_channels[0];
-    int ch_max = target_channels[0];
-    for (int ch : target_channels) {
-        ch_min = std::min(ch_min, ch);
-        ch_max = std::max(ch_max, ch);
-    }
+    int ch_min = 0;
+    int ch_max = 0;
+    channel_range(target_channels, ch_min, ch_max);
     const int range = ch_max - ch_min + 1;
     std::vector<float> scratch(pixel_count * static_cast<size_t>(range));
     if (!in.read_image(0, miplevel, ch_min, ch_max + 1, OIIO::TypeDesc::FLOAT,
                        scratch.data())) {
         return false;
     }
-    for (size_t p = 0; p < pixel_count; ++p) {
-        for (int c = 0; c < n_target; ++c) {
-            const int src_c = target_channels[c] - ch_min;
-            dest[p * out_channels + c] =
-                scratch[p * static_cast<size_t>(range) + src_c];
+    gather_channels_float(scratch.data(), dest, pixel_count, range, ch_min,
+                          target_channels, out_channels);
+    return true;
+}
+
+/// Read scanlines [ybegin, yend) into a contiguous float buffer of width×(yend-ybegin).
+bool read_channels_scanlines_float(OIIO::ImageInput& in,
+                                   int miplevel,
+                                   int width,
+                                   int ybegin,
+                                   int yend,
+                                   const std::vector<int>& target_channels,
+                                   int out_channels,
+                                   float* dest)
+{
+    if (yend <= ybegin || width <= 0) {
+        return false;
+    }
+    const int band_h = yend - ybegin;
+    const size_t pixel_count =
+        static_cast<size_t>(width) * static_cast<size_t>(band_h);
+    const int n_target = static_cast<int>(target_channels.size());
+
+    if (n_target == 1 && out_channels == 1) {
+        const int ch = target_channels[0];
+        return in.read_scanlines(0, miplevel, ybegin, yend, 0, ch, ch + 1,
+                                 OIIO::TypeDesc::FLOAT, dest);
+    }
+
+    if (channels_are_contiguous(target_channels) && n_target >= 3) {
+        const int chbegin = target_channels[0];
+        const int chend = target_channels.back() + 1;
+        const OIIO::stride_t xstride =
+            static_cast<OIIO::stride_t>(out_channels * sizeof(float));
+        if (!in.read_scanlines(0, miplevel, ybegin, yend, 0, chbegin, chend,
+                               OIIO::TypeDesc::FLOAT, dest, xstride)) {
+            return false;
         }
-        if (out_channels == 4 && n_target == 3) {
-            dest[p * 4 + 3] = 1.0f;
+        expand_alpha_float(dest, pixel_count, out_channels, n_target);
+        return true;
+    }
+
+    int ch_min = 0;
+    int ch_max = 0;
+    channel_range(target_channels, ch_min, ch_max);
+    const int range = ch_max - ch_min + 1;
+    std::vector<float> scratch(pixel_count * static_cast<size_t>(range));
+    if (!in.read_scanlines(0, miplevel, ybegin, yend, 0, ch_min, ch_max + 1,
+                           OIIO::TypeDesc::FLOAT, scratch.data())) {
+        return false;
+    }
+    gather_channels_float(scratch.data(), dest, pixel_count, range, ch_min,
+                          target_channels, out_channels);
+    return true;
+}
+
+/// Read a tile-aligned pixel rect into a contiguous float buffer (xend-xbegin)×(yend-ybegin).
+bool read_channels_tiles_float(OIIO::ImageInput& in,
+                               int miplevel,
+                               int xbegin,
+                               int xend,
+                               int ybegin,
+                               int yend,
+                               const std::vector<int>& target_channels,
+                               int out_channels,
+                               float* dest)
+{
+    if (xend <= xbegin || yend <= ybegin) {
+        return false;
+    }
+    const int region_w = xend - xbegin;
+    const int region_h = yend - ybegin;
+    const size_t pixel_count =
+        static_cast<size_t>(region_w) * static_cast<size_t>(region_h);
+    const int n_target = static_cast<int>(target_channels.size());
+
+    if (n_target == 1 && out_channels == 1) {
+        const int ch = target_channels[0];
+        return in.read_tiles(0, miplevel, xbegin, xend, ybegin, yend, 0, 1, ch, ch + 1,
+                             OIIO::TypeDesc::FLOAT, dest);
+    }
+
+    if (channels_are_contiguous(target_channels) && n_target >= 3) {
+        const int chbegin = target_channels[0];
+        const int chend = target_channels.back() + 1;
+        const OIIO::stride_t xstride =
+            static_cast<OIIO::stride_t>(out_channels * sizeof(float));
+        if (!in.read_tiles(0, miplevel, xbegin, xend, ybegin, yend, 0, 1, chbegin, chend,
+                           OIIO::TypeDesc::FLOAT, dest, xstride)) {
+            return false;
         }
+        expand_alpha_float(dest, pixel_count, out_channels, n_target);
+        return true;
+    }
+
+    int ch_min = 0;
+    int ch_max = 0;
+    channel_range(target_channels, ch_min, ch_max);
+    const int range = ch_max - ch_min + 1;
+    std::vector<float> scratch(pixel_count * static_cast<size_t>(range));
+    if (!in.read_tiles(0, miplevel, xbegin, xend, ybegin, yend, 0, 1, ch_min, ch_max + 1,
+                       OIIO::TypeDesc::FLOAT, scratch.data())) {
+        return false;
+    }
+    gather_channels_float(scratch.data(), dest, pixel_count, range, ch_min,
+                          target_channels, out_channels);
+    return true;
+}
+
+/// Box-decimate dest rows [dst_y0, dst_y1) from a source band whose first row is band_y0.
+void box_decimate_rgba_band(const float* src_band,
+                            int src_w,
+                            int src_h,
+                            int band_y0,
+                            int band_h,
+                            int src_channels,
+                            uint16_t* dst,
+                            int dst_w,
+                            int dst_h,
+                            int dst_channels,
+                            int dst_y0,
+                            int dst_y1)
+{
+    const int copy_ch = std::min(src_channels, dst_channels);
+    for (int y = dst_y0; y < dst_y1; ++y) {
+        const int y0 = (y * src_h) / dst_h;
+        const int y1 = std::max(y0 + 1, ((y + 1) * src_h) / dst_h);
+        for (int x = 0; x < dst_w; ++x) {
+            const int x0 = (x * src_w) / dst_w;
+            const int x1 = std::max(x0 + 1, ((x + 1) * src_w) / dst_w);
+            float acc[4] = {0, 0, 0, 0};
+            int count = 0;
+            for (int sy = y0; sy < y1; ++sy) {
+                const int local_y = sy - band_y0;
+                if (local_y < 0 || local_y >= band_h) {
+                    continue;
+                }
+                for (int sx = x0; sx < x1; ++sx) {
+                    const size_t sidx =
+                        (static_cast<size_t>(local_y) * src_w + sx) * src_channels;
+                    for (int c = 0; c < copy_ch; ++c) {
+                        acc[c] += src_band[sidx + c];
+                    }
+                    ++count;
+                }
+            }
+            const float inv = count > 0 ? 1.0f / static_cast<float>(count) : 0.0f;
+            const size_t didx =
+                (static_cast<size_t>(y) * dst_w + x) * dst_channels;
+            float out_f[4] = {0, 0, 0, 1.0f};
+            for (int c = 0; c < copy_ch; ++c) {
+                out_f[c] = acc[c] * inv;
+            }
+            if (dst_channels == 4 && src_channels < 4) {
+                out_f[3] = 1.0f;
+            }
+            OIIO::convert_pixel_values(OIIO::TypeDesc::FLOAT, out_f,
+                                       OIIO::TypeDesc::HALF, dst + didx,
+                                       dst_channels);
+        }
+    }
+}
+
+void source_y_range_for_dest_rows(int dst_y0,
+                                  int dst_y1,
+                                  int src_h,
+                                  int dst_h,
+                                  int& sy0,
+                                  int& sy1)
+{
+    sy0 = (dst_y0 * src_h) / dst_h;
+    const int last = dst_y1 - 1;
+    const int y0 = (last * src_h) / dst_h;
+    sy1 = std::max(y0 + 1, ((last + 1) * src_h) / dst_h);
+}
+
+bool decode_proxy_scanline(OIIO::ImageInput& in,
+                           int miplevel,
+                           int src_w,
+                           int src_h,
+                           const std::vector<int>& target_channels,
+                           int out_channels,
+                           uint16_t* dest,
+                           int dst_w,
+                           int dst_h)
+{
+    // Cap peak float scratch (~32 MiB). Prefer one wide band when it fits so
+    // OIIO pays a single read_scanlines call instead of many tiny ones.
+    constexpr size_t kMaxBandBytes = 32ull * 1024ull * 1024ull;
+    const size_t bytes_per_src_row =
+        static_cast<size_t>(src_w) * static_cast<size_t>(out_channels) * sizeof(float);
+    if (bytes_per_src_row == 0) {
+        return false;
+    }
+    const int max_band_h = std::max(
+        1,
+        static_cast<int>(std::min<size_t>(
+            static_cast<size_t>(src_h), kMaxBandBytes / bytes_per_src_row)));
+
+    std::vector<float> band;
+    int dy0 = 0;
+    while (dy0 < dst_h) {
+        int dy1 = dst_h;
+        int sy0 = 0;
+        int sy1 = 0;
+        source_y_range_for_dest_rows(dy0, dy1, src_h, dst_h, sy0, sy1);
+        // Binary-shrink dest end until the mapped source band fits the cap.
+        while ((sy1 - sy0) > max_band_h && (dy1 - dy0) > 1) {
+            dy1 = dy0 + (dy1 - dy0) / 2;
+            source_y_range_for_dest_rows(dy0, dy1, src_h, dst_h, sy0, sy1);
+        }
+        if ((sy1 - sy0) > max_band_h) {
+            return false;
+        }
+        const int band_h = sy1 - sy0;
+        band.resize(static_cast<size_t>(src_w) * static_cast<size_t>(band_h)
+            * static_cast<size_t>(out_channels));
+        if (!read_channels_scanlines_float(in, miplevel, src_w, sy0, sy1, target_channels,
+                                           out_channels, band.data())) {
+            return false;
+        }
+        box_decimate_rgba_band(band.data(), src_w, src_h, sy0, band_h, out_channels, dest,
+                               dst_w, dst_h, out_channels, dy0, dy1);
+        dy0 = dy1;
+    }
+    return true;
+}
+
+bool decode_proxy_tiled(OIIO::ImageInput& in,
+                        int miplevel,
+                        const OIIO::ImageSpec& mip_spec,
+                        const std::vector<int>& target_channels,
+                        int out_channels,
+                        uint16_t* dest,
+                        int dst_w,
+                        int dst_h)
+{
+    const int src_w = mip_spec.width;
+    const int src_h = mip_spec.height;
+    const int tile_h = mip_spec.tile_height;
+    const int tile_w = mip_spec.tile_width;
+    if (tile_w <= 0 || tile_h <= 0) {
+        return false;
+    }
+    (void)tile_w;
+
+    // Cap peak float scratch; prefer few wide tile bands over one tile-row each.
+    constexpr size_t kMaxBandBytes = 32ull * 1024ull * 1024ull;
+    const size_t bytes_per_src_row =
+        static_cast<size_t>(src_w) * static_cast<size_t>(out_channels) * sizeof(float);
+    if (bytes_per_src_row == 0) {
+        return false;
+    }
+    const int max_band_h = std::max(
+        tile_h,
+        static_cast<int>(std::min<size_t>(
+            static_cast<size_t>(src_h), kMaxBandBytes / bytes_per_src_row)));
+
+    std::vector<float> region;
+    int dy0 = 0;
+    while (dy0 < dst_h) {
+        int dy1 = dst_h;
+        int sy0 = 0;
+        int sy1 = 0;
+        source_y_range_for_dest_rows(dy0, dy1, src_h, dst_h, sy0, sy1);
+        int ty0 = (sy0 / tile_h) * tile_h;
+        int ty1 = std::min(src_h, ((sy1 + tile_h - 1) / tile_h) * tile_h);
+
+        while ((ty1 - ty0) > max_band_h && (dy1 - dy0) > 1) {
+            dy1 = dy0 + (dy1 - dy0) / 2;
+            source_y_range_for_dest_rows(dy0, dy1, src_h, dst_h, sy0, sy1);
+            ty0 = (sy0 / tile_h) * tile_h;
+            ty1 = std::min(src_h, ((sy1 + tile_h - 1) / tile_h) * tile_h);
+        }
+        if ((ty1 - ty0) > max_band_h) {
+            return false;
+        }
+
+        const int region_h = ty1 - ty0;
+        region.resize(static_cast<size_t>(src_w) * static_cast<size_t>(region_h)
+            * static_cast<size_t>(out_channels));
+        if (!read_channels_tiles_float(in, miplevel, 0, src_w, ty0, ty1, target_channels,
+                                       out_channels, region.data())) {
+            return false;
+        }
+        box_decimate_rgba_band(region.data(), src_w, src_h, ty0, region_h, out_channels,
+                               dest, dst_w, dst_h, out_channels, dy0, dy1);
+        dy0 = dy1;
     }
     return true;
 }
@@ -309,6 +622,19 @@ bool decode_opened(OIIO::ImageInput& in,
     const int src_w = mip_spec.width;
     const int src_h = mip_spec.height;
     const int src_out_ch = out_channels;
+
+    // Prefer streaming tile / scanline-band reads to avoid a full-mip float alloc.
+    if (mip_spec.tile_width > 0 && mip_spec.tile_height > 0) {
+        if (decode_proxy_tiled(in, miplevel, mip_spec, target_channels, src_out_ch, dest,
+                               out_width, out_height)) {
+            return true;
+        }
+    } else if (decode_proxy_scanline(in, miplevel, src_w, src_h, target_channels, src_out_ch,
+                                     dest, out_width, out_height)) {
+        return true;
+    }
+
+    // Fallback: full mip float + box decimate (previous behavior).
     std::vector<float> full(
         static_cast<size_t>(src_w) * static_cast<size_t>(src_h) * src_out_ch);
     if (!read_channels_float(in, miplevel, src_w, src_h, target_channels, src_out_ch,
