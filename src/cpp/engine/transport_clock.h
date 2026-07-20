@@ -77,10 +77,10 @@ public:
     int direction() const { return _program.direction; }
     double fps() const { return _program.fps; }
 
-    /// Wall-clock deadline for the next every_frame / realtime tick.
+    /// Deadline helper for Null/offscreen wall-clock pacing (not the vsync master).
     TimePoint next_deadline(TimePoint now = Clock::now()) const;
 
-    /// Advance based on elapsed wall time (realtime) or one step (every_frame).
+    /// Advance based on elapsed time since reanchor (present- or wall-supplied ``now``).
     TransportAdvanceResult tick(TimePoint now, const CanAdvanceFn& can_advance = {});
 
     /// Map a global timeline frame to a decoder frame for ``source_index``.

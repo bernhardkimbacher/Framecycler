@@ -339,6 +339,11 @@ private:
     void _update_transport_playheads(int global_frame, int direction);
     void _emit_transport_frame_changed(int frame, int direction);
     void _emit_transport_segment_boundary(int frame, int direction);
+    /// Apply dirty transport program + map current playhead into params (no advance).
+    void _prepare_transport_program_and_slots();
+    /// Advance TransportClock after a successful present (vsync-paced path).
+    void _advance_transport_after_present(TransportClock::TimePoint now);
+    /// Null/offscreen: wall-clock tick then prepare (legacy cadence).
     void _tick_transport_and_prepare();
     /// Shot-local media seconds for the audio decoder (requires `_mutex`).
     double _audio_media_time_unlocked(int global_frame) const;

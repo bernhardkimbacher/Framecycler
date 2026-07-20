@@ -162,7 +162,7 @@ class MainWindow(QMainWindow):
         # Drain coalesced C++ transport notifies on the GUI thread (no GIL on render thread).
         self._transport_poll_timer = QTimer(self)
         self._transport_poll_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._transport_poll_timer.setInterval(1)
+        self._transport_poll_timer.setInterval(8)
         self._transport_poll_timer.timeout.connect(self._poll_transport_notifies)
 
         # Timeline cache indicator refresh (throttled during playback)

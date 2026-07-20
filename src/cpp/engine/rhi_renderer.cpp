@@ -109,15 +109,25 @@ void RhiRenderer::render_thread_loop()
         bool needs_render = false;
         bool resize = false;
         bool transport_playing = false;
+        const bool null_backend = _is_fallback_null_backend.load();
         QSize target_size;
         {
             std::unique_lock<std::mutex> lock(_mutex);
             transport_playing = _transport.is_playing();
-            if (transport_playing) {
+            if (transport_playing && null_backend) {
+                // Null/offscreen: wall-clock FPS pacing (no real vsync).
                 const auto deadline = _transport.next_deadline();
                 _render_cond.wait_until(lock, deadline, [this]() {
                     return !_run_thread || _resize_pending || _redraw_needed
                         || _clear_cache_pending || _transport_program_dirty.load();
+                });
+            } else if (transport_playing) {
+                // Present-paced: proceed when exposed so beginFrame/endFrame
+                // provide display cadence; wait while hidden to avoid a CPU spin.
+                _render_cond.wait(lock, [this]() {
+                    return !_run_thread || _resize_pending || _redraw_needed
+                        || _clear_cache_pending || _transport_program_dirty.load()
+                        || (_transport.is_playing() && _exposed.load());
                 });
             } else {
                 _render_cond.wait(lock, [this]() {
@@ -137,7 +147,13 @@ void RhiRenderer::render_thread_loop()
             target_size = _pending_size;
         }
 
-        _tick_transport_and_prepare();
+        if (null_backend) {
+            // Wall-clock tick before present (CI / offscreen).
+            _tick_transport_and_prepare();
+        } else {
+            // Real swapchain: prepare current playhead; advance after endFrame.
+            _prepare_transport_program_and_slots();
+        }
 
         if (resize || needs_render || _transport.is_playing()) {
             sync_and_render_on_thread(resize, target_size);
@@ -574,8 +590,166 @@ void RhiRenderer::_emit_transport_segment_boundary(int frame, int direction)
     }
 }
 
+void RhiRenderer::_prepare_transport_program_and_slots()
+{
+    struct PlayheadApply {
+        CacheManager* cache = nullptr;
+        int playhead = 0;
+        int direction = 1;
+        int in_point = 0;
+        int out_point = 0;
+    };
+    std::vector<PlayheadApply> playhead_applies;
+    bool apply_audio = false;
+    double audio_time = 0.0;
+    bool audio_playing = false;
+    int audio_direction = 1;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        bool had_program = false;
+        if (_transport_program_dirty.exchange(false)) {
+            const bool was_playing = _pending_transport_program.playing;
+            _transport.set_program(_pending_transport_program);
+            if (was_playing) {
+                _transport.play();
+            }
+            had_program = true;
+        }
+
+        if (!_transport.is_playing() && !had_program) {
+            return;
+        }
+
+        _apply_transport_frame_to_params(
+            _pending_render_params, _transport.current_frame());
+        _apply_transport_frame_to_params(
+            _active_render_params, _transport.current_frame());
+        _render_params_dirty = true;
+        _update_transport_playheads(_transport.current_frame(), _transport.direction());
+
+        const auto prog = _transport.program();
+        const int direction = _transport.direction();
+        for (const auto& mapping : prog.slots) {
+            const int decoder_frame =
+                _transport.decoder_frame_for_source(
+                    mapping.source_index, _transport.current_frame());
+            if (decoder_frame < 0) {
+                continue;
+            }
+            auto it = _caches.find(mapping.source_index);
+            if (it == _caches.end() || !it->second) {
+                continue;
+            }
+            playhead_applies.push_back(PlayheadApply{
+                it->second,
+                decoder_frame,
+                direction,
+                mapping.playback_in,
+                mapping.playback_out});
+        }
+
+        apply_audio = true;
+        audio_time = _audio_media_time_unlocked(_transport.current_frame());
+        audio_playing = _transport.is_playing();
+        audio_direction = _transport.direction();
+    }
+
+    for (const auto& apply : playhead_applies) {
+        apply.cache->set_playhead(
+            apply.playhead, apply.direction, apply.in_point, apply.out_point);
+    }
+    if (apply_audio) {
+        _audio.sync_to_media_time(audio_time, audio_playing, audio_direction);
+    }
+}
+
+void RhiRenderer::_advance_transport_after_present(TransportClock::TimePoint now)
+{
+    TransportAdvanceResult advanced;
+    bool should_emit_move = false;
+    bool should_emit_boundary = false;
+    bool should_emit_stop = false;
+    int emit_frame = 0;
+    int emit_direction = 1;
+    struct PlayheadApply {
+        CacheManager* cache = nullptr;
+        int playhead = 0;
+        int direction = 1;
+        int in_point = 0;
+        int out_point = 0;
+    };
+    std::vector<PlayheadApply> playhead_applies;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_transport.is_playing()) {
+            return;
+        }
+
+        advanced = _transport.tick(
+            now,
+            [this](int global_frame) {
+                return _transport_can_advance_unlocked(global_frame);
+            });
+
+        if (advanced.moved) {
+            _apply_transport_frame_to_params(
+                _pending_render_params, _transport.current_frame());
+            _apply_transport_frame_to_params(
+                _active_render_params, _transport.current_frame());
+            _render_params_dirty = true;
+            _update_transport_playheads(_transport.current_frame(), _transport.direction());
+
+            const auto prog = _transport.program();
+            const int direction = _transport.direction();
+            for (const auto& mapping : prog.slots) {
+                const int decoder_frame =
+                    _transport.decoder_frame_for_source(
+                        mapping.source_index, _transport.current_frame());
+                if (decoder_frame < 0) {
+                    continue;
+                }
+                auto it = _caches.find(mapping.source_index);
+                if (it == _caches.end() || !it->second) {
+                    continue;
+                }
+                playhead_applies.push_back(PlayheadApply{
+                    it->second,
+                    decoder_frame,
+                    direction,
+                    mapping.playback_in,
+                    mapping.playback_out});
+            }
+        }
+
+        emit_frame = advanced.frame;
+        emit_direction = advanced.direction;
+        should_emit_boundary = advanced.segment_boundary;
+        should_emit_move = advanced.moved;
+        should_emit_stop = advanced.stop;
+
+        // Presentation-master → audio slave.
+        {
+            const double t = _audio_media_time_unlocked(_transport.current_frame());
+            _audio.sync_to_media_time(
+                t, _transport.is_playing(), _transport.direction());
+        }
+    }
+
+    for (const auto& apply : playhead_applies) {
+        apply.cache->set_playhead(
+            apply.playhead, apply.direction, apply.in_point, apply.out_point);
+    }
+
+    if (should_emit_boundary) {
+        _emit_transport_segment_boundary(emit_frame, emit_direction);
+    } else if (should_emit_move || should_emit_stop) {
+        _emit_transport_frame_changed(emit_frame, emit_direction);
+    }
+}
+
 void RhiRenderer::_tick_transport_and_prepare()
 {
+    // Null/offscreen path: wall-clock advance then map playhead (pre-present).
     TransportAdvanceResult advanced;
     bool had_program = false;
     bool should_emit_move = false;
@@ -624,7 +798,6 @@ void RhiRenderer::_tick_transport_and_prepare()
             _render_params_dirty = true;
             _update_transport_playheads(_transport.current_frame(), _transport.direction());
 
-            // Collect CacheManager updates while we hold the map lock; apply after.
             const auto prog = _transport.program();
             const int direction = _transport.direction();
             for (const auto& mapping : prog.slots) {
@@ -653,9 +826,6 @@ void RhiRenderer::_tick_transport_and_prepare()
         should_emit_move = advanced.moved;
         should_emit_stop = advanced.stop;
 
-        // Presentation-master → audio slave.
-        // Use shot-local media time (not global_frame/fps), otherwise audio seeks
-        // past EOF on non-zero timeline origins and plays silence.
         {
             const double t = _audio_media_time_unlocked(_transport.current_frame());
             _audio.sync_to_media_time(
@@ -1406,9 +1576,11 @@ void RhiRenderer::render_frame()
     }
 
     _debug_stats.pipeline_ready = _pipeline != nullptr;
+    bool present_ok = false;
     {
         const auto end_frame_start = Clock::now();
-        _rhi->endFrame(_swapChain);
+        const QRhi::FrameOpResult end_result = _rhi->endFrame(_swapChain);
+        present_ok = (end_result == QRhi::FrameOpSuccess);
         const auto end_frame_end = Clock::now();
         const double end_ms =
             std::chrono::duration<double, std::milli>(end_frame_end - end_frame_start).count();
@@ -1417,6 +1589,13 @@ void RhiRenderer::render_frame()
             _debug_stats.end_frame_ms_max = end_ms;
         }
     }
+
+    // Real swapchain: TransportClock advances from successful present timestamps.
+    // Null/offscreen already ticked before present in the render loop.
+    if (present_ok && !_is_fallback_null_backend.load() && _transport.is_playing()) {
+        _advance_transport_after_present(Clock::now());
+    }
+
     // Staging/GPU uploads submitted this frame are safe to treat as complete next frame.
     _completed_upload_generation = _upload_generation;
     ++_upload_generation;

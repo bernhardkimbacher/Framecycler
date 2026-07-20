@@ -141,6 +141,46 @@ class TestTransportClockTick(unittest.TestCase):
         self.assertTrue(allowed.moved)
         self.assertEqual(allowed.frame, 1)
 
+    def test_every_frame_holds_until_period_with_injected_time(self):
+        """Present-paced every_frame: hold below 1/fps, advance after (injected now)."""
+        clock = eng.TransportClock()
+        prog = self._program(
+            timing_mode=eng.TransportTimingMode.EveryFrame,
+            fps=24.0,
+            current_frame=10,
+        )
+        clock.set_program(prog)
+        clock.play_at(0.0)
+        hold = clock.tick_at(1.0 / 24.0 - 1e-4)
+        self.assertFalse(hold.moved)
+        self.assertEqual(clock.current_frame(), 10)
+        advanced = clock.tick_at(1.0 / 24.0 + 1e-4)
+        self.assertTrue(advanced.moved)
+        self.assertEqual(advanced.frame, 11)
+
+    def test_realtime_skip_with_injected_time(self):
+        clock = eng.TransportClock()
+        prog = self._program(
+            timing_mode=eng.TransportTimingMode.Realtime,
+            fps=24.0,
+            current_frame=0,
+        )
+        clock.set_program(prog)
+        clock.play_at(0.0)
+        # 5 frame periods of elapsed present time → catch up.
+        result = clock.tick_at(5.0 / 24.0 + 1e-6)
+        self.assertTrue(result.moved)
+        self.assertEqual(result.frame, 5)
+
+
+class TestNullBackendTransportFallback(unittest.TestCase):
+    def test_null_backend_api_exists(self):
+        """Null path keeps wall-clock deadline pacing; API must remain available."""
+        renderer = eng.RhiRenderer()
+        self.assertTrue(callable(getattr(renderer, "set_force_null_backend", None)))
+        self.assertTrue(callable(getattr(renderer, "is_fallback_null_backend", None)))
+        renderer.set_force_null_backend(True)
+
 
 if __name__ == "__main__":
     unittest.main()

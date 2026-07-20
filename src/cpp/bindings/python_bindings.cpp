@@ -659,6 +659,15 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def(py::init<>())
         .def("set_program", &TransportClock::set_program)
         .def("play", [](TransportClock& self) { self.play(); })
+        .def(
+            "play_at",
+            [](TransportClock& self, double t_sec) {
+                const auto tp = TransportClock::TimePoint(
+                    std::chrono::duration_cast<TransportClock::Clock::duration>(
+                        std::chrono::duration<double>(t_sec)));
+                self.play(tp);
+            },
+            py::arg("t_sec"))
         .def("pause", &TransportClock::pause)
         .def("seek", [](TransportClock& self, int frame) { self.seek(frame); },
              py::arg("global_frame"))
@@ -676,6 +685,22 @@ PYBIND11_MODULE(framecycler_engine, m) {
                 }
                 return self.tick(TransportClock::Clock::now(), pred);
             },
+            py::arg("can_advance") = py::none())
+        .def(
+            "tick_at",
+            [](TransportClock& self, double t_sec, py::object can_advance) {
+                TransportClock::CanAdvanceFn pred;
+                if (!can_advance.is_none()) {
+                    pred = [can_advance](int global_frame) -> bool {
+                        return py::bool_(can_advance(global_frame));
+                    };
+                }
+                const auto tp = TransportClock::TimePoint(
+                    std::chrono::duration_cast<TransportClock::Clock::duration>(
+                        std::chrono::duration<double>(t_sec)));
+                return self.tick(tp, pred);
+            },
+            py::arg("t_sec"),
             py::arg("can_advance") = py::none())
         .def(
             "decoder_frame_for_source",
