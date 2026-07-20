@@ -66,6 +66,23 @@ bool GpuTextureCache::contains(int source_index, int decoder_frame) const
     return _entries.find(GpuFrameKey{source_index, decoder_frame}) != _entries.end();
 }
 
+bool GpuTextureCache::try_get_dimensions(
+    int source_index,
+    int decoder_frame,
+    int& width,
+    int& height,
+    int& channels) const
+{
+    auto it = _entries.find(GpuFrameKey{source_index, decoder_frame});
+    if (it == _entries.end() || !it->second.texture) {
+        return false;
+    }
+    width = it->second.width;
+    height = it->second.height;
+    channels = it->second.channels;
+    return width > 0 && height > 0 && channels > 0;
+}
+
 bool GpuTextureCache::playhead_for_source(int source_index, SourcePlayhead& out) const
 {
     auto it = _playheads.find(source_index);
@@ -249,13 +266,15 @@ QRhiTexture* GpuTextureCache::try_get(
         return nullptr;
     }
 
-    if (!cpu_cache || !cpu_cache->has_frame(decoder_frame)) {
-        erase_key(key);
-        _stats.misses++;
-        return nullptr;
+    const GpuCacheEntry& entry = it->second;
+    if (!entry.gpu_only) {
+        if (!cpu_cache || !cpu_cache->has_frame(decoder_frame)) {
+            erase_key(key);
+            _stats.misses++;
+            return nullptr;
+        }
     }
 
-    const GpuCacheEntry& entry = it->second;
     if (entry.width != width || entry.height != height || entry.channels != channels || !entry.texture) {
         erase_key(key);
         _stats.misses++;
@@ -273,7 +292,8 @@ void GpuTextureCache::put(
     int height,
     int channels,
     QRhiTexture* texture,
-    size_t bytes)
+    size_t bytes,
+    bool gpu_only)
 {
     if (_max_bytes == 0 || !texture) {
         return;
@@ -295,6 +315,7 @@ void GpuTextureCache::put(
     entry.height = height;
     entry.channels = channels;
     entry.bytes = bytes;
+    entry.gpu_only = gpu_only;
     _entries[key] = entry;
     _resident_bytes += bytes;
     _stats.resident_bytes = _resident_bytes;

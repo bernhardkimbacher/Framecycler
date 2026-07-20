@@ -2,6 +2,7 @@
 #include "cache_manager.h"
 #include "gpu_texture_cache.h"
 #include "display_upload_queue.h"
+#include "hw_frame_ticket.h"
 #include <QWindow>
 #include <QGuiApplication>
 #include <QDebug>
@@ -17,10 +18,11 @@
 #include <cstring>
 #include <optional>
 
-#if defined(Q_OS_MACOS)
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
 #include <QtGui/rhi/qrhi_platform.h>
-#elif defined(Q_OS_WIN)
-#include <QtGui/rhi/qrhi_platform.h>
+#endif
+#if defined(Q_OS_LINUX)
+#include <QVulkanInstance>
 #endif
 
 // Quad vertex layout
@@ -192,6 +194,9 @@ bool RhiRenderer::initialize_rhi_on_thread()
     _stagingRing.resize(6);
     _stagingGeneration.assign(_stagingRing.size(), 0);
     _displayCache.set_rhi(_rhi);
+    _init_metal_hw_import();
+    _init_d3d11_hw_import();
+    _init_vulkan_hw_import();
     _debug_stats.rhi_ready = true;
     return true;
 }
@@ -261,6 +266,10 @@ void RhiRenderer::shutdown_rhi_on_thread()
         delete _fallbackRpDesc;
         _fallbackRpDesc = nullptr;
     }
+
+    _shutdown_metal_hw_import();
+    _shutdown_d3d11_hw_import();
+    _shutdown_vulkan_hw_import();
 
     delete _rhi;
     _rhi = nullptr;
@@ -481,9 +490,16 @@ bool RhiRenderer::_transport_can_advance_unlocked(int global_frame)
         if (it == _caches.end() || !it->second) {
             continue;
         }
-        if (!it->second->has_frame(decoder_frame)) {
-            return false;
+        if (it->second->has_frame(decoder_frame)) {
+            continue;
         }
+        if (_displayCache.contains(slot.source_index, decoder_frame)) {
+            continue;
+        }
+        if (_uploadQueue.has_job(slot.source_index, decoder_frame)) {
+            continue;
+        }
+        return false;
     }
     return true;
 }
@@ -946,8 +962,44 @@ void RhiRenderer::clear_grading_uniforms()
 
 void RhiRenderer::register_cache(int source_index, CacheManager* cache)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    _caches[source_index] = cache;
+    CacheManager* previous = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        auto it = _caches.find(source_index);
+        if (it != _caches.end()) {
+            previous = it->second;
+        }
+        _caches[source_index] = cache;
+    }
+    if (previous && previous != cache) {
+        HwFrameDispatch::unbind(previous);
+    }
+    if (!cache) {
+        return;
+    }
+    HwFrameDispatch::bind(
+        cache,
+        [this, source_index](int decoder_frame, HwFrameTicket ticket) -> bool {
+            std::lock_guard<std::mutex> lock(_mutex);
+            if (!_hw_import_ready()) {
+                return false;
+            }
+            const bool already = _displayCache.contains(source_index, decoder_frame);
+            UploadJobRequest req;
+            req.source_index = source_index;
+            req.decoder_frame = decoder_frame;
+            req.upload_token = decoder_frame;
+            req.kind = UploadJobKind::HwImport;
+            req.width = ticket.width();
+            req.height = ticket.height();
+            req.channels = 4;
+            if (!_uploadQueue.enqueue_hw(req, std::move(ticket), already)) {
+                return already; // already resident counts as accepted
+            }
+            _log_movie_present_mode(_hw_import_mode_name());
+            _wake_render_thread();
+            return true;
+        });
 }
 
 void RhiRenderer::set_shader_sources(const std::string& pipeline_key, const std::string& vert_src, const std::string& frag_src)
@@ -1128,7 +1180,13 @@ void RhiRenderer::render_frame()
         }
         if (cpu_cache) {
             int w = 0, h = 0, channels = 0;
-            if (cpu_cache->get_frame_dimensions(slot.frame_index, w, h, channels)) {
+            bool have_dims = false;
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                have_dims = _resolve_slot_dimensions(
+                    slot.source_index, slot.frame_index, cpu_cache, w, h, channels);
+            }
+            if (have_dims) {
                 _debug_stats.cache_hits++;
                 slot.width = w;
                 slot.height = h;
@@ -1990,6 +2048,269 @@ QRhiTexture* RhiRenderer::acquire_frame_texture(int width, int height, int chann
     return texture;
 }
 
+QRhiTexture* RhiRenderer::acquire_hw_import_texture(int width, int height)
+{
+    if (!_rhi || width <= 0 || height <= 0) {
+        return nullptr;
+    }
+    // UsedWithLoadStore so Metal/D3D11/Vulkan compute can write RGBA16F.
+    QRhiTexture* texture = _rhi->newTexture(
+        QRhiTexture::RGBA16F,
+        QSize(width, height),
+        1,
+        QRhiTexture::UsedWithLoadStore);
+    if (!texture || !texture->create()) {
+        delete texture;
+        return nullptr;
+    }
+    _debug_stats.textures_created++;
+    return texture;
+}
+
+void RhiRenderer::_log_movie_present_mode(const char* mode)
+{
+    if (_movie_present_mode_logged || !mode) {
+        return;
+    }
+    _movie_present_mode_logged = true;
+    qInfo().noquote() << QStringLiteral("movie_present=%1").arg(mode);
+}
+
+void RhiRenderer::_init_metal_hw_import()
+{
+    _shutdown_metal_hw_import();
+#if defined(Q_OS_MACOS)
+    if (!_rhi || _rhi->backend() != QRhi::Metal) {
+        return;
+    }
+    const auto* handles =
+        static_cast<const QRhiMetalNativeHandles*>(_rhi->nativeHandles());
+    if (!handles || !handles->dev) {
+        return;
+    }
+    std::string err;
+    _metal_hw_import.mtl_device = handles->dev;
+    _metal_hw_import.mtl_command_queue = handles->cmdQueue;
+    _metal_hw_import.cv_metal_texture_cache =
+        fc_metal_create_cv_texture_cache(handles->dev, &err);
+    _metal_hw_import_ready = _metal_hw_import.cv_metal_texture_cache != nullptr;
+    if (!_metal_hw_import_ready) {
+        qWarning() << "RhiRenderer: Metal HW import unavailable:"
+                    << QString::fromStdString(err);
+        _log_movie_present_mode("cpu_upload");
+    }
+#endif
+}
+
+void RhiRenderer::_shutdown_metal_hw_import()
+{
+    if (_metal_hw_import.cv_metal_texture_cache) {
+        fc_metal_release_cv_texture_cache(_metal_hw_import.cv_metal_texture_cache);
+        _metal_hw_import.cv_metal_texture_cache = nullptr;
+    }
+    _metal_hw_import.mtl_device = nullptr;
+    _metal_hw_import.mtl_command_queue = nullptr;
+    _metal_hw_import_ready = false;
+}
+
+void RhiRenderer::_init_d3d11_hw_import()
+{
+    _shutdown_d3d11_hw_import();
+#if defined(Q_OS_WIN)
+    if (!_rhi || _rhi->backend() != QRhi::D3D11) {
+        return;
+    }
+    const auto* handles =
+        static_cast<const QRhiD3D11NativeHandles*>(_rhi->nativeHandles());
+    if (!handles || !handles->dev || !handles->context) {
+        return;
+    }
+    _d3d11_hw_import.device = handles->dev;
+    _d3d11_hw_import.context = handles->context;
+    // Share with FFmpeg D3D11VA so decoder textures live on the same device.
+    fc_d3d11_set_shared_device(handles->dev, handles->context);
+
+    std::string err;
+    _d3d11_hw_import_ready = fc_d3d11_create_import_context(&_d3d11_hw_import, &err);
+    if (!_d3d11_hw_import_ready) {
+        qWarning() << "RhiRenderer: D3D11 HW import unavailable:"
+                    << QString::fromStdString(err);
+        fc_d3d11_clear_shared_device();
+        _log_movie_present_mode("cpu_upload");
+    }
+#endif
+}
+
+void RhiRenderer::_shutdown_d3d11_hw_import()
+{
+    fc_d3d11_release_import_context(&_d3d11_hw_import);
+    _d3d11_hw_import.device = nullptr;
+    _d3d11_hw_import.context = nullptr;
+    _d3d11_hw_import_ready = false;
+#if defined(Q_OS_WIN)
+    fc_d3d11_clear_shared_device();
+#endif
+}
+
+void RhiRenderer::_init_vulkan_hw_import()
+{
+    _shutdown_vulkan_hw_import();
+#if defined(Q_OS_LINUX)
+    if (!_rhi || _rhi->backend() != QRhi::Vulkan) {
+        return;
+    }
+    const auto* handles =
+        static_cast<const QRhiVulkanNativeHandles*>(_rhi->nativeHandles());
+    if (!handles || !handles->dev || !handles->physDev || !handles->inst
+        || !handles->gfxQueue) {
+        return;
+    }
+    _vulkan_hw_import.instance = handles->inst->vkInstance();
+    _vulkan_hw_import.phys_dev = handles->physDev;
+    _vulkan_hw_import.device = handles->dev;
+    _vulkan_hw_import.queue = handles->gfxQueue;
+    _vulkan_hw_import.queue_family = handles->gfxQueueFamilyIdx;
+
+    std::string err;
+    _vulkan_hw_import_ready = fc_vulkan_create_import_context(&_vulkan_hw_import, &err);
+    if (!_vulkan_hw_import_ready) {
+        qWarning() << "RhiRenderer: Vulkan HW import unavailable:"
+                    << QString::fromStdString(err);
+        _log_movie_present_mode("cpu_upload");
+    }
+#endif
+}
+
+void RhiRenderer::_shutdown_vulkan_hw_import()
+{
+    fc_vulkan_release_import_context(&_vulkan_hw_import);
+    _vulkan_hw_import.instance = nullptr;
+    _vulkan_hw_import.phys_dev = nullptr;
+    _vulkan_hw_import.device = nullptr;
+    _vulkan_hw_import.queue = nullptr;
+    _vulkan_hw_import.queue_family = 0;
+    _vulkan_hw_import_ready = false;
+}
+
+bool RhiRenderer::_hw_import_ready() const
+{
+    return _metal_hw_import_ready || _d3d11_hw_import_ready || _vulkan_hw_import_ready;
+}
+
+const char* RhiRenderer::_hw_import_mode_name() const
+{
+    if (_vulkan_hw_import_ready) {
+        return "zerocopy_vulkan";
+    }
+    if (_d3d11_hw_import_ready) {
+        return "zerocopy_d3d11";
+    }
+    if (_metal_hw_import_ready) {
+        return "zerocopy_metal";
+    }
+    return "cpu_upload";
+}
+
+bool RhiRenderer::_resolve_slot_dimensions(
+    int source_index,
+    int decoder_frame,
+    CacheManager* cpu_cache,
+    int& width,
+    int& height,
+    int& channels)
+{
+    if (cpu_cache && cpu_cache->get_frame_dimensions(decoder_frame, width, height, channels)
+        && width > 0 && height > 0) {
+        return true;
+    }
+    if (_displayCache.try_get_dimensions(source_index, decoder_frame, width, height, channels)) {
+        return true;
+    }
+    if (UploadJob* job = _uploadQueue.find_job(source_index, decoder_frame)) {
+        if (job->width > 0 && job->height > 0) {
+            width = job->width;
+            height = job->height;
+            channels = job->channels > 0 ? job->channels : 4;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RhiRenderer::_import_hw_job(UploadJob* job)
+{
+    if (!job || job->kind != UploadJobKind::HwImport || !job->hw_ticket.valid()) {
+        return false;
+    }
+    if (!_hw_import_ready() || !_rhi) {
+        return false;
+    }
+    const int w = job->hw_ticket.width();
+    const int h = job->hw_ticket.height();
+    if (w <= 0 || h <= 0) {
+        return false;
+    }
+
+    QRhiTexture* texture = acquire_hw_import_texture(w, h);
+    if (!texture) {
+        return false;
+    }
+
+    const QRhiTexture::NativeTexture native = texture->nativeTexture();
+    void* native_tex = reinterpret_cast<void*>(static_cast<uintptr_t>(native.object));
+    if (!native_tex) {
+        texture->destroy();
+        delete texture;
+        return false;
+    }
+
+    std::string err;
+    bool ok = false;
+    const auto kind = job->hw_ticket.kind();
+    if (kind == HwFrameTicket::Kind::CVPixelBuffer && _metal_hw_import_ready) {
+        ok = fc_metal_import_cvpixelbuffer_to_rgba16f(
+            &_metal_hw_import,
+            job->hw_ticket.native(),
+            native_tex,
+            w,
+            h,
+            &err);
+    } else if (kind == HwFrameTicket::Kind::D3D11Texture2D && _d3d11_hw_import_ready) {
+        ok = fc_d3d11_import_texture_to_rgba16f(
+            &_d3d11_hw_import,
+            job->hw_ticket.native(),
+            job->hw_ticket.array_index(),
+            native_tex,
+            w,
+            h,
+            &err);
+    } else if (kind == HwFrameTicket::Kind::DrmPrimeFrame && _vulkan_hw_import_ready) {
+        ok = fc_vulkan_import_drm_prime_to_rgba16f(
+            &_vulkan_hw_import,
+            job->hw_ticket.native(),
+            native_tex,
+            w,
+            h,
+            &err);
+    } else {
+        err = "HW ticket kind does not match active import backend";
+    }
+
+    if (!ok) {
+        qWarning() << "RhiRenderer: HW import failed:" << QString::fromStdString(err);
+        texture->destroy();
+        delete texture;
+        return false;
+    }
+
+    job->width = w;
+    job->height = h;
+    job->channels = 4;
+    job->texture = texture;
+    job->hw_ticket.reset();
+    return true;
+}
+
 void RhiRenderer::put_ready_upload_jobs()
 {
     std::vector<UploadJob> ready;
@@ -2013,8 +2334,10 @@ void RhiRenderer::put_ready_upload_jobs()
             job.height,
             job.channels,
             tex,
-            bytes);
+            bytes,
+            job.kind == UploadJobKind::HwImport);
         job.texture = nullptr;
+        job.hw_ticket.reset();
     }
 }
 
@@ -2270,6 +2593,53 @@ void RhiRenderer::drain_upload_queue(QRhiResourceUpdateBatch* batch)
         if (!job) {
             continue;
         }
+
+        if (_displayCache.contains(job->source_index, job->decoder_frame)) {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _uploadQueue.mark_failed(job);
+            continue;
+        }
+
+        if (job->kind == UploadJobKind::HwImport) {
+            if (!_try_consume_upload_job()) {
+                break;
+            }
+            if (!_import_hw_job(job)) {
+                std::lock_guard<std::mutex> lock(_mutex);
+                _uploadQueue.mark_failed(job);
+                if (_present_upload_jobs_done > 0) {
+                    --_present_upload_jobs_done;
+                }
+                _log_movie_present_mode("cpu_upload");
+                continue;
+            }
+            // Sync Metal compute — resident immediately (no staging generation).
+            auto* tex = static_cast<QRhiTexture*>(job->texture);
+            const size_t bytes = static_cast<size_t>(job->width) * static_cast<size_t>(job->height)
+                * static_cast<size_t>(job->channels) * sizeof(uint16_t);
+            if (tex && _displayCache.enabled()) {
+                _displayCache.put(
+                    job->source_index,
+                    job->decoder_frame,
+                    job->width,
+                    job->height,
+                    job->channels,
+                    tex,
+                    bytes,
+                    /*gpu_only=*/true);
+                job->texture = nullptr;
+            } else {
+                destroy_upload_texture(job->texture);
+                job->texture = nullptr;
+            }
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                _uploadQueue.discard(job);
+            }
+            _debug_stats.last_upload_count++;
+            continue;
+        }
+
         CacheManager* cpu_cache = nullptr;
         {
             std::lock_guard<std::mutex> lock(_mutex);
@@ -2287,13 +2657,6 @@ void RhiRenderer::drain_upload_queue(QRhiResourceUpdateBatch* batch)
         int w = 0, h = 0, channels = 0;
         if (!cpu_cache->get_frame_dimensions(job->decoder_frame, w, h, channels) || w <= 0 || h <= 0) {
             // Keep Queued — decode may still be in flight.
-            continue;
-        }
-
-        if (_displayCache.contains(job->source_index, job->decoder_frame)) {
-            // Do not erase here — other job* from take_queued_for_submit must stay valid.
-            std::lock_guard<std::mutex> lock(_mutex);
-            _uploadQueue.mark_failed(job);
             continue;
         }
 
@@ -2634,6 +2997,21 @@ void RhiRenderer::upload_texture_2d_lut(OcioLut& lut, QRhiResourceUpdateBatch* b
 
 void RhiRenderer::_release_gpu_resources() {
     _uploadQueue.clear_with([this](void* tex) { destroy_upload_texture(tex); });
+    {
+        std::vector<CacheManager*> caches;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            caches.reserve(_caches.size());
+            for (const auto& pair : _caches) {
+                if (pair.second) {
+                    caches.push_back(pair.second);
+                }
+            }
+        }
+        for (CacheManager* cache : caches) {
+            HwFrameDispatch::unbind(cache);
+        }
+    }
     clear_tile_srb_cache();
     if (_displayCache.enabled()) {
         _displayCache.clear();

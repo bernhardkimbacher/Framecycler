@@ -1,0 +1,23 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D luma;
+layout(set = 0, binding = 1) uniform sampler2D chroma;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D dest;
+
+void main()
+{
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dest);
+    if (id.x >= size.x || id.y >= size.y) {
+        return;
+    }
+    float y = texelFetch(luma, id, 0).r;
+    vec2 cbcr = texelFetch(chroma, id / 2, 0).rg;
+    float cb = cbcr.x - 0.5;
+    float cr = cbcr.y - 0.5;
+    float r = y + 1.5748 * cr;
+    float g = y - 0.1873 * cb - 0.4681 * cr;
+    float b = y + 1.8556 * cb;
+    imageStore(dest, id, vec4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), 1.0));
+}

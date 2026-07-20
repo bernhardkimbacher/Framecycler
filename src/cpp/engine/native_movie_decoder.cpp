@@ -1,4 +1,7 @@
 #include "native_movie_decoder.h"
+#include "half_convert.h"
+#include "hw_frame_ticket.h"
+#include "hw_texture_import.h"
 
 #include <algorithm>
 #include <cmath>
@@ -8,14 +11,6 @@
 #include <iostream>
 #include <vector>
 
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-#include <arm_neon.h>
-#define FC_HAS_NEON 1
-#elif defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-#include <emmintrin.h>
-#define FC_HAS_SSE2 1
-#endif
-
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -24,50 +19,16 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
+#if defined(_WIN32)
+#include <libavutil/hwcontext_d3d11va.h>
+#endif
+#if defined(__linux__)
+#include <libavutil/hwcontext_drm.h>
+#include <libavutil/pixfmt.h>
+#endif
 }
 
 namespace {
-
-uint16_t float32_to_half(float value)
-{
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    const uint32_t sign = (bits >> 16) & 0x8000u;
-    int32_t exp = static_cast<int32_t>((bits >> 23) & 0xff) - 127 + 15;
-    uint32_t mant = bits & 0x7fffffu;
-
-    if (exp <= 0) {
-        if (exp < -10) {
-            return static_cast<uint16_t>(sign);
-        }
-        mant |= 0x800000u;
-        const uint32_t t = static_cast<uint32_t>(14 - exp);
-        uint32_t half_mant = mant >> t;
-        if ((mant >> (t - 1)) & 1u) {
-            ++half_mant;
-        }
-        return static_cast<uint16_t>(sign | half_mant);
-    }
-    if (exp >= 31) {
-        return static_cast<uint16_t>(sign | 0x7c00u);
-    }
-    uint32_t half = static_cast<uint32_t>(exp) << 10;
-    half |= mant >> 13;
-    if (mant & 0x1000u) {
-        ++half;
-    }
-    return static_cast<uint16_t>(sign | half);
-}
-
-uint16_t u8_to_half(uint8_t v)
-{
-    return float32_to_half(static_cast<float>(v) / 255.0f);
-}
-
-uint16_t u16_to_half(uint16_t v)
-{
-    return float32_to_half(static_cast<float>(v) / 65535.0f);
-}
 
 bool pix_fmt_has_alpha(AVPixelFormat fmt)
 {
@@ -126,50 +87,6 @@ std::string dict_get(AVDictionary* dict, const char* key)
         return entry->value;
     }
     return {};
-}
-
-void convert_rgba64_to_half(const uint16_t* src, uint16_t* dst, size_t count)
-{
-    size_t i = 0;
-#if defined(FC_HAS_NEON)
-    // Process 4 channels × 2 pixels (8 u16) at a time when aligned batches allow.
-    for (; i + 8 <= count; i += 8) {
-        for (size_t k = 0; k < 8; ++k) {
-            dst[i + k] = u16_to_half(src[i + k]);
-        }
-    }
-#elif defined(FC_HAS_SSE2)
-    for (; i + 8 <= count; i += 8) {
-        for (size_t k = 0; k < 8; ++k) {
-            dst[i + k] = u16_to_half(src[i + k]);
-        }
-    }
-#endif
-    for (; i < count; ++i) {
-        dst[i] = u16_to_half(src[i]);
-    }
-}
-
-void convert_rgbaf32_to_half(const float* src, uint16_t* dst, size_t count)
-{
-    for (size_t i = 0; i < count; ++i) {
-        dst[i] = float32_to_half(src[i]);
-    }
-}
-
-void convert_rgba8_to_half(const uint8_t* src, uint16_t* dst, size_t count)
-{
-    size_t i = 0;
-#if defined(FC_HAS_NEON) || defined(FC_HAS_SSE2)
-    for (; i + 16 <= count; i += 16) {
-        for (size_t k = 0; k < 16; ++k) {
-            dst[i + k] = u8_to_half(src[i + k]);
-        }
-    }
-#endif
-    for (; i < count; ++i) {
-        dst[i] = u8_to_half(src[i]);
-    }
 }
 
 AVHWDeviceType platform_hw_device_type()
@@ -338,6 +255,22 @@ std::string NativeMovieDecoder::pix_fmt_name() const
     return _pix_fmt_name;
 }
 
+bool NativeMovieDecoder::hw_zerocopy_eligible() const
+{
+    if (movie_force_cpu_upload()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_hw_pix_fmt < 0) {
+        return false;
+    }
+    if (_hw_type == "videotoolbox" || _hw_type == "vaapi") {
+        return true;
+    }
+    // D3D11VA zero-copy requires the shared QRhi D3D11 device.
+    return _hw_type == "d3d11va" && _hw_device_shared;
+}
+
 void NativeMovieDecoder::_release_hw()
 {
     if (_hw_device_ctx) {
@@ -346,6 +279,7 @@ void NativeMovieDecoder::_release_hw()
     }
     _hw_pix_fmt = -1;
     _hw_type = "software";
+    _hw_device_shared = false;
 }
 
 bool NativeMovieDecoder::_try_open_hw(AVCodecContext* codec_ctx, const AVCodec* codec)
@@ -372,20 +306,54 @@ bool NativeMovieDecoder::_try_open_hw(AVCodecContext* codec_ctx, const AVCodec* 
     }
 
     AVBufferRef* device_ctx = nullptr;
-    int err = av_hwdevice_ctx_create(&device_ctx, type, nullptr, nullptr, 0);
-#if !defined(__APPLE__) && !defined(_WIN32)
-    // Linux VAAPI: only retry a render node when the default device failed and
-    // the node exists — avoids noisy failures on headless CI runners.
-    if (err < 0 && std::filesystem::exists("/dev/dri/renderD128")) {
-        err = av_hwdevice_ctx_create(&device_ctx, type, "/dev/dri/renderD128", nullptr, 0);
+    bool shared = false;
+    int err = -1;
+
+#if defined(_WIN32)
+    if (type == AV_HWDEVICE_TYPE_D3D11VA) {
+        void* shared_dev = nullptr;
+        void* shared_ctx = nullptr;
+        if (fc_d3d11_get_shared_device(&shared_dev, &shared_ctx) && shared_dev) {
+            (void)shared_ctx; // QRhi context stays render-thread-only
+            device_ctx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+            if (device_ctx) {
+                auto* hwctx = reinterpret_cast<AVHWDeviceContext*>(device_ctx->data);
+                auto* d3d11 = static_cast<AVD3D11VADeviceContext*>(hwctx->hwctx);
+                // Share the device so decoder textures are importable; leave
+                // device_context null so FFmpeg owns its own immediate context
+                // (avoids racing QRhi on the same ID3D11DeviceContext).
+                d3d11->device = static_cast<ID3D11Device*>(shared_dev);
+                d3d11->device_context = nullptr;
+                err = av_hwdevice_ctx_init(device_ctx);
+                if (err >= 0) {
+                    shared = true;
+                } else {
+                    av_buffer_unref(&device_ctx);
+                    device_ctx = nullptr;
+                }
+            }
+        }
     }
 #endif
+
+    if (!device_ctx) {
+        err = av_hwdevice_ctx_create(&device_ctx, type, nullptr, nullptr, 0);
+#if !defined(__APPLE__) && !defined(_WIN32)
+        // Linux VAAPI: only retry a render node when the default device failed and
+        // the node exists — avoids noisy failures on headless CI runners.
+        if (err < 0 && std::filesystem::exists("/dev/dri/renderD128")) {
+            err = av_hwdevice_ctx_create(&device_ctx, type, "/dev/dri/renderD128", nullptr, 0);
+        }
+#endif
+        shared = false;
+    }
     if (err < 0 || !device_ctx) {
         return false;
     }
 
     _hw_device_ctx = device_ctx;
     _hw_pix_fmt = hw_pix;
+    _hw_device_shared = shared;
     codec_ctx->hw_device_ctx = av_buffer_ref(_hw_device_ctx);
     codec_ctx->opaque = this;
     codec_ctx->get_format = hw_get_format_callback;
@@ -836,21 +804,26 @@ bool NativeMovieDecoder::_transfer_hw_frame(AVFrame* hw_frame, AVFrame* sw_frame
     return true;
 }
 
-bool NativeMovieDecoder::_decode_next_frame(AVFrame* out_frame)
+bool NativeMovieDecoder::_decode_next_frame(AVFrame* out_frame, bool keep_hw_surface)
 {
+    auto maybe_download = [&](AVFrame* frame) -> bool {
+        if (_hw_pix_fmt < 0 || frame->format != _hw_pix_fmt) {
+            return true;
+        }
+        if (keep_hw_surface) {
+            return true;
+        }
+        if (!_transfer_hw_frame(frame, _sw_frame)) {
+            return false;
+        }
+        av_frame_unref(frame);
+        return av_frame_ref(frame, _sw_frame) >= 0;
+    };
+
     while (true) {
         const int receive = avcodec_receive_frame(_codec, out_frame);
         if (receive == 0) {
-            if (_hw_pix_fmt >= 0 && out_frame->format == _hw_pix_fmt) {
-                if (!_transfer_hw_frame(out_frame, _sw_frame)) {
-                    return false;
-                }
-                av_frame_unref(out_frame);
-                if (av_frame_ref(out_frame, _sw_frame) < 0) {
-                    return false;
-                }
-            }
-            return true;
+            return maybe_download(out_frame);
         }
         if (receive != AVERROR(EAGAIN)) {
             return false;
@@ -865,16 +838,7 @@ bool NativeMovieDecoder::_decode_next_frame(AVFrame* out_frame)
                 if (flushed != 0) {
                     return false;
                 }
-                if (_hw_pix_fmt >= 0 && out_frame->format == _hw_pix_fmt) {
-                    if (!_transfer_hw_frame(out_frame, _sw_frame)) {
-                        return false;
-                    }
-                    av_frame_unref(out_frame);
-                    if (av_frame_ref(out_frame, _sw_frame) < 0) {
-                        return false;
-                    }
-                }
-                return true;
+                return maybe_download(out_frame);
             }
             if (_packet->stream_index != _video_stream) {
                 continue;
@@ -992,26 +956,25 @@ NativeDecoder::DecodeResult NativeMovieDecoder::_frame_to_half(AVFrame* frame, f
     result.pixel_data.resize(n);
 
     if (dst_fmt == static_cast<int>(AV_PIX_FMT_RGBA64)) {
-        convert_rgba64_to_half(
+        fc::convert_rgba64_to_half(
             reinterpret_cast<const uint16_t*>(_convert_scratch.data()),
             result.pixel_data.data(),
             n);
 #ifdef AV_PIX_FMT_RGBAF32
     } else if (dst_fmt == static_cast<int>(AV_PIX_FMT_RGBAF32)) {
-        convert_rgbaf32_to_half(
+        fc::convert_rgbaf32_to_half(
             reinterpret_cast<const float*>(_convert_scratch.data()),
             result.pixel_data.data(),
             n);
 #endif
     } else {
-        convert_rgba8_to_half(_convert_scratch.data(), result.pixel_data.data(), n);
+        fc::convert_rgba8_to_half(_convert_scratch.data(), result.pixel_data.data(), n);
     }
 
     if (!_has_alpha) {
-        constexpr uint16_t kOne = 0x3C00;
-        for (size_t p = 0; p < static_cast<size_t>(dst_w) * static_cast<size_t>(dst_h); ++p) {
-            result.pixel_data[p * 4 + 3] = kOne;
-        }
+        fc::fill_opaque_alpha_half(
+            result.pixel_data.data(),
+            static_cast<size_t>(dst_w) * static_cast<size_t>(dst_h));
     }
     result.success = true;
     return result;
@@ -1095,6 +1058,111 @@ NativeDecoder::DecodeResult NativeMovieDecoder::decode_frame(int absolute_frame_
 
         free_last();
         last_clone = av_frame_clone(decoded);
+        _next_presentation_index = presentation + 1;
+    }
+}
+
+HwFrameTicket NativeMovieDecoder::decode_hw_frame(int absolute_frame_index, float resolution_scale)
+{
+    if (resolution_scale < 0.999f || resolution_scale > 1.001f) {
+        return {};
+    }
+    if (movie_force_cpu_upload()) {
+        return {};
+    }
+
+    std::lock_guard<std::mutex> lock(_mutex);
+    const bool vt = (_hw_type == "videotoolbox");
+    const bool d3d11 = (_hw_type == "d3d11va" && _hw_device_shared);
+    const bool vaapi = (_hw_type == "vaapi");
+    if (!_fmt || !_codec || !_frame || _hw_pix_fmt < 0 || (!vt && !d3d11 && !vaapi)) {
+        return {};
+    }
+
+    const int internal = absolute_frame_index - _start_frame;
+    if (internal < 0 || internal >= _frame_count) {
+        return {};
+    }
+
+    const bool sequential = (_last_decoded_internal >= 0 && internal == _last_decoded_internal + 1);
+    if (!sequential) {
+        if (!_seek_to_internal(internal)) {
+            return {};
+        }
+    } else if (_next_presentation_index < 0) {
+        _next_presentation_index = internal;
+    }
+
+    AVFrame* decoded = _frame;
+    while (true) {
+        if (!_decode_next_frame(decoded, /*keep_hw_surface=*/true)) {
+            return {};
+        }
+
+        int presentation = _next_presentation_index;
+        if (presentation < 0) {
+            int64_t pts = decoded->best_effort_timestamp;
+            if (pts == AV_NOPTS_VALUE) {
+                pts = decoded->pts;
+            }
+            presentation = _frame_index_from_pts(pts);
+            if (presentation < 0) {
+                presentation = sequential ? internal : 0;
+            }
+            _next_presentation_index = presentation;
+        }
+
+        if (presentation == internal) {
+            if (_hw_pix_fmt < 0 || decoded->format != _hw_pix_fmt) {
+                return {};
+            }
+            HwFrameTicket ticket;
+            if (vt) {
+                if (!decoded->data[3]) {
+                    return {};
+                }
+                ticket = HwFrameTicket::from_cv_pixel_buffer(
+                    decoded->data[3], _width, _height);
+            } else if (d3d11) {
+                // AV_PIX_FMT_D3D11: data[0]=ID3D11Texture2D*, data[1]=array index
+                if (!decoded->data[0]) {
+                    return {};
+                }
+                const int array_index =
+                    static_cast<int>(reinterpret_cast<intptr_t>(decoded->data[1]));
+                ticket = HwFrameTicket::from_d3d11_texture(
+                    decoded->data[0], array_index, _width, _height);
+            } else if (vaapi) {
+#if defined(__linux__)
+                AVFrame* drm = av_frame_alloc();
+                if (!drm) {
+                    return {};
+                }
+                drm->format = AV_PIX_FMT_DRM_PRIME;
+                int map_err = av_hwframe_map(drm, decoded, AV_HWFRAME_MAP_READ);
+                if (map_err < 0) {
+                    av_frame_unref(drm);
+                    drm->format = AV_PIX_FMT_DRM_PRIME;
+                    map_err = av_hwframe_map(drm, decoded, 0);
+                }
+                if (map_err < 0 || drm->format != AV_PIX_FMT_DRM_PRIME || !drm->data[0]) {
+                    av_frame_free(&drm);
+                    return {};
+                }
+                ticket = HwFrameTicket::from_drm_prime_avframe(drm, _width, _height);
+#else
+                return {};
+#endif
+            }
+            if (ticket.valid()) {
+                _last_decoded_internal = internal;
+                _next_presentation_index = internal + 1;
+            }
+            return ticket;
+        }
+        if (presentation > internal) {
+            return {};
+        }
         _next_presentation_index = presentation + 1;
     }
 }

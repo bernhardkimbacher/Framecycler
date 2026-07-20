@@ -1,5 +1,7 @@
 #pragma once
 
+#include "hw_frame_ticket.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -10,10 +12,19 @@ enum class UploadQueuePolicy {
     Realtime = 1,
 };
 
+enum class UploadJobKind {
+    CpuFloat16 = 0,
+    HwImport = 1,
+};
+
 struct UploadJobRequest {
     int source_index = 0;
     int decoder_frame = 0;
     int upload_token = 0;
+    UploadJobKind kind = UploadJobKind::CpuFloat16;
+    int width = 0;
+    int height = 0;
+    int channels = 4;
 };
 
 struct UploadJob {
@@ -23,6 +34,8 @@ struct UploadJob {
     int height = 0;
     int channels = 0;
     int upload_token = 0;
+    UploadJobKind kind = UploadJobKind::CpuFloat16;
+    HwFrameTicket hw_ticket;
     enum class State {
         Queued = 0,
         Uploading = 1,
@@ -54,6 +67,8 @@ public:
 
     // Returns true if a new Queued job was inserted.
     bool enqueue(const UploadJobRequest& req, bool already_resident);
+    /// Enqueue a retained HW surface for GPU import (macOS VT → Metal).
+    bool enqueue_hw(const UploadJobRequest& req, HwFrameTicket ticket, bool already_resident);
 
     bool has_job(int source_index, int decoder_frame) const;
     UploadJob* find_job(int source_index, int decoder_frame);

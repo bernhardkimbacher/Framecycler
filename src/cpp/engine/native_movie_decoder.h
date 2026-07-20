@@ -1,6 +1,7 @@
 #pragma once
 
 #include "native_decoder.h"
+#include "hw_frame_ticket.h"
 
 #include <cstdint>
 #include <mutex>
@@ -45,7 +46,15 @@ public:
     int bits_per_raw_sample() const;
     std::string pix_fmt_name() const;
 
+    /// True when VT/D3D11VA/VAAPI surfaces can skip CPU upload
+    /// (disabled by FRAMECYCLER_MOVIE_CPU_UPLOAD).
+    /// On Windows, requires the decoder HW device to share QRhi's D3D11 device.
+    bool hw_zerocopy_eligible() const;
+
     NativeDecoder::DecodeResult decode_frame(int absolute_frame_index, float resolution_scale);
+    /// Retain a HW surface (CVPixelBuffer / D3D11 / DRM PRIME) for GPU import.
+    /// Empty on fallback/proxy scale / ineligible HW.
+    HwFrameTicket decode_hw_frame(int absolute_frame_index, float resolution_scale);
 
     /// Used by FFmpeg get_format callback (must be callable from C).
     int _get_hw_format(const int* pix_fmts) const;
@@ -63,7 +72,7 @@ private:
     void _release_hw();
     bool _validate_decode_or_fallback_sw(const std::string& path);
     bool _ensure_sws(int src_w, int src_h, int src_fmt, int dst_w, int dst_h, int dst_fmt);
-    bool _decode_next_frame(AVFrame* out_frame);
+    bool _decode_next_frame(AVFrame* out_frame, bool keep_hw_surface = false);
     bool _transfer_hw_frame(AVFrame* hw_frame, AVFrame* sw_frame);
     bool _seek_to_internal(int internal_index);
     int _frame_index_from_pts(int64_t pts) const;
@@ -94,6 +103,8 @@ private:
     std::string _pix_fmt_name = "unknown";
     std::string _hw_type = "software";
     int _hw_pix_fmt = -1;
+    /// Windows: true when D3D11VA was opened on the shared QRhi D3D11 device.
+    bool _hw_device_shared = false;
 
     // Presentation-order PTS list and keyframe seek table (built on open).
     std::vector<int64_t> _frame_pts;

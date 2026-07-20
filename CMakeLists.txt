@@ -6,6 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
+if(APPLE)
     list(APPEND CMAKE_PREFIX_PATH
         "/opt/homebrew"
         "/opt/homebrew/opt/openimageio"
@@ -43,6 +47,7 @@ find_package(Qt6 COMPONENTS GuiPrivate ShaderToolsPrivate)
 
 find_package(OpenImageIO REQUIRED)
 find_package(FFmpeg REQUIRED)
+find_package(Vulkan)
 
 pybind11_add_module(framecycler_engine
     src/cpp/bindings/python_bindings.cpp
@@ -52,6 +57,8 @@ pybind11_add_module(framecycler_engine
     src/cpp/engine/gpu_texture_cache.cpp
     src/cpp/engine/display_upload_queue.cpp
     src/cpp/engine/native_decoder.cpp
+    src/cpp/engine/half_convert.cpp
+    src/cpp/engine/hw_frame_ticket.cpp
     src/cpp/engine/native_movie_decoder.cpp
     src/cpp/engine/native_audio_decoder.cpp
     src/cpp/engine/audio_engine.cpp
@@ -59,6 +66,26 @@ pybind11_add_module(framecycler_engine
     src/cpp/engine/transport_clock.cpp
     src/cpp/engine/scope_analyzer.cpp
 )
+
+if(APPLE)
+    target_sources(framecycler_engine PRIVATE
+        src/cpp/engine/hw_texture_import_metal.mm
+    )
+    set_source_files_properties(
+        src/cpp/engine/hw_texture_import_metal.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+    )
+elseif(WIN32)
+    target_sources(framecycler_engine PRIVATE
+        src/cpp/engine/hw_texture_import_d3d11.cpp
+    )
+elseif(UNIX AND NOT APPLE)
+    if(Vulkan_FOUND)
+        target_sources(framecycler_engine PRIVATE
+            src/cpp/engine/hw_texture_import_vulkan.cpp
+        )
+    endif()
+endif()
 
 target_include_directories(framecycler_engine PRIVATE
     src/cpp/engine
@@ -82,9 +109,18 @@ if(APPLE)
         "-framework AudioUnit"
         "-framework CoreFoundation"
         "-framework Foundation"
+        "-framework Metal"
+        "-framework CoreVideo"
+        "-framework CoreMedia"
+        "-framework VideoToolbox"
     )
 elseif(WIN32)
-    target_link_libraries(framecycler_engine PRIVATE dsound)
+    target_link_libraries(framecycler_engine PRIVATE
+        dsound
+        d3d11
+        dxgi
+        d3dcompiler
+    )
 elseif(UNIX)
     find_library(PULSE_LIB pulse)
     find_library(PULSE_SIMPLE_LIB pulse-simple)
@@ -98,7 +134,6 @@ elseif(UNIX)
     target_link_libraries(framecycler_engine PRIVATE pthread dl m)
 endif()
 
-find_package(Vulkan)
 if(Vulkan_FOUND)
     target_link_libraries(framecycler_engine PRIVATE Vulkan::Vulkan)
 endif()

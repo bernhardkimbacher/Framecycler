@@ -298,5 +298,34 @@ class TestPrefetchEngineMovieMode(unittest.TestCase):
             movie.close()
 
 
+class TestHalfConvert(unittest.TestCase):
+    def test_simd_matches_scalar(self):
+        self.assertTrue(hasattr(framecycler_engine, "half_convert_self_test"))
+        backend = framecycler_engine.half_convert_backend()
+        self.assertIn(backend, ("neon_f16", "neon", "sse_f16c", "sse2", "scalar"))
+        self.assertTrue(
+            framecycler_engine.half_convert_self_test(),
+            f"half convert parity failed (backend={backend})",
+        )
+
+
+@unittest.skipUnless(os.path.isfile(FIXTURE), "tiny_movie.mp4 fixture missing")
+class TestMovieCpuUploadFallback(unittest.TestCase):
+    def test_force_cpu_upload_disables_zerocopy(self):
+        movie = framecycler_engine.NativeMovieDecoder()
+        self.assertTrue(movie.open(FIXTURE))
+        try:
+            os.environ["FRAMECYCLER_MOVIE_CPU_UPLOAD"] = "1"
+            self.assertFalse(movie.hw_zerocopy_eligible)
+            start = movie.start_frame
+            frame = movie.decode_frame(start, 1.0)
+            self.assertIsNotNone(frame)
+            self.assertEqual(frame.dtype, np.float16)
+            self.assertEqual(frame.shape[2], 4)
+        finally:
+            os.environ.pop("FRAMECYCLER_MOVIE_CPU_UPLOAD", None)
+            movie.close()
+
+
 if __name__ == "__main__":
     unittest.main()

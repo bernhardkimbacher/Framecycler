@@ -22,6 +22,7 @@
 
 #include "gpu_texture_cache.h"
 #include "display_upload_queue.h"
+#include "hw_texture_import.h"
 #include "transport_clock.h"
 #include "audio_engine.h"
 
@@ -297,6 +298,24 @@ private:
     // Staging ring: returns slot index, or nullopt if all slots still in flight.
     std::optional<size_t> acquire_staging_slot();
     QRhiTexture* acquire_frame_texture(int width, int height, int channels);
+    QRhiTexture* acquire_hw_import_texture(int width, int height);
+    void _init_metal_hw_import();
+    void _shutdown_metal_hw_import();
+    void _init_d3d11_hw_import();
+    void _shutdown_d3d11_hw_import();
+    void _init_vulkan_hw_import();
+    void _shutdown_vulkan_hw_import();
+    bool _hw_import_ready() const;
+    const char* _hw_import_mode_name() const;
+    bool _import_hw_job(UploadJob* job);
+    void _log_movie_present_mode(const char* mode);
+    bool _resolve_slot_dimensions(
+        int source_index,
+        int decoder_frame,
+        CacheManager* cpu_cache,
+        int& width,
+        int& height,
+        int& channels);
 
     // Threading / state sync
     void start_render_thread();
@@ -406,6 +425,13 @@ private:
     std::unordered_map<int, CacheManager*> _caches;
     GpuTextureCache _displayCache;
     DisplayUploadQueue _uploadQueue;
+    HwMetalImportContext _metal_hw_import;
+    bool _metal_hw_import_ready = false;
+    HwD3D11ImportContext _d3d11_hw_import;
+    bool _d3d11_hw_import_ready = false;
+    HwVulkanImportContext _vulkan_hw_import;
+    bool _vulkan_hw_import_ready = false;
+    bool _movie_present_mode_logged = false;
 
     // Display-cache ops deferred to the render thread
     bool _pending_limit_dirty = false;

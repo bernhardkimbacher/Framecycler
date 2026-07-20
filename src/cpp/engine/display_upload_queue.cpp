@@ -95,8 +95,58 @@ bool DisplayUploadQueue::enqueue(const UploadJobRequest& req, bool already_resid
     job.source_index = req.source_index;
     job.decoder_frame = req.decoder_frame;
     job.upload_token = req.upload_token;
+    job.kind = req.kind;
+    job.width = req.width;
+    job.height = req.height;
+    job.channels = req.channels > 0 ? req.channels : 4;
     job.state = UploadJob::State::Queued;
-    _jobs.push_back(job);
+    _jobs.push_back(std::move(job));
+    return true;
+}
+
+bool DisplayUploadQueue::enqueue_hw(
+    const UploadJobRequest& req,
+    HwFrameTicket ticket,
+    bool already_resident)
+{
+    if (!ticket.valid()) {
+        return false;
+    }
+    if (already_resident) {
+        return false;
+    }
+    if (req.decoder_frame < 0) {
+        return false;
+    }
+    if (has_job(req.source_index, req.decoder_frame)) {
+        return false;
+    }
+
+    if (_policy == UploadQueuePolicy::Realtime) {
+        erase_queued_for_source(req.source_index);
+        while (count_state(UploadJob::State::Queued) >= kMaxPending) {
+            if (!drop_oldest_queued()) {
+                break;
+            }
+        }
+    } else {
+        if (count_state(UploadJob::State::Queued) >= kMaxPending) {
+            ++_refused;
+            return false;
+        }
+    }
+
+    UploadJob job;
+    job.source_index = req.source_index;
+    job.decoder_frame = req.decoder_frame;
+    job.upload_token = req.upload_token;
+    job.kind = UploadJobKind::HwImport;
+    job.width = ticket.width();
+    job.height = ticket.height();
+    job.channels = 4;
+    job.hw_ticket = std::move(ticket);
+    job.state = UploadJob::State::Queued;
+    _jobs.push_back(std::move(job));
     return true;
 }
 
@@ -135,6 +185,7 @@ void DisplayUploadQueue::mark_failed(UploadJob* job)
         return;
     }
     job->texture = nullptr;
+    job->hw_ticket.reset();
     job->state = UploadJob::State::Failed;
 }
 
@@ -179,7 +230,7 @@ std::vector<UploadJob> DisplayUploadQueue::take_ready()
     std::vector<UploadJob> ready;
     for (auto it = _jobs.begin(); it != _jobs.end();) {
         if (it->state == UploadJob::State::Ready) {
-            ready.push_back(*it);
+            ready.push_back(std::move(*it));
             it = _jobs.erase(it);
             ++_completed;
         } else {

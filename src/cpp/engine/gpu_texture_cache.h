@@ -29,6 +29,8 @@ struct GpuCacheEntry {
     int height = 0;
     int channels = 0;
     size_t bytes = 0;
+    /// When true, entry does not require matching CPU CacheManager residency.
+    bool gpu_only = false;
 };
 
 struct SourcePlayhead {
@@ -83,7 +85,8 @@ public:
     void invalidate_source(int source_index);
     void clear();
 
-    // Returns cached texture or nullptr on miss. Validates CPU cache + dimensions.
+    // Returns cached texture or nullptr on miss. Validates CPU cache + dimensions
+    // unless the entry was inserted as gpu_only.
     QRhiTexture* try_get(
         int source_index,
         int decoder_frame,
@@ -99,7 +102,8 @@ public:
         int height,
         int channels,
         QRhiTexture* texture,
-        size_t bytes);
+        size_t bytes,
+        bool gpu_only = false);
 
     void evict_before_insert(size_t incoming_bytes, int source_index);
     Stats stats() const { return _stats; }
@@ -108,6 +112,14 @@ public:
     std::vector<int> cached_frames_for_source(int source_index) const;
 
     bool contains(int source_index, int decoder_frame) const;
+
+    /// Dimensions for a resident GPU entry (incl. gpu_only). Returns false on miss.
+    bool try_get_dimensions(
+        int source_index,
+        int decoder_frame,
+        int& width,
+        int& height,
+        int& channels) const;
 
     size_t max_bytes() const { return _max_bytes; }
     size_t resident_bytes() const { return _resident_bytes; }

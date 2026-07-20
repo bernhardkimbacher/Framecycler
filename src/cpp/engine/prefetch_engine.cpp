@@ -1,4 +1,5 @@
 #include "prefetch_engine.h"
+#include "hw_frame_ticket.h"
 
 #include <algorithm>
 #include <chrono>
@@ -491,16 +492,27 @@ void PrefetchEngine::_process_job(const Job& job)
             }
             if (movie && _cache->try_claim_decode(frame_index)) {
                 try {
-                    auto decoded = movie->decode_frame(frame_index, scale);
-                    if (decoded.success && !decoded.pixel_data.empty()) {
-                        _cache->write_frame(
-                            frame_index,
-                            decoded.width,
-                            decoded.height,
-                            decoded.channels,
-                            decoded.pixel_data.data(),
-                            decoded.pixel_data.size());
-                        ok = true;
+                    // Prefer VT→Metal zero-copy when a renderer sink is bound.
+                    if (movie->hw_zerocopy_eligible()) {
+                        HwFrameTicket ticket = movie->decode_hw_frame(frame_index, scale);
+                        if (ticket.valid()
+                            && HwFrameDispatch::emit(
+                                _cache.get(), frame_index, std::move(ticket))) {
+                            ok = true;
+                        }
+                    }
+                    if (!ok) {
+                        auto decoded = movie->decode_frame(frame_index, scale);
+                        if (decoded.success && !decoded.pixel_data.empty()) {
+                            _cache->write_frame(
+                                frame_index,
+                                decoded.width,
+                                decoded.height,
+                                decoded.channels,
+                                decoded.pixel_data.data(),
+                                decoded.pixel_data.size());
+                            ok = true;
+                        }
                     }
                 } catch (...) {
                     _cache->release_decode_claim(frame_index);

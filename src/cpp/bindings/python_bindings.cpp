@@ -7,6 +7,7 @@
 #include "native_decoder.h"
 #include "native_movie_decoder.h"
 #include "native_audio_decoder.h"
+#include "half_convert.h"
 #include "rhi_renderer.h"
 #include "display_upload_queue.h"
 #include "transport_clock.h"
@@ -50,6 +51,11 @@ PYBIND11_MODULE(framecycler_engine, m) {
 
     m.def("set_decode_threads", &NativeDecoder::set_decode_threads, py::arg("n"),
           "Configure global OIIO / OpenEXR decode thread pools");
+    m.def("half_convert_backend", &fc::half_convert_backend,
+          "Active movie float16 convert backend (neon_f16|sse_f16c|sse2|scalar)");
+    m.def("half_convert_self_test", &fc::half_convert_self_test,
+          py::call_guard<py::gil_scoped_release>(),
+          "SIMD vs scalar float16 convert parity self-test");
 
     m.def(
         "downsample_frame",
@@ -189,6 +195,11 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def_property_readonly("hw_type", &NativeMovieDecoder::hw_type)
         .def_property_readonly("bits_per_raw_sample", &NativeMovieDecoder::bits_per_raw_sample)
         .def_property_readonly("pix_fmt_name", &NativeMovieDecoder::pix_fmt_name)
+        .def_property_readonly(
+            "hw_zerocopy_eligible",
+            &NativeMovieDecoder::hw_zerocopy_eligible,
+            "True when VT/D3D11VA/VAAPI surfaces can skip CPU upload "
+            "(disabled by FRAMECYCLER_MOVIE_CPU_UPLOAD; Windows needs shared QRhi D3D11 device)")
         .def("file_metadata", &NativeMovieDecoder::file_metadata)
         .def(
             "decode_frame",
