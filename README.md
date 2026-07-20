@@ -122,6 +122,8 @@ Located in [`src/cpp/engine/rhi_renderer.cpp`](src/cpp/engine/rhi_renderer.cpp).
 **Present path SSoT:** C++ `RhiRenderer` is the only production present stack. [`src/framecycler/render/`](src/framecycler/render/) provides shared shader baking/tooling for OCIO GLSL — not a second viewport renderer.
 
 * **Backends**: Metal (macOS), D3D11 (Windows), Vulkan (Linux); Null when `QT_QPA_PLATFORM=offscreen` or forced Null (same upload path as real backends).
+* **Viewer present (SDR / EDR)**: **View → Viewer → SDR** (default) or **EDR (Extended Dynamic Range)**. Requests `QRhiSwapChain::HDRExtendedSrgbLinear` when supported (macOS EDR / Windows scRGB); falls back to `HDR10` on Windows/Linux when extended linear is unavailable, otherwise stays SDR. Settings → **Prefer EDR when available** restores EDR on launch. Internal textures stay half-float; only the swapchain format changes. Prefer OCIO **ACEScg Linear**, **Raw**, or **P3-D65 / Linear (EDR)** under linear EDR. PQ/HLG views encode non-linear code values and pair with **HDR10** present (header warns if used with linear EDR). HUD/overlays remain SDR QWidget chrome.
+* **Manual check (macOS XDR)**: EDR on + `P3-D65 / Linear (EDR)` (or ACEScg Linear) → speculars brighter than SDR; EDR + sRGB View → highlights-clipped chip; EDR + PQ/HLG → pairing warning; EDR off → SDR present restored.
 * **Shaders**: GLSL from Python/OCIO compiled via `QShaderBaker` to platform binaries.
 * **OCIO LUT textures**: 2D/3D `RGBA32F` GPU textures are pooled in `RhiRenderer` by size/format (reuse on view/look changes when dimensions match); frame display textures remain in `GpuTextureCache`.
 * **Compare modes**: Sequence (playhead source), Wipe / Difference / Blend (active vs compare display slots), Tile (aspect-preserving grid).
@@ -199,13 +201,24 @@ Persisted settings live in `~/.framecycler/settings.json` (`ocio_config_path`).
 
 ### Bundled studio configuration
 
-OCIO profile **2.2**; reference/working space **ACEScg**. Display views include `sRGB View`, `Rec.709 View`, `ACEScg Linear`, and `Raw`. Looks include ARRI LogC3/LogC4 → Rec709 examples. LUT search path is `luts/` relative to the config.
+OCIO profile **2.4**; reference/working space **ACEScg**. Display views:
+
+| Display / View | Encoding | Present pairing |
+| :--- | :--- | :--- |
+| `sRGB / sRGB View`, `Rec.709 / Rec.709 View` | SDR gamma | SDR |
+| `sRGB / ACEScg Linear`, `Raw` | Linear / pass-through | Linear EDR |
+| `P3-D65 / Linear (EDR)` | Linear Display P3 HDR | Linear EDR (macOS) |
+| `P3-D65 / ST.2084`, `Rec.2100 / PQ (P3-D65)` | P3 + ST.2084 PQ | HDR10 |
+| `Rec.2100 / PQ (Rec.2020)` | Rec.2020 + PQ | HDR10 |
+| `Rec.2100 / HLG` | Rec.2100 HLG (1000-nit) | HDR10 |
+
+Scene-linear **1.0 = 100 nits** (OCIO PQ/HLG convention). No Peak Brightness (nits) tone-map control yet. Looks include ARRI LogC3/LogC4 → Rec709 examples. LUT search path is `luts/` relative to the config.
 
 Supported camera logs mapped into the linear reference include ARRI LogC3/LogC4, Cineon (ADX10), Sony S-Log3, Panasonic V-Log, and RED Log3G10.
 
 ### Runtime controls
 
-**OCIO** menu: Input Color Space, Look (**None (Bypass)**), Display Output, **Load Custom LUT…**. The viewport header shows pipeline state (e.g. `IN: ARRI Alexa LogC3 | OUT: sRGB (sRGB View)`).
+**OCIO** menu: Input Color Space, Look (**None (Bypass)**), Display / View, **Load Custom LUT…**. The viewport header shows pipeline state (e.g. `IN: ARRI Alexa LogC3 | OUT: sRGB / sRGB View`). With **View → Viewer → EDR**, the header appends `| EDR`, a highlights-clipped warning for gamma SDR views, or a PQ/HLG + linear EDR pairing warning.
 
 ### Input color space detection
 

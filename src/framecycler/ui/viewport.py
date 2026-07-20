@@ -43,7 +43,8 @@ class RhiViewportWindow(QWindow):
         if sys.platform == "darwin":
             self.setSurfaceType(QWindow.MetalSurface)
         elif sys.platform == "win32":
-            self.setSurfaceType(QWindow.OpenGLSurface)
+            # D3D11 QRhi present (incl. HDR) needs a raster surface, not OpenGL.
+            self.setSurfaceType(QWindow.RasterSurface)
         else:
             self.setSurfaceType(QWindow.VulkanSurface)
         self._renderer = None
@@ -1164,6 +1165,37 @@ class Viewport(QWidget):
             self.native_renderer.shutdown()
         self._renderer_initialized = False
         self._ocio_pipeline_ready = False
+
+    # Viewer present format (SDR / EDR / HDR10) — thin wrappers over RhiRenderer.
+    VIEWER_OUTPUT_SDR = 0
+    VIEWER_OUTPUT_EDR = 1
+    VIEWER_OUTPUT_HDR10 = 2
+
+    def set_viewer_output_mode(self, mode: int) -> None:
+        renderer = getattr(self, "native_renderer", None)
+        if renderer is None or not hasattr(renderer, "set_viewer_output_mode"):
+            return
+        renderer.set_viewer_output_mode(int(mode))
+        if hasattr(renderer, "request_redraw"):
+            renderer.request_redraw()
+
+    def viewer_output_mode(self) -> int:
+        renderer = getattr(self, "native_renderer", None)
+        if renderer is None or not hasattr(renderer, "viewer_output_mode"):
+            return self.VIEWER_OUTPUT_SDR
+        return int(renderer.viewer_output_mode())
+
+    def actual_viewer_output_mode(self) -> int:
+        renderer = getattr(self, "native_renderer", None)
+        if renderer is None or not hasattr(renderer, "actual_viewer_output_mode"):
+            return self.VIEWER_OUTPUT_SDR
+        return int(renderer.actual_viewer_output_mode())
+
+    def is_viewer_output_mode_supported(self, mode: int) -> bool:
+        renderer = getattr(self, "native_renderer", None)
+        if renderer is None or not hasattr(renderer, "is_viewer_output_mode_supported"):
+            return mode == self.VIEWER_OUTPUT_SDR
+        return bool(renderer.is_viewer_output_mode_supported(int(mode)))
 
     def clear_frames(self):
         self.frame_slots.clear()

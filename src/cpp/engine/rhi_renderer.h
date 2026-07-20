@@ -140,6 +140,17 @@ public:
     /// FRAMECYCLER_FORCE_NULL_RHI when initialize() runs on the GUI thread.
     void set_force_null_backend(bool enabled);
 
+    /// Viewer present format (SDR vs EDR / HDR10). Applied on the render thread.
+    enum class ViewerOutputMode {
+        Sdr = 0,
+        EdrExtendedSrgbLinear = 1,
+        Hdr10 = 2,
+    };
+    void set_viewer_output_mode(ViewerOutputMode mode);
+    ViewerOutputMode viewer_output_mode() const; ///< Requested mode
+    ViewerOutputMode actual_viewer_output_mode() const; ///< Last applied mode (may fall back to SDR)
+    bool is_viewer_output_mode_supported(ViewerOutputMode mode) const;
+
     // Transport clock (C++-owned playback). Python pushes a program and reacts
     // to coalesced frame / segment-boundary callbacks.
     void set_transport_program(const TransportProgram& program);
@@ -358,6 +369,9 @@ private:
     void shutdown_rhi_on_thread();
     void sync_and_render_on_thread(bool resize, const QSize& target_size);
     void _wake_render_thread();
+    void _apply_viewer_output_format_unlocked();
+    QRhiSwapChain::Format _qrhi_format_for_mode(ViewerOutputMode mode) const;
+    ViewerOutputMode _resolve_supported_mode(ViewerOutputMode requested) const;
 
     bool _transport_can_advance(int global_frame);
     bool _transport_can_advance_unlocked(int global_frame);
@@ -488,6 +502,9 @@ private:
     QRhiTexture* _last_bound_tex_b = nullptr;
     std::atomic<bool> _is_fallback_null_backend{false};
     bool _force_null_backend = false;
+    std::atomic<ViewerOutputMode> _requested_viewer_output_mode{ViewerOutputMode::Sdr};
+    std::atomic<ViewerOutputMode> _actual_viewer_output_mode{ViewerOutputMode::Sdr};
+    std::atomic<bool> _swap_format_dirty{false};
 
     TransportClock _transport;
     AudioEngine _audio;

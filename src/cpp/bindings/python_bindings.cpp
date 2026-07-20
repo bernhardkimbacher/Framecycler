@@ -48,6 +48,9 @@ struct GilPyObject {
 
 PYBIND11_MODULE(framecycler_engine, m) {
     m.doc() = "Framecycler High-Performance C++ Review Playback Core Engine";
+    m.attr("VIEWER_OUTPUT_SDR") = 0;
+    m.attr("VIEWER_OUTPUT_EDR") = 1;
+    m.attr("VIEWER_OUTPUT_HDR10") = 2;
 
     m.def("set_decode_threads", &NativeDecoder::set_decode_threads, py::arg("n"),
           "Configure global OIIO / OpenEXR decode thread pools");
@@ -719,6 +722,29 @@ PYBIND11_MODULE(framecycler_engine, m) {
         .def("shutdown", &RhiRenderer::shutdown)
         .def("is_fallback_null_backend", &RhiRenderer::is_fallback_null_backend)
         .def("set_force_null_backend", &RhiRenderer::set_force_null_backend)
+        .def(
+            "set_viewer_output_mode",
+            [](RhiRenderer& self, int mode) {
+                self.set_viewer_output_mode(static_cast<RhiRenderer::ViewerOutputMode>(mode));
+            },
+            py::arg("mode"))
+        .def(
+            "viewer_output_mode",
+            [](const RhiRenderer& self) {
+                return static_cast<int>(self.viewer_output_mode());
+            })
+        .def(
+            "actual_viewer_output_mode",
+            [](const RhiRenderer& self) {
+                return static_cast<int>(self.actual_viewer_output_mode());
+            })
+        .def(
+            "is_viewer_output_mode_supported",
+            [](const RhiRenderer& self, int mode) {
+                return self.is_viewer_output_mode_supported(
+                    static_cast<RhiRenderer::ViewerOutputMode>(mode));
+            },
+            py::arg("mode"))
         .def("update_render_params", &RhiRenderer::update_render_params)
         .def("set_grading_uniform", &RhiRenderer::set_grading_uniform)
         .def("set_grading_uniform_vec3", &RhiRenderer::set_grading_uniform_vec3)

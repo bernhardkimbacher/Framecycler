@@ -72,6 +72,106 @@ void RhiRenderer::set_force_null_backend(bool enabled)
     _force_null_backend = enabled;
 }
 
+void RhiRenderer::set_viewer_output_mode(ViewerOutputMode mode)
+{
+    _requested_viewer_output_mode.store(mode, std::memory_order_relaxed);
+    _swap_format_dirty.store(true, std::memory_order_relaxed);
+    _resize_pending.store(true, std::memory_order_relaxed);
+    _wake_render_thread();
+}
+
+RhiRenderer::ViewerOutputMode RhiRenderer::viewer_output_mode() const
+{
+    return _requested_viewer_output_mode.load(std::memory_order_relaxed);
+}
+
+RhiRenderer::ViewerOutputMode RhiRenderer::actual_viewer_output_mode() const
+{
+    return _actual_viewer_output_mode.load(std::memory_order_relaxed);
+}
+
+QRhiSwapChain::Format RhiRenderer::_qrhi_format_for_mode(ViewerOutputMode mode) const
+{
+    switch (mode) {
+    case ViewerOutputMode::EdrExtendedSrgbLinear:
+        return QRhiSwapChain::HDRExtendedSrgbLinear;
+    case ViewerOutputMode::Hdr10:
+        return QRhiSwapChain::HDR10;
+    case ViewerOutputMode::Sdr:
+    default:
+        return QRhiSwapChain::SDR;
+    }
+}
+
+RhiRenderer::ViewerOutputMode RhiRenderer::_resolve_supported_mode(ViewerOutputMode requested) const
+{
+    if (!_swapChain || !_rhi || _is_fallback_null_backend.load()) {
+        return ViewerOutputMode::Sdr;
+    }
+    if (requested == ViewerOutputMode::Sdr) {
+        return ViewerOutputMode::Sdr;
+    }
+    if (requested == ViewerOutputMode::EdrExtendedSrgbLinear) {
+        // macOS: HDRExtendedSrgbLinear (EDR / scRGB). Windows/Linux: prefer the
+        // same when DXGI/Vulkan expose it; otherwise fall back to HDR10.
+        if (_swapChain->isFormatSupported(QRhiSwapChain::HDRExtendedSrgbLinear)) {
+            return ViewerOutputMode::EdrExtendedSrgbLinear;
+        }
+        if (_swapChain->isFormatSupported(QRhiSwapChain::HDR10)) {
+            return ViewerOutputMode::Hdr10;
+        }
+        return ViewerOutputMode::Sdr;
+    }
+    if (requested == ViewerOutputMode::Hdr10) {
+        if (_swapChain->isFormatSupported(QRhiSwapChain::HDR10)) {
+            return ViewerOutputMode::Hdr10;
+        }
+        if (_swapChain->isFormatSupported(QRhiSwapChain::HDRExtendedSrgbLinear)) {
+            return ViewerOutputMode::EdrExtendedSrgbLinear;
+        }
+        return ViewerOutputMode::Sdr;
+    }
+    return ViewerOutputMode::Sdr;
+}
+
+bool RhiRenderer::is_viewer_output_mode_supported(ViewerOutputMode mode) const
+{
+    if (mode == ViewerOutputMode::Sdr) {
+        return true;
+    }
+    if (_is_fallback_null_backend.load() || _force_null_backend) {
+        return false;
+    }
+    if (!_swapChain || !_rhi) {
+        // Before init: HDR may be available on real backends once the swapchain exists.
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
+        return mode == ViewerOutputMode::EdrExtendedSrgbLinear
+            || mode == ViewerOutputMode::Hdr10;
+#else
+        return false;
+#endif
+    }
+    return _resolve_supported_mode(mode) != ViewerOutputMode::Sdr;
+}
+
+void RhiRenderer::_apply_viewer_output_format_unlocked()
+{
+    if (!_swapChain || !_rhi) {
+        return;
+    }
+    const ViewerOutputMode requested =
+        _requested_viewer_output_mode.load(std::memory_order_relaxed);
+    const ViewerOutputMode actual = _resolve_supported_mode(requested);
+    const QRhiSwapChain::Format fmt = _qrhi_format_for_mode(actual);
+    if (_swapChain->format() != fmt) {
+        // Format must be set before createOrResize; destroy if already created.
+        _swapChain->destroy();
+        _swapChain->setFormat(fmt);
+    }
+    _actual_viewer_output_mode.store(actual, std::memory_order_relaxed);
+    _swap_format_dirty.store(false, std::memory_order_relaxed);
+}
+
 void RhiRenderer::shutdown()
 {
     stop_render_thread();
@@ -204,6 +304,7 @@ bool RhiRenderer::initialize_rhi_on_thread()
 
     _swapChain = _rhi->newSwapChain();
     _swapChain->setWindow(_window);
+    _apply_viewer_output_format_unlocked();
     _fallbackRpDesc = _swapChain->newCompatibleRenderPassDescriptor();
     _swapChain->setRenderPassDescriptor(_fallbackRpDesc);
 
@@ -1113,7 +1214,12 @@ void RhiRenderer::sync_and_render_on_thread(bool resize, const QSize& target_siz
         }
     }
 
-    if (resize && target_size.width() > 0 && target_size.height() > 0) {
+    const bool format_dirty = _swap_format_dirty.load(std::memory_order_relaxed);
+    if (format_dirty || resize) {
+        _apply_viewer_output_format_unlocked();
+    }
+
+    if ((resize || format_dirty) && target_size.width() > 0 && target_size.height() > 0) {
         if (_swapChain->createOrResize()) {
             build_pipeline(_swapChain->renderPassDescriptor(), true);
         }

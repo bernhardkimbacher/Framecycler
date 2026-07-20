@@ -148,5 +148,27 @@ class TestCppRenderer(unittest.TestCase):
         self.assertEqual(renderer.pipeline_lut_count(), 0)
 
 
+    def test_viewer_output_mode_api_defaults_to_sdr(self):
+        """Viewer SDR/EDR present API (finding #11) — no Metal present required."""
+        renderer = framecycler_engine.RhiRenderer()
+        self.assertTrue(hasattr(renderer, "set_viewer_output_mode"))
+        self.assertTrue(hasattr(renderer, "viewer_output_mode"))
+        self.assertTrue(hasattr(renderer, "actual_viewer_output_mode"))
+        self.assertTrue(hasattr(renderer, "is_viewer_output_mode_supported"))
+        self.assertEqual(renderer.viewer_output_mode(), 0)
+        self.assertEqual(renderer.actual_viewer_output_mode(), 0)
+        self.assertTrue(renderer.is_viewer_output_mode_supported(0))
+        # Null / forced-null cannot present EDR.
+        renderer.set_force_null_backend(True)
+        self.assertFalse(renderer.is_viewer_output_mode_supported(1))
+        self.assertFalse(renderer.is_viewer_output_mode_supported(2))
+        # Request is stored; without a swapchain, actual stays SDR.
+        renderer.set_viewer_output_mode(1)
+        self.assertEqual(renderer.viewer_output_mode(), 1)
+        self.assertEqual(renderer.actual_viewer_output_mode(), 0)
+        renderer.set_viewer_output_mode(0)
+        self.assertEqual(renderer.viewer_output_mode(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

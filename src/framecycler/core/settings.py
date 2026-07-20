@@ -25,6 +25,8 @@ class Settings:
         self.display_cache_limit_gb = default_display
         self.default_fps = 24.0
         self.ocio_config_path = ""
+        # Prefer EDR present format on launch when the GPU/display supports it.
+        self.prefer_edr = False
         self.loop_mode = "loop"  # loop, bounce, once
         # every_frame | realtime — default prefers contiguous display-cache fill
         self.playback_timing = PLAYBACK_TIMING_EVERY_FRAME
@@ -103,6 +105,7 @@ class Settings:
                 )
                 self.default_fps = data.get("default_fps", self.default_fps)
                 self.ocio_config_path = data.get("ocio_config_path", self.ocio_config_path)
+                self.prefer_edr = bool(data.get("prefer_edr", self.prefer_edr))
                 self.loop_mode = data.get("loop_mode", self.loop_mode)
                 self.playback_timing = normalize_playback_timing(
                     data.get("playback_timing", self.playback_timing)
@@ -194,6 +197,7 @@ class Settings:
                 "display_cache_limit_gb": self.display_cache_limit_gb,
                 "default_fps": self.default_fps,
                 "ocio_config_path": self.ocio_config_path,
+                "prefer_edr": bool(self.prefer_edr),
                 "loop_mode": self.loop_mode,
                 "playback_timing": normalize_playback_timing(self.playback_timing),
                 "timecode_mode": self.timecode_mode,

@@ -163,6 +163,14 @@ class SettingsDialog(QDialog):
         path_layout.addWidget(btn_browse)
         layout.addLayout(path_layout)
 
+        self.prefer_edr_check = QCheckBox("Prefer EDR when available")
+        self.prefer_edr_check.setChecked(bool(getattr(self.settings, "prefer_edr", False)))
+        self.prefer_edr_check.setToolTip(
+            "On launch, enable View → Viewer → EDR if the display/GPU supports it. "
+            "Use the View menu to toggle mid-session."
+        )
+        layout.addWidget(self.prefer_edr_check)
+
         layout.addStretch(1)
         return page
 
@@ -421,6 +429,8 @@ class SettingsDialog(QDialog):
             self.playback_timing_combo.currentData()
         )
         self.settings.ocio_config_path = self.ocio_path_edit.text().strip()
+        if hasattr(self, "prefer_edr_check"):
+            self.settings.prefer_edr = bool(self.prefer_edr_check.isChecked())
         self.settings.missing_frame_mode = self.missing_frame_combo.currentText()
         if hasattr(self, "audio_device_combo"):
             device_id = self.audio_device_combo.currentData()

@@ -1,4 +1,4 @@
-ocio_profile_version: 2.2
+ocio_profile_version: 2.4
 
 environment:
   {}
@@ -25,9 +25,16 @@ displays:
   Rec.709:
     - !<View> {name: Rec.709 View, colorspace: Rec.709 - Texture}
     - !<View> {name: Raw, colorspace: Raw}
+  P3-D65:
+    - !<View> {name: ST.2084, colorspace: P3-D65 ST.2084}
+    - !<View> {name: Linear (EDR), colorspace: P3-D65 Linear}
+  Rec.2100:
+    - !<View> {name: PQ (Rec.2020), colorspace: Rec.2100-PQ}
+    - !<View> {name: PQ (P3-D65), colorspace: P3-D65 ST.2084}
+    - !<View> {name: HLG, colorspace: Rec.2100-HLG}
 
-active_displays: [sRGB, Rec.709]
-active_views: [sRGB View, Rec.709 View, ACEScg Linear, Raw]
+active_displays: [sRGB, Rec.709, P3-D65, Rec.2100]
+active_views: [sRGB View, Rec.709 View, ACEScg Linear, Raw, ST.2084, Linear (EDR), PQ (Rec.2020), PQ (P3-D65), HLG]
 
 looks:
   - !<Look>
@@ -101,6 +108,73 @@ colorspaces:
         - !<ExponentTransform> {value: [2.4, 2.4, 2.4, 1.0], direction: forward}
         # 2. Convert Rec.709 primaries -> AP1 (ACEScg) primaries
         - !<BuiltinTransform> {style: "UTILITY - ACES-AP1_to_LINEAR-REC709_BFD", direction: inverse}
+
+  # HDR display colorspaces. Scene-linear 1.0 = 100 nits (OCIO PQ/HLG convention).
+  # PQ/HLG pair with HDR10 present; P3-D65 Linear pairs with View → EDR (linear float).
+  - !<ColorSpace>
+    name: P3-D65 ST.2084
+    family: Display / HDR
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      P3-D65 gamut with ST.2084 PQ encoding. Studio mastering gold standard.
+      Linear 1.0 = 100 nits. Prefer HDR10 present (not linear EDR).
+    isdata: false
+    encoding: hdr-video
+    allocation: uniform
+    from_scene_reference: !<GroupTransform>
+      children:
+        - !<BuiltinTransform> {style: "UTILITY - ACES-AP1_to_CIE-XYZ-D65_BFD"}
+        - !<BuiltinTransform> {style: "DISPLAY - CIE-XYZ-D65_to_ST2084-P3-D65"}
+
+  - !<ColorSpace>
+    name: Rec.2100-PQ
+    family: Display / HDR
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      Rec.2100 PQ (Rec.2020 container) for HDR10 / Dolby Vision delivery.
+      Most panels cannot show full Rec.2020; colors may look undersaturated
+      on P3-limited displays. Linear 1.0 = 100 nits. Prefer HDR10 present.
+    isdata: false
+    encoding: hdr-video
+    allocation: uniform
+    from_scene_reference: !<GroupTransform>
+      children:
+        - !<BuiltinTransform> {style: "UTILITY - ACES-AP1_to_CIE-XYZ-D65_BFD"}
+        - !<BuiltinTransform> {style: "DISPLAY - CIE-XYZ-D65_to_REC.2100-PQ"}
+
+  - !<ColorSpace>
+    name: Rec.2100-HLG
+    family: Display / HDR
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      Rec.2100 HLG (1000-nit). Self-adapting HDR utility view; often more
+      acceptable on uncalibrated laptops than absolute PQ. Prefer HDR10 present.
+    isdata: false
+    encoding: hdr-video
+    allocation: uniform
+    from_scene_reference: !<GroupTransform>
+      children:
+        - !<BuiltinTransform> {style: "UTILITY - ACES-AP1_to_CIE-XYZ-D65_BFD"}
+        - !<BuiltinTransform> {style: "DISPLAY - CIE-XYZ-D65_to_REC.2100-HLG-1000nit"}
+
+  - !<ColorSpace>
+    name: P3-D65 Linear
+    family: Display / HDR
+    equalitygroup: ""
+    bitdepth: 32f
+    description: |
+      Linear Apple Display P3 HDR for macOS EDR / scRGB present
+      (1.0 = SDR white). Pair with View → Viewer → EDR.
+    isdata: false
+    encoding: scene-linear
+    allocation: uniform
+    from_scene_reference: !<GroupTransform>
+      children:
+        - !<BuiltinTransform> {style: "UTILITY - ACES-AP1_to_CIE-XYZ-D65_BFD"}
+        - !<BuiltinTransform> {style: "DISPLAY - CIE-XYZ-D65_to_DisplayP3-HDR"}
 
   - !<ColorSpace>
     name: ARRI Alexa LogC3

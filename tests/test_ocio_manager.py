@@ -73,6 +73,57 @@ class TestOCIOManager(unittest.TestCase):
         self.assertIn("Raw", outputs)
         self.assertIn("sRGB / sRGB View", outputs)
         self.assertIn("Rec.709 / Rec.709 View", outputs)
+        self.assertIn("P3-D65 / ST.2084", outputs)
+        self.assertIn("P3-D65 / Linear (EDR)", outputs)
+        self.assertIn("Rec.2100 / PQ (Rec.2020)", outputs)
+        self.assertIn("Rec.2100 / PQ (P3-D65)", outputs)
+        self.assertIn("Rec.2100 / HLG", outputs)
+
+    def test_bundled_config_is_ocio_2_4_with_hdr_colorspaces(self):
+        cfg = self.ocio_mgr.config
+        self.assertIsNotNone(cfg)
+        self.assertGreaterEqual(cfg.getMajorVersion(), 2)
+        self.assertGreaterEqual(cfg.getMinorVersion(), 4)
+        for name in (
+            "P3-D65 ST.2084",
+            "Rec.2100-PQ",
+            "Rec.2100-HLG",
+            "P3-D65 Linear",
+        ):
+            self.assertIsNotNone(cfg.getColorSpace(name), name)
+
+    def test_hdr_display_views_compile_gpu_shaders(self):
+        for output in (
+            "P3-D65 / ST.2084",
+            "P3-D65 / Linear (EDR)",
+            "Rec.2100 / PQ (Rec.2020)",
+            "Rec.2100 / PQ (P3-D65)",
+            "Rec.2100 / HLG",
+        ):
+            with self.subTest(output=output):
+                self.ocio_mgr.set_display_output(output)
+                self.ocio_mgr.invalidate_shader_cache()
+                shader_text, _, _ = self.ocio_mgr.get_gpu_shader_glsl()
+                self.assertIn("ocio_to_display", shader_text)
+                self.assertGreater(len(shader_text), 0)
+
+    def test_hdr_pq_acescg_one_maps_to_sane_code_value(self):
+        """ACEScg 1.0 (100 nits) → PQ code value in a sane mid-range (not 0/1)."""
+        import array
+
+        import PyOpenColorIO as OCIO
+
+        self.ocio_mgr.set_display_output("P3-D65 / ST.2084")
+        dvt = OCIO.DisplayViewTransform()
+        dvt.setSrc("ACEScg")
+        dvt.setDisplay(self.ocio_mgr.display_name)
+        dvt.setView(self.ocio_mgr.view_name)
+        cpu = self.ocio_mgr.config.getProcessor(dvt).getDefaultCPUProcessor()
+        px = array.array("f", [1.0, 1.0, 1.0])
+        cpu.applyRGB(px)
+        for c in px:
+            self.assertGreater(c, 0.3)
+            self.assertLess(c, 0.8)
 
     def test_set_display_output(self):
         self.ocio_mgr.set_display_output("Rec709")

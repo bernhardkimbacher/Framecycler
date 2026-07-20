@@ -509,6 +509,31 @@ class MainWindow(QMainWindow):
         self.act_hud.toggled.connect(self._on_hud_toggled)
         view_menu.addAction(self.act_hud)
 
+        add_menu_section(view_menu, "Viewer")
+        self._viewer_output_group = QActionGroup(self)
+        self._viewer_output_group.setExclusive(True)
+        self.act_viewer_sdr = QAction("SDR", self)
+        self.act_viewer_sdr.setCheckable(True)
+        self.act_viewer_sdr.setChecked(True)
+        self.act_viewer_sdr.setToolTip("Standard dynamic range present (8-bit swapchain)")
+        self.act_viewer_sdr.triggered.connect(
+            lambda checked=False: self._set_viewer_output_mode(0)
+        )
+        self._viewer_output_group.addAction(self.act_viewer_sdr)
+        view_menu.addAction(self.act_viewer_sdr)
+
+        self.act_viewer_edr = QAction("EDR (Extended Dynamic Range)", self)
+        self.act_viewer_edr.setCheckable(True)
+        self.act_viewer_edr.setToolTip(
+            "Requires a display/GPU that supports extended dynamic range"
+        )
+        self.act_viewer_edr.triggered.connect(
+            lambda checked=False: self._set_viewer_output_mode(1)
+        )
+        self._viewer_output_group.addAction(self.act_viewer_edr)
+        view_menu.addAction(self.act_viewer_edr)
+        self._sync_viewer_output_actions()
+
         view_menu.addSeparator()
         self._panels_menu = view_menu.addMenu("Panels")
 
@@ -773,10 +798,15 @@ class MainWindow(QMainWindow):
         
         # 3. Display / View (config-driven; Raw bypasses DisplayViewTransform)
         self.display_output_menu = self.ocio_menu.addMenu("Display / View")
+        edr_on = self._viewer_edr_active()
         for d in self.ocio_manager.get_display_outputs():
-            act = QAction(d, self)
+            label = d
+            if edr_on and self._is_edr_friendly_display_label(d):
+                label = f"{d} (EDR-friendly)"
+            act = QAction(label, self)
             act.setCheckable(True)
             act.setChecked(d == self.ocio_manager.display_output)
+            act.setToolTip(self._display_output_tooltip(d))
             act.triggered.connect(lambda checked=False, name=d: self._set_display_output(name))
             self.display_output_menu.addAction(act)
 
@@ -2715,6 +2745,7 @@ class MainWindow(QMainWindow):
         self.viewport.update_ocio_pipeline()
         self._build_ocio_submenu()
         self._update_ocio_info_label()
+        self._hint_hdr_view_present_pairing()
 
     def _load_custom_lut(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -2746,7 +2777,7 @@ class MainWindow(QMainWindow):
     def _update_ocio_info_label(self):
         if hasattr(self, "lbl_ocio_info") and self.lbl_ocio_info:
             info = f"IN: {self.ocio_manager.input_colorspace} | OUT: {self.ocio_manager.display_output}"
-            
+
             # Append grading info if active
             grade_parts = []
             if self.ocio_manager.grade_exposure != 0.0:
@@ -2761,7 +2792,180 @@ class MainWindow(QMainWindow):
             if grade_parts:
                 info += f" | GRADE: {', '.join(grade_parts)}"
 
+            actual = 0
+            if hasattr(self, "viewport"):
+                actual = int(self.viewport.actual_viewer_output_mode())
+            if actual == 1:  # HDRExtendedSrgbLinear
+                if self._is_sdr_encoded_ocio_view():
+                    view = self.ocio_manager.view_name or self.ocio_manager.display_output
+                    info += f" | EDR + {view} (highlights clipped)"
+                elif self._is_hdr_encoded_ocio_view():
+                    info += " | PQ/HLG + linear EDR (use HDR10 or P3-D65 Linear)"
+                else:
+                    info += " | EDR"
+            elif actual == 2:  # HDR10
+                info += " | HDR10"
+            elif (
+                hasattr(self, "viewport")
+                and self.viewport.viewer_output_mode() != 0
+                and actual == 0
+            ):
+                info += " | EDR unavailable"
+
             self.lbl_ocio_info.setText(info)
+
+    @staticmethod
+    def _is_edr_friendly_display_label(label: str) -> bool:
+        if not label:
+            return False
+        if label == "Raw":
+            return True
+        return "ACEScg Linear" in label or "Linear (EDR)" in label
+
+    def _is_sdr_encoded_ocio_view(self) -> bool:
+        view = getattr(self.ocio_manager, "view_name", "") or ""
+        return view in ("sRGB View", "Rec.709 View")
+
+    def _is_hdr_encoded_ocio_view(self) -> bool:
+        """PQ/HLG ST.2084 views — non-linear code values for HDR10 present."""
+        view = getattr(self.ocio_manager, "view_name", "") or ""
+        return view in ("ST.2084", "PQ (Rec.2020)", "PQ (P3-D65)", "HLG")
+
+    def _is_hdr_ocio_display(self) -> bool:
+        display = getattr(self.ocio_manager, "display_name", "") or ""
+        return display in ("P3-D65", "Rec.2100")
+
+    def _display_output_tooltip(self, label: str) -> str:
+        if self._is_edr_friendly_display_label(label):
+            return "Linear / unencoded views keep values above 1.0 for EDR present"
+        view = label.split(" / ", 1)[-1] if " / " in label else label
+        if view in ("ST.2084", "PQ (Rec.2020)", "PQ (P3-D65)", "HLG"):
+            return (
+                "PQ/HLG-encoded HDR view — pairs with HDR10 present; "
+                "looks wrong under linear EDR (prefer P3-D65 / Linear (EDR))"
+            )
+        return "Gamma-encoded display views clip highlights above 1.0 under EDR"
+
+    def _hint_hdr_view_present_pairing(self) -> None:
+        """Status-bar hints when HDR OCIO views and present format disagree."""
+        viewport = getattr(self, "viewport", None)
+        if viewport is None:
+            return
+        actual = int(viewport.actual_viewer_output_mode())
+        supported = bool(viewport.is_viewer_output_mode_supported(1))
+
+        if self._is_hdr_encoded_ocio_view() and actual == 1:
+            self.statusBar().showMessage(
+                "PQ/HLG view with linear EDR — use HDR10 present or P3-D65 / Linear (EDR)",
+                6000,
+            )
+            return
+        if (
+            (self._is_hdr_ocio_display() or "Linear (EDR)" in (self.ocio_manager.view_name or ""))
+            and actual == 0
+            and supported
+        ):
+            self.statusBar().showMessage(
+                "HDR OCIO view — enable View → Viewer → EDR for linear HDR present",
+                5000,
+            )
+
+    def _viewer_edr_active(self) -> bool:
+        viewport = getattr(self, "viewport", None)
+        if viewport is None:
+            return False
+        return int(viewport.actual_viewer_output_mode()) != 0
+
+    def _set_viewer_output_mode(self, mode: int) -> None:
+        """View → Viewer: SDR (0) or EDR (1). Recreates the swapchain format."""
+        viewport = getattr(self, "viewport", None)
+        if viewport is None:
+            return
+        mode = int(mode)
+        if mode != 0 and not viewport.is_viewer_output_mode_supported(mode):
+            self._sync_viewer_output_actions()
+            self.statusBar().showMessage(
+                "EDR unavailable — requires a display/GPU with extended dynamic range",
+                5000,
+            )
+            self._update_ocio_info_label()
+            return
+
+        enabling_edr = mode != 0 and not self._viewer_edr_active()
+        viewport.set_viewer_output_mode(mode)
+
+        if enabling_edr:
+            outputs = self.ocio_manager.get_display_outputs()
+            if self._is_sdr_encoded_ocio_view():
+                target = "sRGB / ACEScg Linear"
+                if target in outputs:
+                    self._set_display_output(target)
+                    self.statusBar().showMessage("EDR on — using ACEScg Linear", 4000)
+            elif self._is_hdr_encoded_ocio_view():
+                # PQ/HLG into linear EDR is wrong; prefer Display P3 linear.
+                target = "P3-D65 / Linear (EDR)"
+                if target in outputs:
+                    self._set_display_output(target)
+                    self.statusBar().showMessage(
+                        "EDR on — switched to P3-D65 / Linear (EDR)",
+                        4000,
+                    )
+
+        # Format apply happens on the render thread; sync UI shortly after.
+        QTimer.singleShot(80, self._sync_viewer_output_after_apply)
+
+    def _sync_viewer_output_after_apply(self) -> None:
+        viewport = getattr(self, "viewport", None)
+        if viewport is None:
+            return
+        requested = int(viewport.viewer_output_mode())
+        actual = int(viewport.actual_viewer_output_mode())
+        if requested != 0 and actual == 0:
+            self.statusBar().showMessage(
+                "EDR unavailable on this display/GPU — staying in SDR",
+                5000,
+            )
+        self._sync_viewer_output_actions()
+        self._build_ocio_submenu()
+        self._update_ocio_info_label()
+
+    def _sync_viewer_output_actions(self) -> None:
+        if not hasattr(self, "act_viewer_sdr") or not hasattr(self, "act_viewer_edr"):
+            return
+        viewport = getattr(self, "viewport", None)
+        actual = int(viewport.actual_viewer_output_mode()) if viewport else 0
+        supported = (
+            bool(viewport.is_viewer_output_mode_supported(1)) if viewport else False
+        )
+        self.act_viewer_edr.setEnabled(supported)
+        if not supported:
+            self.act_viewer_edr.setToolTip(
+                "Requires a display/GPU that supports extended dynamic range"
+            )
+        else:
+            self.act_viewer_edr.setToolTip(
+                "Float16 extended sRGB / HDR present (macOS EDR; Windows/Linux when supported)"
+            )
+        if actual != 0:
+            self.act_viewer_edr.blockSignals(True)
+            self.act_viewer_edr.setChecked(True)
+            self.act_viewer_edr.blockSignals(False)
+        else:
+            self.act_viewer_sdr.blockSignals(True)
+            self.act_viewer_sdr.setChecked(True)
+            self.act_viewer_sdr.blockSignals(False)
+
+    def _apply_prefer_edr_on_startup(self) -> None:
+        if not bool(getattr(self.settings, "prefer_edr", False)):
+            self._sync_viewer_output_actions()
+            return
+        viewport = getattr(self, "viewport", None)
+        if viewport is None:
+            return
+        if viewport.is_viewer_output_mode_supported(1):
+            self._set_viewer_output_mode(1)
+        else:
+            self._sync_viewer_output_actions()
 
     def _activate_exposure_mode(self):
         self.viewport.adjustment_mode = 'exposure'
@@ -2894,6 +3098,7 @@ class MainWindow(QMainWindow):
             if self.viewport.native_renderer.is_fallback_null_backend():
                 from PySide6.QtGui import QGuiApplication
                 if QGuiApplication.platformName() == "offscreen":
+                    self._sync_viewer_output_actions()
                     return
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.warning(
@@ -2903,6 +3108,7 @@ class MainWindow(QMainWindow):
                     "The application has fallen back to the offscreen Null backend, so no frames will be displayed. "
                     "Please check your graphics drivers and Vulkan/GPU support."
                 )
+            self._apply_prefer_edr_on_startup()
 
     def closeEvent(self, event):
         app = QApplication.instance()
