@@ -144,17 +144,29 @@ def encode_levels(value: float) -> tuple[float, int, int]:
 
 
 def _ocio_cpu_processor(ocio_manager):
+    """CPU processor matching viewer order: pre → ASC CDL → post."""
     if ocio_manager is None or getattr(ocio_manager, "config", None) is None:
         return None
+    getter = getattr(ocio_manager, "get_cpu_processor", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            return None
+    # Fallback for older managers: build CPU group if available.
     try:
-        group = ocio_manager._build_transform_group()
+        build = getattr(ocio_manager, "_build_cpu_transform_group", None)
+        if callable(build):
+            group = build()
+        else:
+            group = ocio_manager._build_transform_group()
         return ocio_manager.config.getProcessor(group).getDefaultCPUProcessor()
     except Exception:
         return None
 
 
 def apply_ocio_rgb(ocio_manager, rgb: tuple[float, float, float]) -> tuple[float, float, float]:
-    """CPU OCIO approx of the viewer graph (CDL omitted — applied in GLSL only)."""
+    """CPU OCIO approx of the viewer graph (includes ASC CDL when active)."""
     cpu = _ocio_cpu_processor(ocio_manager)
     if cpu is None:
         return rgb

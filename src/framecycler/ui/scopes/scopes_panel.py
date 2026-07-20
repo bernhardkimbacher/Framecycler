@@ -263,8 +263,8 @@ class ScopesPanel(QWidget):
         hint.setFont(ui_font(9))
         hint.setStyleSheet("color: #889099;")
         hint.setToolTip(
-            "Scopes sample the CPU cache and apply a CPU OCIO approx of the viewer "
-            "(CDL grading is GPU-only and may differ slightly)."
+            "Scopes sample the CPU cache and apply a CPU OCIO transform matching the "
+            "viewer (pre → ASC CDL → display). Small float differences vs GPU are possible."
         )
         header.addWidget(hint)
         header.addStretch()
@@ -400,12 +400,20 @@ class ScopesPanel(QWidget):
                 ocio = None
         sig = ""
         if ocio is not None:
-            sig = (
-                f"{getattr(ocio, 'input_colorspace', '')}|"
-                f"{getattr(ocio, 'look', '')}|"
-                f"{getattr(ocio, 'display_output', '')}|"
-                f"{getattr(ocio, 'config_path', '')}"
-            )
+            sig_fn = getattr(ocio, "cpu_processor_signature", None)
+            if callable(sig_fn):
+                try:
+                    sig = str(sig_fn())
+                except Exception:
+                    sig = ""
+            if not sig:
+                sig = (
+                    f"{getattr(ocio, 'input_colorspace', '')}|"
+                    f"{getattr(ocio, 'look', '')}|"
+                    f"{getattr(ocio, 'display_name', '')}|"
+                    f"{getattr(ocio, 'view_name', '')}|"
+                    f"{getattr(ocio, 'config_path', '')}"
+                )
         if sig != self._cpu_sig:
             try:
                 self._cpu_processor = ocio_cpu_processor(ocio)

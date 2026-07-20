@@ -661,13 +661,68 @@ class OCIOManager:
         return group
 
     def _build_transform_group(self) -> OCIO.GroupTransform:
-        """Full group for introspection/tests (CDL omitted — applied in GLSL)."""
+        """Full group for introspection/GPU shader bake (CDL omitted — applied in GLSL)."""
         group = OCIO.GroupTransform()
         for t in self._build_pre_cdl_group():
             group.appendTransform(t)
         for t in self._build_post_cdl_group():
             group.appendTransform(t)
         return group
+
+    def _make_cdl_transform(self) -> OCIO.CDLTransform | None:
+        """Build an OCIO CDLTransform for the current ASC CDL state, or None if identity."""
+        if self._cdl_is_identity():
+            return None
+        cdl = OCIO.CDLTransform()
+        cdl.setSlope(self.cdl_slope)
+        cdl.setOffset(self.cdl_offset)
+        cdl.setPower(self.cdl_power)
+        cdl.setSat(float(self.cdl_saturation))
+        try:
+            cdl.setStyle(self.cdl_style)
+        except Exception:
+            pass
+        return cdl
+
+    def _build_cpu_transform_group(self) -> OCIO.GroupTransform:
+        """CPU path matching viewer order: pre → ASC CDL → post."""
+        group = OCIO.GroupTransform()
+        for t in self._build_pre_cdl_group():
+            group.appendTransform(t)
+        cdl = self._make_cdl_transform()
+        if cdl is not None:
+            group.appendTransform(cdl)
+        for t in self._build_post_cdl_group():
+            group.appendTransform(t)
+        return group
+
+    def get_cpu_processor(self):
+        """Return a DefaultCPUProcessor for probe/scopes (includes CDL when active)."""
+        if self.config is None:
+            return None
+        try:
+            group = self._build_cpu_transform_group()
+            return self.config.getProcessor(group).getDefaultCPUProcessor()
+        except Exception:
+            return None
+
+    def cpu_processor_signature(self) -> str:
+        """Cache key for CPU processor rebuilds (includes CDL + grading)."""
+        style = getattr(self.cdl_style, "name", str(self.cdl_style))
+        config_stamp = ""
+        if self.config_path and os.path.isfile(self.config_path):
+            try:
+                st = os.stat(self.config_path)
+                config_stamp = f"{st.st_mtime_ns}:{st.st_size}"
+            except OSError:
+                config_stamp = ""
+        return (
+            f"{self.input_colorspace}|{self.look or ''}|"
+            f"{self.display_name}|{self.view_name}|{self.config_path}|{config_stamp}|"
+            f"{self.grade_exposure}|{self.grade_gamma}|{self.grade_offset}|"
+            f"{self.cdl_slope}|{self.cdl_offset}|{self.cdl_power}|"
+            f"{self.cdl_saturation}|{style}"
+        )
 
     @staticmethod
     def _extract_textures(shader_desc) -> tuple[list[dict], list[dict]]:

@@ -51,7 +51,7 @@ class _MagnifierLabel(QLabel):
             self._pix = None
             return
         patch = np.asarray(neighborhood[..., :3], dtype=np.float32)
-        # Display-referred preview (matches viewer OCIO path; CDL still GPU-only).
+        # Display-referred preview (matches viewer OCIO path including ASC CDL).
         preview = np.clip(patch, 0.0, 1.0)
         u8 = (preview * 255.0).astype(np.uint8)
         cell_w, cell_h = magnifier_cell_size(pixel_aspect_ratio, base_px=_MAG_CELL_PX)

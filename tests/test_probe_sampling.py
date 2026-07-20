@@ -4,8 +4,10 @@ import unittest
 
 import numpy as np
 
+from src.framecycler.color.ocio_manager import OCIOManager
 from src.framecycler.ui.overlay_geometry import displayed_image_rect
 from src.framecycler.ui.probe_sampling import (
+    apply_ocio_rgb,
     apply_ocio_rgb_array,
     encode_levels,
     extract_neighborhood,
@@ -139,6 +141,36 @@ class TestProbeSampling(unittest.TestCase):
             frame, 1, 1, timeline_frame=0, ocio_manager=None, radius=1, pixel_aspect_ratio=2.0
         )
         self.assertAlmostEqual(sample.pixel_aspect_ratio, 2.0)
+
+    def test_apply_ocio_rgb_includes_cdl(self):
+        ocio = OCIOManager()
+        rgb = (0.4, 0.5, 0.6)
+        identity = apply_ocio_rgb(ocio, rgb)
+        ocio.set_cdl_values(slope=(1.8, 1.0, 0.7), saturation=0.75)
+        graded = apply_ocio_rgb(ocio, rgb)
+        self.assertFalse(
+            np.allclose(np.asarray(graded), np.asarray(identity), rtol=1e-4, atol=1e-4)
+        )
+        ocio.reset_cdl_values()
+        restored = apply_ocio_rgb(ocio, rgb)
+        np.testing.assert_allclose(restored, identity, rtol=1e-5, atol=1e-5)
+
+    def test_sample_probe_display_rgb_respects_cdl(self):
+        ocio = OCIOManager()
+        frame = np.zeros((4, 4, 4), dtype=np.float32)
+        frame[1, 1] = (0.35, 0.45, 0.55, 1.0)
+        before = sample_probe(frame, 1, 1, timeline_frame=1, ocio_manager=ocio, radius=1)
+        ocio.set_cdl_values(slope=(1.5, 1.5, 1.5))
+        after = sample_probe(frame, 1, 1, timeline_frame=1, ocio_manager=ocio, radius=1)
+        self.assertEqual(after.source_rgba[:3], before.source_rgba[:3])
+        self.assertFalse(
+            np.allclose(
+                np.asarray(after.display_rgb),
+                np.asarray(before.display_rgb),
+                rtol=1e-4,
+                atol=1e-4,
+            )
+        )
 
 
 if __name__ == "__main__":

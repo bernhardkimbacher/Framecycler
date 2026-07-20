@@ -243,6 +243,47 @@ class TestOCIOManager(unittest.TestCase):
         self.assertEqual(self.ocio_mgr.cdl_slope, (1.0, 1.0, 1.0))
         self.assertEqual(self.ocio_mgr.cdl_saturation, 1.0)
 
+    def test_cpu_transform_includes_cdl_when_active(self):
+        import numpy as np
+
+        identity_cpu = self.ocio_mgr.get_cpu_processor()
+        self.assertIsNotNone(identity_cpu)
+        sample = np.array([0.4, 0.5, 0.6], dtype=np.float32)
+        identity_out = sample.copy()
+        identity_cpu.applyRGB(identity_out)
+
+        # Identity CPU path matches the no-CDL introspection group.
+        no_cdl = self.ocio_mgr.config.getProcessor(
+            self.ocio_mgr._build_transform_group()
+        ).getDefaultCPUProcessor()
+        no_cdl_out = sample.copy()
+        no_cdl.applyRGB(no_cdl_out)
+        np.testing.assert_allclose(identity_out, no_cdl_out, rtol=1e-5, atol=1e-5)
+
+        self.ocio_mgr.set_cdl_values(slope=(1.5, 1.5, 1.5), saturation=0.8)
+        self.assertIsNotNone(self.ocio_mgr._make_cdl_transform())
+        cpu_group = self.ocio_mgr._build_cpu_transform_group()
+        gpu_group = self.ocio_mgr._build_transform_group()
+        self.assertGreater(len(list(cpu_group)), len(list(gpu_group)))
+
+        graded_cpu = self.ocio_mgr.get_cpu_processor()
+        graded_out = sample.copy()
+        graded_cpu.applyRGB(graded_out)
+        self.assertFalse(np.allclose(graded_out, identity_out, rtol=1e-4, atol=1e-4))
+
+        # GPU bake path still ignores CDL (UBO-only).
+        key_a = self.ocio_mgr.get_pipeline_key()
+        self.ocio_mgr.reset_cdl_values()
+        self.assertEqual(key_a, self.ocio_mgr.get_pipeline_key())
+
+    def test_cpu_processor_signature_includes_cdl(self):
+        sig_a = self.ocio_mgr.cpu_processor_signature()
+        self.ocio_mgr.set_cdl_values(slope=(1.2, 1.0, 0.9))
+        sig_b = self.ocio_mgr.cpu_processor_signature()
+        self.assertNotEqual(sig_a, sig_b)
+        self.ocio_mgr.reset_cdl_values()
+        self.assertEqual(sig_a, self.ocio_mgr.cpu_processor_signature())
+
     def test_grading_uniform_values(self):
         self.ocio_mgr.set_grading_values(exposure=1.0, gamma=1.5, offset=-0.1)
         values = self.ocio_mgr.get_grading_uniform_values()
