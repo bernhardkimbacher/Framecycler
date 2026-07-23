@@ -28,6 +28,10 @@
 #include "audio_engine.h"
 #include "cache_manager.h"
 
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
+class QVulkanInstance;
+#endif
+
 // Structure to pass frame render slot specifications from Python/Cache
 struct FrameSlotSpec {
     int source_index = 0;
@@ -543,6 +547,10 @@ private:
     QRhiTexture* _last_bound_tex_b = nullptr;
     std::atomic<bool> _is_fallback_null_backend{false};
     bool _force_null_backend = false;
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
+    /// Owns the Vulkan instance for QRhi present; must outlive `_rhi`.
+    QVulkanInstance* _vulkan_instance = nullptr;
+#endif
     std::atomic<ViewerOutputMode> _requested_viewer_output_mode{ViewerOutputMode::Sdr};
     std::atomic<ViewerOutputMode> _actual_viewer_output_mode{ViewerOutputMode::Sdr};
     std::atomic<bool> _swap_format_dirty{false};

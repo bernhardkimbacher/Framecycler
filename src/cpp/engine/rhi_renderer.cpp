@@ -26,8 +26,9 @@
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
 #include <QtGui/rhi/qrhi_platform.h>
 #endif
-#if defined(Q_OS_LINUX)
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
 #include <QVulkanInstance>
+#include <QVersionNumber>
 #endif
 
 // Quad vertex layout
@@ -124,9 +125,35 @@ bool RhiRenderer::initialize(uintptr_t window_ptr)
         _force_null_backend = true;
     }
 
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
+    // Vulkan QRhi requires a created QVulkanInstance attached to the window
+    // before any surface/swapchain work (see QRhiVulkanInitParams docs).
+    if (!_force_null_backend && !_vulkan_instance) {
+        auto* inst = new QVulkanInstance();
+        inst->setExtensions(QRhiVulkanInitParams::preferredInstanceExtensions());
+        if (inst->supportedApiVersion() >= QVersionNumber(1, 1)) {
+            inst->setApiVersion(QVersionNumber(1, 1));
+        }
+        if (!inst->create()) {
+            qWarning() << "RhiRenderer: Failed to create QVulkanInstance;"
+                       << "falling back to Null backend.";
+            delete inst;
+            _force_null_backend = true;
+        } else {
+            _vulkan_instance = inst;
+        }
+    }
+#endif
+
     // Create the platform window on the GUI thread before the render thread
     // touches winId()/Metal layer (NSWindow must be main-thread only).
     _window->create();
+
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
+    if (_vulkan_instance) {
+        _window->setVulkanInstance(_vulkan_instance);
+    }
+#endif
 
     start_render_thread();
     return true;
@@ -239,6 +266,16 @@ void RhiRenderer::_apply_viewer_output_format_unlocked()
 void RhiRenderer::shutdown()
 {
     stop_render_thread();
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
+    // Destroy after RHI teardown (render thread) so the instance outlives QRhi.
+    if (_vulkan_instance) {
+        if (_window) {
+            _window->setVulkanInstance(nullptr);
+        }
+        delete _vulkan_instance;
+        _vulkan_instance = nullptr;
+    }
+#endif
 }
 
 void RhiRenderer::start_render_thread()
@@ -343,7 +380,13 @@ bool RhiRenderer::initialize_rhi_on_thread()
         _rhi = QRhi::create(QRhi::D3D11, &params);
 #else
         QRhiVulkanInitParams params;
-        _rhi = QRhi::create(QRhi::Vulkan, &params);
+        params.inst = _vulkan_instance;
+        params.window = _window;
+        if (!params.inst) {
+            qWarning() << "RhiRenderer: Vulkan instance missing; cannot create QRhi Vulkan backend.";
+        } else {
+            _rhi = QRhi::create(QRhi::Vulkan, &params);
+        }
 #endif
     }
 
