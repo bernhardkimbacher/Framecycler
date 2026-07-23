@@ -1,6 +1,6 @@
 {
   "name": "framecycler",
-  "version-string": "0.4.2",
+  "version-string": "0.4.3",
   "description": "Framecycler native dependencies (Windows vcpkg manifest).",
   "dependencies": [
     "openimageio",
